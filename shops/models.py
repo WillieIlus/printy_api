@@ -35,6 +35,60 @@ class Shop(models.Model):
         verbose_name=_("is active"),
         help_text=_("Whether the shop is active and visible."),
     )
+    description = models.TextField(
+        blank=True,
+        default="",
+        verbose_name=_("description"),
+        help_text=_("Business description for the shop."),
+    )
+    business_email = models.EmailField(
+        blank=True,
+        default="",
+        verbose_name=_("business email"),
+        help_text=_("Contact email for the shop."),
+    )
+    phone_number = models.CharField(
+        max_length=32,
+        blank=True,
+        default="",
+        verbose_name=_("phone number"),
+        help_text=_("Contact phone for the shop."),
+    )
+    address_line = models.CharField(
+        max_length=255,
+        blank=True,
+        default="",
+        verbose_name=_("address"),
+        help_text=_("Street address."),
+    )
+    city = models.CharField(
+        max_length=100,
+        blank=True,
+        default="",
+        verbose_name=_("city"),
+        help_text=_("City."),
+    )
+    state = models.CharField(
+        max_length=100,
+        blank=True,
+        default="",
+        verbose_name=_("state or province"),
+        help_text=_("State or province."),
+    )
+    country = models.CharField(
+        max_length=100,
+        blank=True,
+        default="",
+        verbose_name=_("country"),
+        help_text=_("Country."),
+    )
+    zip_code = models.CharField(
+        max_length=20,
+        blank=True,
+        default="",
+        verbose_name=_("postal code"),
+        help_text=_("Postal or ZIP code."),
+    )
     owner = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.CASCADE,

@@ -386,7 +386,21 @@ class ShopSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Shop
-        fields = ["id", "name", "slug", "currency", "is_active"]
+        fields = [
+            "id",
+            "name",
+            "slug",
+            "currency",
+            "is_active",
+            "description",
+            "business_email",
+            "phone_number",
+            "address_line",
+            "city",
+            "state",
+            "country",
+            "zip_code",
+        ]
 
 
 class MachineSerializer(serializers.ModelSerializer):
