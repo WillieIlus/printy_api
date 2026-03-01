@@ -71,64 +71,64 @@ urlpatterns = [
         ),
         name="quote-draft-item-detail",
     ),
-    # Seller nested: shop machines, papers, finishing-rates, materials, products
+    # Seller nested: shop machines, papers, finishing-rates, materials, products (by slug)
     path(
-        "shops/<int:shop_id>/machines/",
+        "shops/<slug:shop_slug>/machines/",
         views.ShopMachineViewSet.as_view(
             {"get": "list", "post": "create"}
         ),
         name="shop-machines",
     ),
     path(
-        "shops/<int:shop_id>/machines/<int:pk>/",
+        "shops/<slug:shop_slug>/machines/<int:pk>/",
         views.ShopMachineViewSet.as_view(
             {"get": "retrieve", "put": "update", "patch": "partial_update", "delete": "destroy"}
         ),
         name="shop-machine-detail",
     ),
     path(
-        "shops/<int:shop_id>/papers/",
+        "shops/<slug:shop_slug>/papers/",
         views.ShopPaperViewSet.as_view({"get": "list", "post": "create"}),
         name="shop-papers",
     ),
     path(
-        "shops/<int:shop_id>/papers/<int:pk>/",
+        "shops/<slug:shop_slug>/papers/<int:pk>/",
         views.ShopPaperViewSet.as_view(
             {"get": "retrieve", "put": "update", "patch": "partial_update", "delete": "destroy"}
         ),
         name="shop-paper-detail",
     ),
     path(
-        "shops/<int:shop_id>/finishing-rates/",
+        "shops/<slug:shop_slug>/finishing-rates/",
         views.ShopFinishingRateViewSet.as_view({"get": "list", "post": "create"}),
         name="shop-finishing-rates",
     ),
     path(
-        "shops/<int:shop_id>/finishing-rates/<int:pk>/",
+        "shops/<slug:shop_slug>/finishing-rates/<int:pk>/",
         views.ShopFinishingRateViewSet.as_view(
             {"get": "retrieve", "put": "update", "patch": "partial_update", "delete": "destroy"}
         ),
         name="shop-finishing-rate-detail",
     ),
     path(
-        "shops/<int:shop_id>/materials/",
+        "shops/<slug:shop_slug>/materials/",
         views.ShopMaterialViewSet.as_view({"get": "list", "post": "create"}),
         name="shop-materials",
     ),
     path(
-        "shops/<int:shop_id>/materials/<int:pk>/",
+        "shops/<slug:shop_slug>/materials/<int:pk>/",
         views.ShopMaterialViewSet.as_view(
             {"get": "retrieve", "put": "update", "patch": "partial_update", "delete": "destroy"}
         ),
         name="shop-material-detail",
     ),
     path(
-        "shops/<int:shop_id>/products/",
+        "shops/<slug:shop_slug>/products/",
         views.ShopProductViewSet.as_view({"get": "list", "post": "create"}),
         name="shop-products",
     ),
     path(
-        "shops/<int:shop_id>/products/<int:pk>/",
+        "shops/<slug:shop_slug>/products/<int:pk>/",
         views.ShopProductViewSet.as_view(
             {"get": "retrieve", "put": "update", "patch": "partial_update", "delete": "destroy"}
         ),

@@ -584,10 +584,12 @@ class QuoteDraftItemViewSet(viewsets.ModelViewSet):
 
 
 class ShopViewSet(viewsets.ModelViewSet):
-    """CRUD /api/shops/ — manage own shop."""
+    """CRUD /api/shops/ — manage own shop. Lookup by slug."""
 
     serializer_class = ShopSerializer
     permission_classes = [IsAuthenticated]
+    lookup_field = "slug"
+    lookup_url_kwarg = "slug"
 
     def get_queryset(self):
         return Shop.objects.filter(owner=self.request.user)
@@ -597,10 +599,11 @@ class ShopViewSet(viewsets.ModelViewSet):
 
 
 class ShopScopedMixin:
-    """Mixin to ensure shop belongs to current user."""
+    """Mixin to ensure shop belongs to current user. Uses shop_slug from URL."""
 
     def _get_shop(self):
-        shop = Shop.objects.filter(pk=self.kwargs["shop_id"]).first()
+        slug = self.kwargs.get("shop_slug")
+        shop = Shop.objects.filter(slug=slug).first() if slug else None
         if not shop or shop.owner_id != self.request.user.id:
             from rest_framework.exceptions import PermissionDenied, NotFound
             if not shop:
@@ -624,12 +627,12 @@ class ShopMachineViewSet(ShopScopedMixin, viewsets.ModelViewSet):
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
-        shop_id = self.kwargs["shop_id"]
-        return Machine.objects.filter(shop_id=shop_id)
+        shop = self._get_shop()
+        return Machine.objects.filter(shop=shop)
 
     def get_serializer_context(self):
         ctx = super().get_serializer_context()
-        ctx["shop"] = Shop.objects.get(pk=self.kwargs["shop_id"])
+        ctx["shop"] = self._get_shop()
         return ctx
 
     def perform_create(self, serializer):
@@ -650,17 +653,18 @@ class ShopMachineViewSet(ShopScopedMixin, viewsets.ModelViewSet):
 
 
 class ShopPaperViewSet(ShopScopedMixin, viewsets.ModelViewSet):
-    """CRUD /api/shops/{shop_id}/papers/"""
+    """CRUD /api/shops/{shop_slug}/papers/"""
 
     serializer_class = PaperSerializer
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
-        return Paper.objects.filter(shop_id=self.kwargs["shop_id"])
+        shop = self._get_shop()
+        return Paper.objects.filter(shop=shop)
 
     def get_serializer_context(self):
         ctx = super().get_serializer_context()
-        ctx["shop"] = Shop.objects.get(pk=self.kwargs["shop_id"])
+        ctx["shop"] = self._get_shop()
         return ctx
 
     def perform_create(self, serializer):
@@ -727,17 +731,18 @@ class MachinePrintingRateViewSet(viewsets.ModelViewSet):
 
 
 class ShopFinishingRateViewSet(ShopScopedMixin, viewsets.ModelViewSet):
-    """CRUD /api/shops/{shop_id}/finishing-rates/"""
+    """CRUD /api/shops/{shop_slug}/finishing-rates/"""
 
     serializer_class = FinishingRateSerializer
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
-        return FinishingRate.objects.filter(shop_id=self.kwargs["shop_id"])
+        shop = self._get_shop()
+        return FinishingRate.objects.filter(shop=shop)
 
     def get_serializer_context(self):
         ctx = super().get_serializer_context()
-        ctx["shop"] = Shop.objects.get(pk=self.kwargs["shop_id"])
+        ctx["shop"] = self._get_shop()
         return ctx
 
     def perform_create(self, serializer):
@@ -757,17 +762,18 @@ class ShopFinishingRateViewSet(ShopScopedMixin, viewsets.ModelViewSet):
 
 
 class ShopMaterialViewSet(ShopScopedMixin, viewsets.ModelViewSet):
-    """CRUD /api/shops/{shop_id}/materials/"""
+    """CRUD /api/shops/{shop_slug}/materials/"""
 
     serializer_class = MaterialSerializer
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
-        return Material.objects.filter(shop_id=self.kwargs["shop_id"])
+        shop = self._get_shop()
+        return Material.objects.filter(shop=shop)
 
     def get_serializer_context(self):
         ctx = super().get_serializer_context()
-        ctx["shop"] = Shop.objects.get(pk=self.kwargs["shop_id"])
+        ctx["shop"] = self._get_shop()
         return ctx
 
     def perform_create(self, serializer):
@@ -787,23 +793,24 @@ class ShopMaterialViewSet(ShopScopedMixin, viewsets.ModelViewSet):
 
 
 class ShopProductViewSet(ShopScopedMixin, viewsets.ModelViewSet):
-    """CRUD /api/shops/{shop_id}/products/"""
+    """CRUD /api/shops/{shop_slug}/products/"""
 
     serializer_class = ProductSerializer
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
-        return Product.objects.filter(shop_id=self.kwargs["shop_id"]).prefetch_related(
+        shop = self._get_shop()
+        return Product.objects.filter(shop=shop).prefetch_related(
             "finishing_options__finishing_rate"
         )
 
     def get_serializer_context(self):
         ctx = super().get_serializer_context()
-        ctx["shop"] = Shop.objects.get(pk=self.kwargs["shop_id"])
+        ctx["shop"] = self._get_shop()
         return ctx
 
     def perform_create(self, serializer):
-        serializer.save()
+        serializer.save(shop=self._get_shop())
 
     def update(self, request, *args, **kwargs):
         self._get_shop()
