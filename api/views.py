@@ -30,6 +30,7 @@ from .serializers import (
     PaperSerializer,
     PrintingRateSerializer,
     ProductSerializer,
+    ProductWriteSerializer,
     ProfileSerializer,
     PublicShopListSerializer,
     QuoteItemReadSerializer,
@@ -803,8 +804,12 @@ class ShopMaterialViewSet(ShopScopedMixin, viewsets.ModelViewSet):
 class ShopProductViewSet(ShopScopedMixin, viewsets.ModelViewSet):
     """CRUD /api/shops/{shop_slug}/products/"""
 
-    serializer_class = ProductSerializer
     permission_classes = [IsAuthenticated]
+
+    def get_serializer_class(self):
+        if self.action in ("create", "update", "partial_update"):
+            return ProductWriteSerializer
+        return ProductSerializer
 
     def get_queryset(self):
         shop = self._get_shop()

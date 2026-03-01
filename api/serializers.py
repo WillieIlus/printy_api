@@ -521,8 +521,61 @@ class ProductFinishingOptionWriteSerializer(serializers.ModelSerializer):
         return attrs
 
 
+class ProductWriteSerializer(serializers.ModelSerializer):
+    """Write-only serializer for create/update. No price computation to avoid 500 on incomplete shop setup."""
+
+    finishing_options = ProductFinishingOptionWriteSerializer(many=True, required=False)
+
+    class Meta:
+        model = Product
+        fields = [
+            "id",
+            "name",
+            "description",
+            "category",
+            "pricing_mode",
+            "default_finished_width_mm",
+            "default_finished_height_mm",
+            "default_bleed_mm",
+            "default_sides",
+            "min_quantity",
+            "min_width_mm",
+            "min_height_mm",
+            "is_active",
+            "finishing_options",
+        ]
+        extra_kwargs = {
+            "id": {"read_only": True},
+            "description": {"required": False, "allow_blank": True},
+            "category": {"required": False, "allow_blank": True},
+            "default_bleed_mm": {"required": False},
+            "min_quantity": {"required": False},
+            "min_width_mm": {"required": False},
+            "min_height_mm": {"required": False},
+        }
+
+    def create(self, validated_data):
+        finishings_data = validated_data.pop("finishing_options", [])
+        shop = validated_data.pop("shop", None) or self.context.get("shop")
+        product = Product.objects.create(shop=shop, **validated_data)
+        for fd in finishings_data:
+            ProductFinishingOption.objects.create(product=product, **fd)
+        return product
+
+    def update(self, instance, validated_data):
+        finishings_data = validated_data.pop("finishing_options", None)
+        for attr, value in validated_data.items():
+            setattr(instance, attr, value)
+        instance.save()
+        if finishings_data is not None:
+            instance.finishing_options.all().delete()
+            for fd in finishings_data:
+                ProductFinishingOption.objects.create(product=instance, **fd)
+        return instance
+
+
 class ProductSerializer(serializers.ModelSerializer):
-    """CRUD for shop products."""
+    """Full product serializer with price hints (for list/retrieve)."""
 
     finishing_options = ProductFinishingOptionWriteSerializer(many=True, required=False)
     price_hint = serializers.SerializerMethodField()
@@ -585,28 +638,8 @@ class ProductSerializer(serializers.ModelSerializer):
     def validate(self, attrs):
         shop = self.context.get("shop")
         if shop:
-            # Product belongs to shop via context
             pass
         return attrs
-
-    def create(self, validated_data):
-        finishings_data = validated_data.pop("finishing_options", [])
-        shop = validated_data.pop("shop", None) or self.context.get("shop")
-        product = Product.objects.create(shop=shop, **validated_data)
-        for fd in finishings_data:
-            ProductFinishingOption.objects.create(product=product, **fd)
-        return product
-
-    def update(self, instance, validated_data):
-        finishings_data = validated_data.pop("finishing_options", None)
-        for attr, value in validated_data.items():
-            setattr(instance, attr, value)
-        instance.save()
-        if finishings_data is not None:
-            instance.finishing_options.all().delete()
-            for fd in finishings_data:
-                ProductFinishingOption.objects.create(product=instance, **fd)
-        return instance
 
 
 # ---------------------------------------------------------------------------
