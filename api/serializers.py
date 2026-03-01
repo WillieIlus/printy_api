@@ -3,9 +3,12 @@ API serializers with strong validation of shop consistency.
 All nested resources (products, papers, machines, materials, finishing_rates)
 must belong to the same shop.
 """
+import logging
 from decimal import Decimal
 
 from rest_framework import serializers
+
+logger = logging.getLogger(__name__)
 
 from accounts.models import User
 from catalog.choices import PricingMode
@@ -546,14 +549,38 @@ class ProductSerializer(serializers.ModelSerializer):
         ]
 
     def get_price_hint(self, obj):
-        from catalog.services import product_price_hint
+        try:
+            from catalog.services import product_price_hint
 
-        return product_price_hint(obj)
+            return product_price_hint(obj)
+        except Exception as e:
+            logger.warning("product_price_hint failed for product %s: %s", obj.id if obj.pk else "new", e, exc_info=True)
+            return {
+                "can_calculate": False,
+                "min_price": None,
+                "max_price": None,
+                "price_display": "Price on request",
+                "pricing_mode_label": getattr(obj, "pricing_mode", ""),
+                "pricing_mode_explanation": "Price depends on your choices (paper, quantity, finishing).",
+                "reason": "Unable to compute price (shop setup may be incomplete).",
+            }
 
     def get_price_range_est(self, obj):
-        from catalog.services import compute_product_price_range_est
+        try:
+            from catalog.services import compute_product_price_range_est
 
-        return compute_product_price_range_est(obj)
+            return compute_product_price_range_est(obj)
+        except Exception as e:
+            logger.warning("compute_product_price_range_est failed for product %s: %s", obj.id if obj.pk else "new", e, exc_info=True)
+            return {
+                "can_calculate": False,
+                "price_display": "Price on request",
+                "pricing_mode_label": getattr(obj, "pricing_mode", ""),
+                "pricing_mode_explanation": "Price depends on your choices (paper, quantity, finishing).",
+                "lowest": {"total": None, "unit_price": None, "paper_id": None, "paper_label": None, "printing_rate_id": None, "assumptions": {}, "summary": None},
+                "highest": {"total": None, "unit_price": None, "paper_id": None, "paper_label": None, "printing_rate_id": None, "assumptions": {}, "summary": None},
+                "reason": "Unable to compute price range (shop setup may be incomplete).",
+            }
 
     def validate(self, attrs):
         shop = self.context.get("shop")
