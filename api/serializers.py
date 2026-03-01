@@ -591,8 +591,35 @@ class ProductWriteSerializer(serializers.ModelSerializer):
         return instance
 
 
+class ProductListSerializer(serializers.ModelSerializer):
+    """Lightweight serializer for list. No price computation to avoid 500 on incomplete shop setup."""
+
+    finishing_options = ProductFinishingOptionWriteSerializer(many=True, required=False, read_only=True)
+
+    class Meta:
+        model = Product
+        fields = [
+            "id",
+            "name",
+            "description",
+            "category",
+            "pricing_mode",
+            "default_finished_width_mm",
+            "default_finished_height_mm",
+            "default_bleed_mm",
+            "default_sides",
+            "min_quantity",
+            "min_width_mm",
+            "min_height_mm",
+            "min_gsm",
+            "max_gsm",
+            "is_active",
+            "finishing_options",
+        ]
+
+
 class ProductSerializer(serializers.ModelSerializer):
-    """Full product serializer with price hints (for list/retrieve)."""
+    """Full product serializer with price hints (for retrieve)."""
 
     finishing_options = ProductFinishingOptionWriteSerializer(many=True, required=False)
     price_hint = serializers.SerializerMethodField()

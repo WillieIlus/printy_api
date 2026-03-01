@@ -29,6 +29,7 @@ from .serializers import (
     MaterialSerializer,
     PaperSerializer,
     PrintingRateSerializer,
+    ProductListSerializer,
     ProductSerializer,
     ProductWriteSerializer,
     ProfileSerializer,
@@ -809,6 +810,8 @@ class ShopProductViewSet(ShopScopedMixin, viewsets.ModelViewSet):
     def get_serializer_class(self):
         if self.action in ("create", "update", "partial_update"):
             return ProductWriteSerializer
+        if self.action == "list":
+            return ProductListSerializer
         return ProductSerializer
 
     def get_queryset(self):
