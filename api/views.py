@@ -599,13 +599,21 @@ class ShopViewSet(viewsets.ModelViewSet):
 
 
 class ShopScopedMixin:
-    """Mixin to ensure shop belongs to current user. Uses shop_slug from URL."""
+    """Mixin to ensure shop belongs to current user. Uses shop_slug or shop_id from URL."""
 
     def _get_shop(self):
-        slug = self.kwargs.get("shop_slug")
-        shop = Shop.objects.filter(slug=slug).first() if slug else None
+        from rest_framework.exceptions import PermissionDenied, NotFound
+
+        shop = None
+        shop_id = self.kwargs.get("shop_id")
+        shop_slug = self.kwargs.get("shop_slug")
+
+        if shop_id is not None:
+            shop = Shop.objects.filter(pk=shop_id).first()
+        elif shop_slug:
+            shop = Shop.objects.filter(slug=shop_slug).first()
+
         if not shop or shop.owner_id != self.request.user.id:
-            from rest_framework.exceptions import PermissionDenied, NotFound
             if not shop:
                 raise NotFound("Shop not found.")
             raise PermissionDenied("Not your shop.")
