@@ -593,10 +593,20 @@ class ProductWriteSerializer(serializers.ModelSerializer):
         return instance
 
 
+class ProductFinishingOptionListSerializer(serializers.ModelSerializer):
+    """Read-only serializer for list. Uses finishing_rate_id to avoid following FK (prevents 500 on orphaned refs)."""
+
+    finishing_rate = serializers.IntegerField(source="finishing_rate_id", read_only=True)
+
+    class Meta:
+        model = ProductFinishingOption
+        fields = ["finishing_rate", "is_default", "price_adjustment"]
+
+
 class ProductListSerializer(serializers.ModelSerializer):
     """Lightweight serializer for list. No price computation to avoid 500 on incomplete shop setup."""
 
-    finishing_options = ProductFinishingOptionWriteSerializer(many=True, required=False, read_only=True)
+    finishing_options = ProductFinishingOptionListSerializer(many=True, required=False, read_only=True)
 
     class Meta:
         model = Product
