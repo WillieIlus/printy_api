@@ -84,6 +84,14 @@ class ShopDetailView(generics.RetrieveAPIView):
     lookup_url_kwarg = "slug"
 
 
+class ShopDetailByIdView(generics.RetrieveAPIView):
+    """GET /api/shops/{id}/ - retrieve shop by numeric ID."""
+    queryset = Shop.objects.all()
+    serializer_class = ShopDetailSerializer
+    permission_classes = [AllowAny]
+    lookup_url_kwarg = "shop_id"
+
+
 class ShopCreateView(generics.CreateAPIView):
     queryset = Shop.objects.all()
     serializer_class = ShopListSerializer
@@ -93,13 +101,21 @@ class ShopCreateView(generics.CreateAPIView):
         serializer.save(owner=self.request.user)
 
 
+def _get_shop_filter(kwargs):
+    """Resolve shop filter from kwargs: either shop_id or shop_slug."""
+    if "shop_id" in kwargs:
+        return {"shop_id": kwargs["shop_id"]}
+    return {"shop__slug": kwargs["shop_slug"]}
+
+
 class ProductListView(generics.ListAPIView):
     serializer_class = ProductListSerializer
     permission_classes = [AllowAny]
 
     def get_queryset(self):
-        slug = self.kwargs.get("shop_slug")
-        return Product.objects.filter(shop__slug=slug, is_active=True)
+        return Product.objects.filter(
+            **_get_shop_filter(self.kwargs), is_active=True
+        )
 
 
 class ProductDetailView(generics.RetrieveAPIView):
@@ -107,8 +123,9 @@ class ProductDetailView(generics.RetrieveAPIView):
     permission_classes = [AllowAny]
 
     def get_queryset(self):
-        slug = self.kwargs.get("shop_slug")
-        return Product.objects.filter(shop__slug=slug, is_active=True)
+        return Product.objects.filter(
+            **_get_shop_filter(self.kwargs), is_active=True
+        )
 
 
 class ProductCreateView(generics.CreateAPIView):
@@ -116,6 +133,8 @@ class ProductCreateView(generics.CreateAPIView):
     permission_classes = [IsAuthenticated]
 
     def get_shop(self):
+        if "shop_id" in self.kwargs:
+            return get_object_or_404(Shop, pk=self.kwargs["shop_id"])
         return get_object_or_404(Shop, slug=self.kwargs["shop_slug"])
 
     def check_permissions(self, request):
@@ -133,6 +152,8 @@ class PaperCreateView(generics.CreateAPIView):
     permission_classes = [IsAuthenticated]
 
     def get_shop(self):
+        if "shop_id" in self.kwargs:
+            return get_object_or_404(Shop, pk=self.kwargs["shop_id"])
         return get_object_or_404(Shop, slug=self.kwargs["shop_slug"])
 
     def check_permissions(self, request):

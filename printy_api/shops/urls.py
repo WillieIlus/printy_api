@@ -20,6 +20,32 @@ urlpatterns = [
         name="shop-detail",
     ),
     path(
+        "shops/<int:shop_id>/",
+        views.ShopDetailByIdView.as_view(),
+        name="shop-detail-by-id",
+    ),
+    # Products: support both shop_id (e.g. /shops/1/products/) and shop_slug (e.g. /shops/my-shop/products/)
+    path(
+        "shops/<int:shop_id>/products/",
+        views.ProductListView.as_view(),
+        name="product-list-by-id",
+    ),
+    path(
+        "shops/<int:shop_id>/products/<int:pk>/",
+        views.ProductDetailView.as_view(),
+        name="product-detail-by-id",
+    ),
+    path(
+        "shops/<int:shop_id>/products/create/",
+        views.ProductCreateView.as_view(),
+        name="product-create-by-id",
+    ),
+    path(
+        "shops/<int:shop_id>/papers/create/",
+        views.PaperCreateView.as_view(),
+        name="paper-create-by-id",
+    ),
+    path(
         "shops/<slug:shop_slug>/products/",
         views.ProductListView.as_view(),
         name="product-list",
