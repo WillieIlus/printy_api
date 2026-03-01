@@ -34,6 +34,7 @@ class PublicShopListSerializer(serializers.ModelSerializer):
     class Meta:
         model = Shop
         fields = ["id", "name", "slug", "currency"]
+        read_only_fields = ["slug"]
 
 
 class FavoriteShopSerializer(serializers.ModelSerializer):
@@ -404,6 +405,7 @@ class ShopSerializer(serializers.ModelSerializer):
             "country",
             "zip_code",
         ]
+        read_only_fields = ["slug"]
 
 
 class MachineSerializer(serializers.ModelSerializer):

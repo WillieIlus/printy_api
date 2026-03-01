@@ -6,9 +6,13 @@ from django.db import models
 from django.conf import settings
 from django.utils.translation import gettext_lazy as _
 
+from common.slug import AutoSlugMixin
 
-class Shop(models.Model):
+
+class Shop(AutoSlugMixin, models.Model):
     """Print shop - owner is the seller."""
+
+    slug_source_field = "name"
 
     name = models.CharField(
         max_length=255,
