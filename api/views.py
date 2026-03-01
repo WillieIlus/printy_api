@@ -592,6 +592,9 @@ class ShopViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         return Shop.objects.filter(owner=self.request.user)
 
+    def perform_create(self, serializer):
+        serializer.save(owner=self.request.user)
+
 
 class ShopScopedMixin:
     """Mixin to ensure shop belongs to current user."""
