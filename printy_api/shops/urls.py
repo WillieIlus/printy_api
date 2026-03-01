@@ -14,36 +14,11 @@ urlpatterns = [
     path("sheet-sizes/", views.SheetSizeListView.as_view(), name="sheet-size-list"),
     path("shops/", views.ShopListView.as_view(), name="shop-list"),
     path("shops/create/", views.ShopCreateView.as_view(), name="shop-create"),
+    # Slug first: canonical shop lookup by slug (e.g. /shops/acme-print/products/)
     path(
         "shops/<slug:slug>/",
         views.ShopDetailView.as_view(),
         name="shop-detail",
-    ),
-    path(
-        "shops/<int:shop_id>/",
-        views.ShopDetailByIdView.as_view(),
-        name="shop-detail-by-id",
-    ),
-    # Products: support both shop_id (e.g. /shops/1/products/) and shop_slug (e.g. /shops/my-shop/products/)
-    path(
-        "shops/<int:shop_id>/products/",
-        views.ProductListView.as_view(),
-        name="product-list-by-id",
-    ),
-    path(
-        "shops/<int:shop_id>/products/<int:pk>/",
-        views.ProductDetailView.as_view(),
-        name="product-detail-by-id",
-    ),
-    path(
-        "shops/<int:shop_id>/products/create/",
-        views.ProductCreateView.as_view(),
-        name="product-create-by-id",
-    ),
-    path(
-        "shops/<int:shop_id>/papers/create/",
-        views.PaperCreateView.as_view(),
-        name="paper-create-by-id",
     ),
     path(
         "shops/<slug:shop_slug>/products/",
@@ -64,6 +39,32 @@ urlpatterns = [
         "shops/<slug:shop_slug>/papers/create/",
         views.PaperCreateView.as_view(),
         name="paper-create",
+    ),
+    # Fallback: shop by numeric ID (e.g. /shops/1/products/) when slug is numeric
+    path(
+        "shops/<int:shop_id>/",
+        views.ShopDetailByIdView.as_view(),
+        name="shop-detail-by-id",
+    ),
+    path(
+        "shops/<int:shop_id>/products/",
+        views.ProductListView.as_view(),
+        name="product-list-by-id",
+    ),
+    path(
+        "shops/<int:shop_id>/products/<int:pk>/",
+        views.ProductDetailView.as_view(),
+        name="product-detail-by-id",
+    ),
+    path(
+        "shops/<int:shop_id>/products/create/",
+        views.ProductCreateView.as_view(),
+        name="product-create-by-id",
+    ),
+    path(
+        "shops/<int:shop_id>/papers/create/",
+        views.PaperCreateView.as_view(),
+        name="paper-create-by-id",
     ),
     path(
         "quotes/",
