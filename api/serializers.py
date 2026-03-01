@@ -541,6 +541,8 @@ class ProductWriteSerializer(serializers.ModelSerializer):
             "min_quantity",
             "min_width_mm",
             "min_height_mm",
+            "min_gsm",
+            "max_gsm",
             "is_active",
             "finishing_options",
         ]
@@ -554,6 +556,8 @@ class ProductWriteSerializer(serializers.ModelSerializer):
             "min_quantity": {"required": False, "min_value": 1},
             "min_width_mm": {"required": False},
             "min_height_mm": {"required": False},
+            "min_gsm": {"required": False},
+            "max_gsm": {"required": False},
         }
 
     def create(self, validated_data):
@@ -608,6 +612,8 @@ class ProductSerializer(serializers.ModelSerializer):
             "min_quantity",
             "min_width_mm",
             "min_height_mm",
+            "min_gsm",
+            "max_gsm",
             "is_active",
             "finishing_options",
             "price_hint",
