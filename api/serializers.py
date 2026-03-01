@@ -546,10 +546,12 @@ class ProductWriteSerializer(serializers.ModelSerializer):
         ]
         extra_kwargs = {
             "id": {"read_only": True},
+            "name": {"required": True, "allow_blank": False},
             "description": {"required": False, "allow_blank": True},
             "category": {"required": False, "allow_blank": True},
             "default_bleed_mm": {"required": False},
-            "min_quantity": {"required": False},
+            "default_sides": {"required": False},
+            "min_quantity": {"required": False, "min_value": 1},
             "min_width_mm": {"required": False},
             "min_height_mm": {"required": False},
         }
@@ -557,6 +559,17 @@ class ProductWriteSerializer(serializers.ModelSerializer):
     def create(self, validated_data):
         finishings_data = validated_data.pop("finishing_options", [])
         shop = validated_data.pop("shop", None) or self.context.get("shop")
+        # Ensure required defaults for model
+        validated_data.setdefault("description", "")
+        validated_data.setdefault("category", "")
+        validated_data.setdefault("min_quantity", 1)
+        validated_data.setdefault("default_bleed_mm", 3)
+        validated_data.setdefault("default_sides", "SIMPLEX")
+        validated_data.setdefault("default_finished_width_mm", 90)
+        validated_data.setdefault("default_finished_height_mm", 54)
+        # Ensure min_quantity is at least 1
+        if validated_data.get("min_quantity", 1) < 1:
+            validated_data["min_quantity"] = 1
         product = Product.objects.create(shop=shop, **validated_data)
         for fd in finishings_data:
             ProductFinishingOption.objects.create(product=product, **fd)
