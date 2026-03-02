@@ -1,6 +1,13 @@
 from django.contrib import admin
 
-from .models import FinishingRate, Material, PrintingRate, ServiceRate, ServiceRateTier
+from .models import FinishingCategory, FinishingRate, Material, PrintingRate, ServiceRate, ServiceRateTier
+
+
+@admin.register(FinishingCategory)
+class FinishingCategoryAdmin(admin.ModelAdmin):
+    list_display = ["name", "slug", "description"]
+    search_fields = ["name"]
+    prepopulated_fields = {"slug": ("name",)}
 
 
 @admin.register(PrintingRate)
@@ -21,16 +28,18 @@ class FinishingRateAdmin(admin.ModelAdmin):
     list_display = [
         "name",
         "shop",
+        "category",
         "charge_unit",
         "price",
         "double_side_price",
         "setup_fee",
         "is_active",
     ]
-    list_filter = ["charge_unit", "is_active"]
+    list_filter = ["charge_unit", "is_active", "category"]
     search_fields = ["name"]
+    autocomplete_fields = ["category"]
     fieldsets = (
-        (None, {"fields": ("shop", "name", "charge_unit", "is_active")}),
+        (None, {"fields": ("shop", "name", "category", "charge_unit", "is_active")}),
         (
             "Pricing",
             {

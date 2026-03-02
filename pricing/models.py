@@ -1,4 +1,5 @@
 from django.db import models
+from django.utils.text import slugify
 from django.utils.translation import gettext_lazy as _
 
 from common.models import TimeStampedModel
@@ -7,6 +8,42 @@ from inventory.models import Machine
 from shops.models import Shop
 
 from .choices import ChargeUnit, ColorMode, ServiceCode, ServicePricingType, Sides
+
+
+class FinishingCategory(TimeStampedModel):
+    """Category for finishing services (e.g. Lamination, Binding, Folding)."""
+
+    name = models.CharField(
+        max_length=255,
+        unique=True,
+        verbose_name=_("name"),
+        help_text=_("Category name, e.g. Lamination, Binding."),
+    )
+    slug = models.SlugField(
+        max_length=255,
+        unique=True,
+        verbose_name=_("slug"),
+        help_text=_("URL-friendly identifier."),
+    )
+    description = models.TextField(
+        blank=True,
+        default="",
+        verbose_name=_("description"),
+        help_text=_("Optional description of this category."),
+    )
+
+    class Meta:
+        ordering = ["name"]
+        verbose_name = _("finishing category")
+        verbose_name_plural = _("finishing categories")
+
+    def __str__(self):
+        return self.name
+
+    def save(self, *args, **kwargs):
+        if not self.slug:
+            self.slug = slugify(self.name)
+        super().save(*args, **kwargs)
 
 
 class PrintingRate(TimeStampedModel):
@@ -98,6 +135,15 @@ class FinishingRate(TimeStampedModel):
         related_name="finishing_rates",
         verbose_name=_("shop"),
         help_text=_("Shop that owns this finishing rate."),
+    )
+    category = models.ForeignKey(
+        FinishingCategory,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="finishing_rates",
+        verbose_name=_("category"),
+        help_text=_("Finishing category (e.g. Lamination, Binding)."),
     )
     name = models.CharField(
         max_length=255,

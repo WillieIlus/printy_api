@@ -20,8 +20,12 @@ quote_router.register(r"quote-drafts", views.QuoteDraftViewSet, basename="quote-
 seller_router = DefaultRouter()
 seller_router.register(r"shops", views.ShopViewSet, basename="shop")
 
+finishing_category_router = DefaultRouter()
+finishing_category_router.register(r"finishing-categories", views.FinishingCategoryViewSet, basename="finishing-category")
+
 urlpatterns = [
     path("", include(public_router.urls)),
+    path("", include(finishing_category_router.urls)),
     path("public/products/", views.PublicAllProductsView.as_view(), name="public-all-products"),
     path("", include(quote_router.urls)),
     path("", include(seller_router.urls)),
@@ -196,6 +200,19 @@ urlpatterns = [
             {"get": "retrieve", "put": "update", "patch": "partial_update", "delete": "destroy"}
         ),
         name="shop-product-detail",
+    ),
+    # Product images (shop-scoped)
+    path(
+        "shops/<slug:shop_slug>/products/<int:product_pk>/images/",
+        views.ShopProductImageViewSet.as_view({"get": "list", "post": "create"}),
+        name="shop-product-images",
+    ),
+    path(
+        "shops/<slug:shop_slug>/products/<int:product_pk>/images/<int:pk>/",
+        views.ShopProductImageViewSet.as_view(
+            {"get": "retrieve", "delete": "destroy", "patch": "partial_update"}
+        ),
+        name="shop-product-image-detail",
     ),
     # Printing rates (machine-scoped)
     path(

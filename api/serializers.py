@@ -15,7 +15,7 @@ from catalog.choices import PricingMode
 from catalog.models import Product, ProductFinishingOption, ProductImage
 from inventory.models import Machine, Paper
 from pricing.choices import ColorMode, Sides
-from pricing.models import FinishingRate, Material, PrintingRate
+from pricing.models import FinishingCategory, FinishingRate, Material, PrintingRate
 from quotes.choices import QuoteStatus
 from quotes.models import QuoteItem, QuoteItemFinishing, QuoteRequest
 from shops.models import FavoriteShop, Shop, ShopRating
@@ -474,16 +474,30 @@ class PrintingRateSerializer(serializers.ModelSerializer):
         return attrs
 
 
+class FinishingCategorySerializer(serializers.ModelSerializer):
+    """Read/write for finishing categories."""
+
+    class Meta:
+        model = FinishingCategory
+        fields = ["id", "name", "slug", "description"]
+        read_only_fields = ["slug"]
+
+
 class FinishingRateSerializer(serializers.ModelSerializer):
     """CRUD for shop finishing rates."""
+
+    category_detail = FinishingCategorySerializer(source="category", read_only=True)
 
     class Meta:
         model = FinishingRate
         fields = [
             "id",
             "name",
+            "category",
+            "category_detail",
             "charge_unit",
             "price",
+            "double_side_price",
             "setup_fee",
             "min_qty",
             "is_active",
@@ -503,6 +517,19 @@ class MaterialSerializer(serializers.ModelSerializer):
             "selling_price",
             "is_active",
         ]
+
+
+class ProductImageUploadSerializer(serializers.ModelSerializer):
+    """Upload a product image (multipart/form-data)."""
+
+    class Meta:
+        model = ProductImage
+        fields = ["id", "image", "is_primary", "display_order"]
+        extra_kwargs = {
+            "image": {"required": True},
+            "is_primary": {"required": False},
+            "display_order": {"required": False},
+        }
 
 
 class ProductFinishingOptionWriteSerializer(serializers.ModelSerializer):

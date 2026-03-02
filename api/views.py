@@ -10,7 +10,7 @@ from rest_framework.views import APIView
 
 from catalog.models import Product
 from inventory.models import Machine, Paper
-from pricing.models import FinishingRate, Material, PrintingRate
+from pricing.models import FinishingCategory, FinishingRate, Material, PrintingRate
 from django.db.models import Avg, Count
 from quotes.choices import QuoteStatus
 from quotes.models import QuoteItem, QuoteRequest
@@ -19,16 +19,20 @@ from quotes.services import build_preview_price_response, calculate_quote_item
 from shops.models import FavoriteShop, Shop, ShopRating
 
 from .permissions import IsQuoteRequestBuyer, IsQuoteRequestSeller, IsShopOwner, PublicReadOnly
+from catalog.models import ProductImage
 from .serializers import (
     CatalogProductSerializer,
     CatalogProductWithShopSerializer,
     FavoriteShopCreateSerializer,
     FavoriteShopSerializer,
+    FinishingCategorySerializer,
     FinishingRateSerializer,
     MachineSerializer,
     MaterialSerializer,
     PaperSerializer,
     PrintingRateSerializer,
+    ProductImageSerializer,
+    ProductImageUploadSerializer,
     ProductListSerializer,
     ProductSerializer,
     ProductWriteSerializer,
@@ -581,6 +585,20 @@ class QuoteDraftItemViewSet(viewsets.ModelViewSet):
 
 
 # ---------------------------------------------------------------------------
+# Finishing categories (global, read-only for authenticated users)
+# ---------------------------------------------------------------------------
+
+
+class FinishingCategoryViewSet(viewsets.ModelViewSet):
+    """CRUD /api/finishing-categories/ — manage finishing categories."""
+
+    serializer_class = FinishingCategorySerializer
+    permission_classes = [IsAuthenticated]
+    queryset = FinishingCategory.objects.all()
+    lookup_field = "slug"
+
+
+# ---------------------------------------------------------------------------
 # Seller — shop-scoped resources
 # ---------------------------------------------------------------------------
 
@@ -741,14 +759,18 @@ class MachinePrintingRateViewSet(viewsets.ModelViewSet):
 
 
 class ShopFinishingRateViewSet(ShopScopedMixin, viewsets.ModelViewSet):
-    """CRUD /api/shops/{shop_slug}/finishing-rates/"""
+    """CRUD /api/shops/{shop_slug}/finishing-rates/?category=<slug>"""
 
     serializer_class = FinishingRateSerializer
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
         shop = self._get_shop()
-        return FinishingRate.objects.filter(shop=shop)
+        qs = FinishingRate.objects.filter(shop=shop).select_related("category")
+        category_slug = self.request.query_params.get("category")
+        if category_slug:
+            qs = qs.filter(category__slug=category_slug)
+        return qs
 
     def get_serializer_context(self):
         ctx = super().get_serializer_context()
@@ -839,3 +861,40 @@ class ShopProductViewSet(ShopScopedMixin, viewsets.ModelViewSet):
     def destroy(self, request, *args, **kwargs):
         self._get_shop()
         return super().destroy(request, *args, **kwargs)
+
+
+class ShopProductImageViewSet(viewsets.ModelViewSet):
+    """CRUD /api/shops/{shop_slug}/products/{product_pk}/images/"""
+
+    permission_classes = [IsAuthenticated]
+
+    def _get_shop(self):
+        from rest_framework.exceptions import PermissionDenied, NotFound
+        shop_slug = self.kwargs.get("shop_slug")
+        shop = Shop.objects.filter(slug=shop_slug).first()
+        if not shop or shop.owner_id != self.request.user.id:
+            if not shop:
+                raise NotFound("Shop not found.")
+            raise PermissionDenied("Not your shop.")
+        return shop
+
+    def _get_product(self):
+        from rest_framework.exceptions import NotFound
+        shop = self._get_shop()
+        product = Product.objects.filter(pk=self.kwargs["product_pk"], shop=shop).first()
+        if not product:
+            raise NotFound("Product not found.")
+        return product
+
+    def get_queryset(self):
+        product = self._get_product()
+        return ProductImage.objects.filter(product=product)
+
+    def get_serializer_class(self):
+        if self.action in ("create",):
+            return ProductImageUploadSerializer
+        return ProductImageSerializer
+
+    def perform_create(self, serializer):
+        product = self._get_product()
+        serializer.save(product=product)
