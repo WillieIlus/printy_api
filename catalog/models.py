@@ -76,7 +76,7 @@ class Product(TimeStampedModel):
         help_text=_("Default simplex or duplex."),
     )
     min_quantity = models.PositiveIntegerField(
-        default=1,
+        default=100,
         verbose_name=_("min quantity"),
         help_text=_("Minimum order quantity for price range calculation."),
     )

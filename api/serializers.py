@@ -112,7 +112,7 @@ class ProductImageSerializer(serializers.ModelSerializer):
 
 
 class CatalogProductSerializer(serializers.ModelSerializer):
-    """Product with allowed finishing options and price hint for public catalog."""
+    """Product with allowed finishing options, price hint, and gallery breakdown for public catalog."""
 
     finishing_options = FinishingOptionSerializer(many=True, read_only=True)
     images = ProductImageSerializer(many=True, read_only=True)
@@ -121,6 +121,11 @@ class CatalogProductSerializer(serializers.ModelSerializer):
     pricing_mode = serializers.CharField()
     price_hint = serializers.SerializerMethodField()
     price_range_est = serializers.SerializerMethodField()
+    imposition_summary = serializers.SerializerMethodField()
+    default_size_label = serializers.SerializerMethodField()
+    printing_total = serializers.SerializerMethodField()
+    finishing_summary = serializers.SerializerMethodField()
+    final_size = serializers.SerializerMethodField()
 
     class Meta:
         model = Product
@@ -134,18 +139,23 @@ class CatalogProductSerializer(serializers.ModelSerializer):
             "default_finished_height_mm",
             "default_bleed_mm",
             "default_sides",
+            "min_quantity",
             "finishing_options",
             "images",
             "primary_image",
             "price_hint",
             "price_range_est",
+            "imposition_summary",
+            "default_size_label",
+            "printing_total",
+            "finishing_summary",
+            "final_size",
         ]
 
     def get_primary_image(self, obj):
         """Path of primary or first image for card display (frontend prepends mediaBase)."""
         img = obj.get_primary_image()
         if img and img.image:
-            # Return path relative to MEDIA_ROOT (e.g. products/xxx.jpg)
             return img.image.name
         return None
 
@@ -158,6 +168,53 @@ class CatalogProductSerializer(serializers.ModelSerializer):
         from catalog.services import compute_product_price_range_est
 
         return compute_product_price_range_est(obj)
+
+    def get_imposition_summary(self, obj):
+        """e.g. 'Fits on SRA3: 10-up' for SHEET products."""
+        if obj.pricing_mode != "SHEET":
+            return None
+        try:
+            from inventory.choices import SHEET_SIZE_DIMENSIONS
+            sheet_size = (obj.default_sheet_size or "").strip() or "SRA3"
+            dims = SHEET_SIZE_DIMENSIONS.get(sheet_size)
+            if dims:
+                cps = obj.get_copies_per_sheet(sheet_size, dims[0], dims[1])
+                return f"{sheet_size}: {cps}-up"
+        except Exception:
+            pass
+        return None
+
+    def get_default_size_label(self, obj):
+        """e.g. 'SRA3' or 'Large Format'."""
+        if obj.pricing_mode == "LARGE_FORMAT":
+            return "Large Format"
+        return (obj.default_sheet_size or "").strip() or "SRA3"
+
+    def get_printing_total(self, obj):
+        """Computed printing total at min_quantity for display."""
+        try:
+            hint = self.get_price_hint(obj)
+            if hint and hint.get("can_calculate") and hint.get("min_price") is not None:
+                return hint["min_price"]
+        except Exception:
+            pass
+        return None
+
+    def get_finishing_summary(self, obj):
+        """Short list of finishing labels, e.g. ['Lamination', 'Cutting']."""
+        try:
+            options = obj.finishing_options.select_related("finishing_rate").all()
+            return [opt.finishing_rate.name for opt in options if opt.finishing_rate.is_active]
+        except Exception:
+            return []
+
+    def get_final_size(self, obj):
+        """Final product size string, e.g. '90×50mm' or '6000×3000mm'."""
+        w = obj.default_finished_width_mm
+        h = obj.default_finished_height_mm
+        if w and h:
+            return f"{w}×{h}mm"
+        return None
 
 
 class CatalogProductWithShopSerializer(CatalogProductSerializer):
@@ -225,6 +282,15 @@ class QuoteItemWriteSerializer(serializers.ModelSerializer):
 
         shop = quote_request.shop
         item_type = attrs.get("item_type") or getattr(self.instance, "item_type", "PRODUCT")
+
+        # Auto-bump quantity to product's min_quantity
+        if item_type == "PRODUCT":
+            product = attrs.get("product") or (self.instance.product if self.instance else None)
+            if product:
+                min_qty = getattr(product, "min_quantity", 1) or 1
+                qty = attrs.get("quantity")
+                if qty is not None and qty < min_qty:
+                    attrs["quantity"] = min_qty
 
         # PRODUCT: product required
         if item_type == "PRODUCT":
