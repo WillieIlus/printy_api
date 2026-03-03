@@ -10,7 +10,7 @@ from pricing.choices import FinishingSides, Sides
 from pricing.models import FinishingRate
 from shops.models import Shop
 
-from .choices import PricingMode
+from .choices import PricingMode, ProductStatus
 from .imposition import pieces_per_sheet as imposition_pieces_per_sheet
 
 # Standard bleed for imposition calculation (mm)
@@ -129,6 +129,13 @@ class Product(TimeStampedModel):
         default=True,
         verbose_name=_("allow duplex"),
         help_text=_("Allow double-sided printing."),
+    )
+    status = models.CharField(
+        max_length=20,
+        choices=ProductStatus.choices,
+        default=ProductStatus.DRAFT,
+        verbose_name=_("status"),
+        help_text=_("DRAFT = not visible to buyers. PUBLISHED = visible if shop pricing ready. UNAVAILABLE = hidden."),
     )
     is_active = models.BooleanField(
         default=True,

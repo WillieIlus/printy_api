@@ -93,6 +93,11 @@ class Shop(AutoSlugMixin, models.Model):
         verbose_name=_("postal code"),
         help_text=_("Postal or ZIP code."),
     )
+    pricing_ready = models.BooleanField(
+        default=False,
+        verbose_name=_("pricing ready"),
+        help_text=_("Denormalized flag: True when shop has at least one machine, paper, and printing rate."),
+    )
     owner = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.CASCADE,

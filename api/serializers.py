@@ -617,7 +617,10 @@ class ProductFinishingOptionWriteSerializer(serializers.ModelSerializer):
 
 
 class ProductWriteSerializer(serializers.ModelSerializer):
-    """Write-only serializer for create/update. No price computation to avoid 500 on incomplete shop setup."""
+    """
+    Write serializer for product create/update.
+    Enforces publish rules: status can only be PUBLISHED when shop has pricing.
+    """
 
     finishing_options = ProductFinishingOptionWriteSerializer(many=True, required=False)
 
@@ -639,6 +642,7 @@ class ProductWriteSerializer(serializers.ModelSerializer):
             "min_gsm",
             "max_gsm",
             "is_active",
+            "status",
             "finishing_options",
         ]
         extra_kwargs = {
@@ -653,12 +657,27 @@ class ProductWriteSerializer(serializers.ModelSerializer):
             "min_height_mm": {"required": False},
             "min_gsm": {"required": False},
             "max_gsm": {"required": False},
+            "status": {"required": False},
         }
+
+    def validate_status(self, value):
+        from setup.services import get_product_publish_check
+        if value == "PUBLISHED":
+            shop = self.context.get("shop")
+            instance = self.instance
+            product_for_check = instance or Product(shop=shop)
+            if shop:
+                product_for_check.shop = shop
+            check = get_product_publish_check(product_for_check)
+            if not check["can_publish"]:
+                raise serializers.ValidationError(
+                    "Cannot publish: " + " ".join(check["block_reasons"])
+                )
+        return value
 
     def create(self, validated_data):
         finishings_data = validated_data.pop("finishing_options", [])
         shop = validated_data.pop("shop", None) or self.context.get("shop")
-        # Ensure required defaults for model
         validated_data.setdefault("description", "")
         validated_data.setdefault("category", "")
         validated_data.setdefault("min_quantity", 1)
@@ -666,9 +685,14 @@ class ProductWriteSerializer(serializers.ModelSerializer):
         validated_data.setdefault("default_sides", "SIMPLEX")
         validated_data.setdefault("default_finished_width_mm", 90)
         validated_data.setdefault("default_finished_height_mm", 54)
-        # Ensure min_quantity is at least 1
         if validated_data.get("min_quantity", 1) < 1:
             validated_data["min_quantity"] = 1
+        # Force DRAFT when shop pricing not ready
+        from setup.services import pricing_exists
+        if not pricing_exists(shop):
+            validated_data["status"] = "DRAFT"
+        else:
+            validated_data.setdefault("status", "DRAFT")
         product = Product.objects.create(shop=shop, **validated_data)
         for fd in finishings_data:
             ProductFinishingOption.objects.create(product=product, **fd)
@@ -697,9 +721,11 @@ class ProductFinishingOptionListSerializer(serializers.ModelSerializer):
 
 
 class ProductListSerializer(serializers.ModelSerializer):
-    """Lightweight serializer for list. No price computation to avoid 500 on incomplete shop setup."""
+    """Printer-facing list serializer with status + publish readiness."""
 
     finishing_options = ProductFinishingOptionListSerializer(many=True, required=False, read_only=True)
+    can_publish = serializers.SerializerMethodField()
+    publish_block_reason = serializers.SerializerMethodField()
 
     class Meta:
         model = Product
@@ -719,8 +745,20 @@ class ProductListSerializer(serializers.ModelSerializer):
             "min_gsm",
             "max_gsm",
             "is_active",
+            "status",
+            "can_publish",
+            "publish_block_reason",
             "finishing_options",
         ]
+
+    def get_can_publish(self, obj):
+        from setup.services import get_product_publish_check
+        return get_product_publish_check(obj)["can_publish"]
+
+    def get_publish_block_reason(self, obj):
+        from setup.services import get_product_publish_check
+        check = get_product_publish_check(obj)
+        return " ".join(check["block_reasons"]) if check["block_reasons"] else ""
 
 
 class ProductSerializer(serializers.ModelSerializer):

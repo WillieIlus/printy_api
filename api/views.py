@@ -77,9 +77,13 @@ class PublicShopViewSet(viewsets.ReadOnlyModelViewSet):
 
     @action(detail=True, methods=["get"], url_path="catalog")
     def catalog(self, request, slug=None):
-        """GET /api/public/shops/{slug}/catalog/ — shop + products with finishing options."""
+        """GET /api/public/shops/{slug}/catalog/ — only PUBLISHED products from pricing-ready shops."""
         shop = self.get_object()
-        products = Product.objects.filter(shop=shop, is_active=True).prefetch_related(
+        products = Product.objects.filter(
+            shop=shop,
+            is_active=True,
+            status="PUBLISHED",
+        ).prefetch_related(
             "finishing_options__finishing_rate",
             "images",
         )
@@ -102,13 +106,18 @@ class PublicShopViewSet(viewsets.ReadOnlyModelViewSet):
 
 
 class PublicAllProductsView(APIView):
-    """GET /api/public/products/ — all products from all active shops (for gallery)."""
+    """GET /api/public/products/ — only PUBLISHED products from pricing-ready active shops."""
 
     permission_classes = [AllowAny]
 
     def get(self, request):
         products = (
-            Product.objects.filter(shop__is_active=True, is_active=True)
+            Product.objects.filter(
+                shop__is_active=True,
+                shop__pricing_ready=True,
+                is_active=True,
+                status="PUBLISHED",
+            )
             .select_related("shop")
             .prefetch_related(
                 "finishing_options__finishing_rate",

@@ -51,6 +51,7 @@ INSTALLED_APPS = [
     "quotes",
     "api",
     "feedback",
+    "setup",
 ]
 
 AUTH_USER_MODEL = "accounts.User"
