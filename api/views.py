@@ -27,6 +27,7 @@ from .serializers import (
     FavoriteShopSerializer,
     FinishingCategorySerializer,
     FinishingRateSerializer,
+    GalleryProductOptionsSerializer,
     MachineSerializer,
     MaterialSerializer,
     PaperSerializer,
@@ -46,6 +47,8 @@ from .serializers import (
     ShopRatingSerializer,
     ShopRatingSummarySerializer,
     ShopSerializer,
+    TweakAndAddSerializer,
+    TweakedItemReadSerializer,
 )
 
 
@@ -898,3 +901,141 @@ class ShopProductImageViewSet(viewsets.ModelViewSet):
     def perform_create(self, serializer):
         product = self._get_product()
         serializer.save(product=product)
+
+
+# ---------------------------------------------------------------------------
+# Tweak-and-Add: Gallery → Tweak → Quote
+# ---------------------------------------------------------------------------
+
+
+class TweakAndAddView(APIView):
+    """
+    POST /api/quote-drafts/{draft_id}/tweak-and-add/
+
+    Creates a tweaked product instance (QuoteItem) with chosen options,
+    computes server-side pricing, stores the breakdown snapshot,
+    and adds it to the quote draft.
+
+    The original product template is never modified.
+
+    Example request:
+    {
+        "product": 5,
+        "quantity": 200,
+        "paper": 9,
+        "sides": "DUPLEX",
+        "color_mode": "COLOR",
+        "machine": 1,
+        "finishings": [{"finishing_rate": 1}, {"finishing_rate": 3}],
+        "special_instructions": "Rush order"
+    }
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, draft_id):
+        draft = get_object_or_404(
+            QuoteRequest.objects.select_related("shop"),
+            pk=draft_id,
+        )
+        if draft.created_by_id != request.user.id:
+            return Response({"detail": "Not your quote."}, status=status.HTTP_403_FORBIDDEN)
+        if draft.status != QuoteStatus.DRAFT:
+            return Response(
+                {"detail": "Items can only be added to DRAFT quotes."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        serializer = TweakAndAddSerializer(
+            data=request.data,
+            context={"request": request, "quote_request": draft, "shop": draft.shop},
+        )
+        serializer.is_valid(raise_exception=True)
+        item = serializer.save()
+
+        read_serializer = TweakedItemReadSerializer(
+            item,
+            context={"request": request},
+        )
+        return Response(read_serializer.data, status=status.HTTP_201_CREATED)
+
+
+class TweakedItemUpdateView(APIView):
+    """
+    PATCH /api/tweaked-items/{item_id}/
+
+    Update a tweaked item's options and recompute pricing.
+    Creates the update in-place (simpler approach) since the item
+    is already a per-user customized instance, not a shared template.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def patch(self, request, item_id):
+        item = get_object_or_404(
+            QuoteItem.objects.select_related("quote_request__shop", "product", "paper", "material", "machine"),
+            pk=item_id,
+        )
+        if item.quote_request.created_by_id != request.user.id:
+            return Response({"detail": "Not your quote item."}, status=status.HTTP_403_FORBIDDEN)
+        if item.quote_request.status != QuoteStatus.DRAFT:
+            return Response({"detail": "Cannot modify locked items."}, status=status.HTTP_400_BAD_REQUEST)
+
+        from django.db import transaction
+        from quotes.pricing_service import compute_and_store_pricing
+
+        updatable_fields = ["quantity", "sides", "color_mode", "special_instructions", "has_artwork"]
+        fk_fields = {"paper": Paper, "material": Material, "machine": Machine}
+
+        with transaction.atomic():
+            for field in updatable_fields:
+                if field in request.data:
+                    setattr(item, field, request.data[field])
+            for field, model in fk_fields.items():
+                if field in request.data:
+                    val = request.data[field]
+                    setattr(item, f"{field}_id", val)
+            if "chosen_width_mm" in request.data:
+                item.chosen_width_mm = request.data["chosen_width_mm"]
+            if "chosen_height_mm" in request.data:
+                item.chosen_height_mm = request.data["chosen_height_mm"]
+
+            item.save()
+
+            if "finishings" in request.data:
+                item.finishings.all().delete()
+                for fin in request.data["finishings"]:
+                    fr_id = fin.get("finishing_rate") if isinstance(fin, dict) else fin
+                    QuoteItemFinishing.objects.create(
+                        quote_item=item,
+                        finishing_rate_id=fr_id,
+                        price_override=fin.get("price_override") if isinstance(fin, dict) else None,
+                    )
+
+            compute_and_store_pricing(item)
+
+        item.refresh_from_db()
+        serializer = TweakedItemReadSerializer(item, context={"request": request})
+        return Response(serializer.data)
+
+
+class GalleryProductDetailView(APIView):
+    """
+    GET /api/public/products/{pk}/options/
+
+    Returns a product template with all available tweaking options
+    (papers, machines, materials, finishings for the product's shop).
+    No login required.
+    """
+
+    permission_classes = [AllowAny]
+
+    def get(self, request, pk):
+        product = get_object_or_404(
+            Product.objects.select_related("shop")
+                .prefetch_related("finishing_options__finishing_rate", "images"),
+            pk=pk,
+            is_active=True,
+        )
+        serializer = GalleryProductOptionsSerializer(product)
+        return Response(serializer.data)

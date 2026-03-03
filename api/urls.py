@@ -75,6 +75,24 @@ urlpatterns = [
         ),
         name="quote-draft-item-detail",
     ),
+    # Tweak-and-Add: Gallery → Tweak → Quote (creates tweaked instance with pricing)
+    path(
+        "quote-drafts/<int:draft_id>/tweak-and-add/",
+        views.TweakAndAddView.as_view(),
+        name="quote-draft-tweak-and-add",
+    ),
+    # Update a tweaked item (recompute pricing)
+    path(
+        "tweaked-items/<int:item_id>/",
+        views.TweakedItemUpdateView.as_view(),
+        name="tweaked-item-update",
+    ),
+    # Gallery product with full tweaking options (public, no auth)
+    path(
+        "public/products/<int:pk>/options/",
+        views.GalleryProductDetailView.as_view(),
+        name="gallery-product-options",
+    ),
     # Seller nested: shop machines, papers, finishing-rates, materials, products
     # Support both shop_id (e.g. /shops/1/products/) and shop_slug (e.g. /shops/my-shop/products/)
     path(

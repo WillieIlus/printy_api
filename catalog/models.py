@@ -111,6 +111,15 @@ class Product(TimeStampedModel):
         verbose_name=_("max GSM"),
         help_text=_("Maximum paper grammage allowed (e.g. 350 for business cards, 170 for flyers)."),
     )
+    min_area_m2 = models.DecimalField(
+        max_digits=8,
+        decimal_places=2,
+        null=True,
+        blank=True,
+        default=Decimal("0.50"),
+        verbose_name=_("min area (m²)"),
+        help_text=_("Minimum printable area in m² for LARGE_FORMAT products. Default 0.5 m²."),
+    )
     allow_simplex = models.BooleanField(
         default=True,
         verbose_name=_("allow simplex"),

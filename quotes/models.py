@@ -273,6 +273,15 @@ class QuoteItem(TimeStampedModel):
             "LARGE_FORMAT: material.selling_price×area_sqm + finishing."
         ),
     )
+    pricing_snapshot = models.JSONField(
+        null=True,
+        blank=True,
+        verbose_name=_("pricing snapshot"),
+        help_text=_(
+            "Full pricing breakdown at computation time. Stores imposition_count, sheets_needed, "
+            "area_m2, paper_cost, print_cost, finishing_total, services_total, and line items."
+        ),
+    )
     pricing_locked_at = models.DateTimeField(
         null=True,
         blank=True,

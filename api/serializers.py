@@ -844,3 +844,327 @@ class ProfileSerializer(serializers.Serializer):
                 instance.preferred_language = validated_data["preferred_language"]
             instance.save()
         return instance
+
+
+# ---------------------------------------------------------------------------
+# Tweak-and-Add serializers (Gallery → Tweak → Quote)
+# ---------------------------------------------------------------------------
+
+
+class TweakFinishingInputSerializer(serializers.Serializer):
+    """One finishing selection in a tweak request."""
+    finishing_rate = serializers.PrimaryKeyRelatedField(queryset=FinishingRate.objects.filter(is_active=True))
+    price_override = serializers.DecimalField(max_digits=12, decimal_places=2, required=False, allow_null=True)
+
+
+class TweakAndAddSerializer(serializers.Serializer):
+    """
+    Create a tweaked quote item from a product template and add to quote.
+
+    Example request:
+    {
+        "product": 5,
+        "quantity": 200,
+        "paper": 9,
+        "sides": "DUPLEX",
+        "color_mode": "COLOR",
+        "machine": 1,
+        "finishings": [{"finishing_rate": 1}, {"finishing_rate": 3}],
+        "special_instructions": "Rush order"
+    }
+
+    Example response: See TweakedItemReadSerializer.
+    """
+    product = serializers.PrimaryKeyRelatedField(queryset=Product.objects.filter(is_active=True))
+    quantity = serializers.IntegerField(required=False, default=None)
+    paper = serializers.PrimaryKeyRelatedField(queryset=Paper.objects.filter(is_active=True), required=False, allow_null=True)
+    material = serializers.PrimaryKeyRelatedField(queryset=Material.objects.filter(is_active=True), required=False, allow_null=True)
+    sides = serializers.ChoiceField(choices=[("SIMPLEX", "Simplex"), ("DUPLEX", "Duplex")], required=False, default="")
+    color_mode = serializers.ChoiceField(choices=[("BW", "B&W"), ("COLOR", "Color")], required=False, default="COLOR")
+    machine = serializers.PrimaryKeyRelatedField(queryset=Machine.objects.filter(is_active=True), required=False, allow_null=True)
+    chosen_width_mm = serializers.IntegerField(required=False, allow_null=True)
+    chosen_height_mm = serializers.IntegerField(required=False, allow_null=True)
+    finishings = TweakFinishingInputSerializer(many=True, required=False, default=[])
+    special_instructions = serializers.CharField(required=False, allow_blank=True, default="")
+    has_artwork = serializers.BooleanField(required=False, default=False)
+
+    def validate(self, attrs):
+        product = attrs["product"]
+        shop = self.context.get("shop")
+
+        if shop and product.shop_id != shop.id:
+            raise serializers.ValidationError({"product": "Product must belong to this shop."})
+
+        # Default quantity to product's min_quantity
+        qty = attrs.get("quantity")
+        min_qty = product.min_quantity or 100
+        if qty is None or qty < min_qty:
+            attrs["quantity"] = min_qty
+
+        # Default sides from template
+        if not attrs.get("sides"):
+            attrs["sides"] = product.default_sides or "SIMPLEX"
+
+        # Validate simplex/duplex against template
+        if attrs["sides"] == "SIMPLEX" and not product.allow_simplex:
+            raise serializers.ValidationError({"sides": "This product does not allow single-sided printing."})
+        if attrs["sides"] == "DUPLEX" and not product.allow_duplex:
+            raise serializers.ValidationError({"sides": "This product does not allow double-sided printing."})
+
+        pricing_mode = product.pricing_mode
+
+        if pricing_mode == PricingMode.SHEET:
+            # Validate paper belongs to same shop and GSM constraints
+            paper = attrs.get("paper")
+            if paper and shop and paper.shop_id != shop.id:
+                raise serializers.ValidationError({"paper": "Paper must belong to this shop."})
+            if paper:
+                if product.min_gsm and paper.gsm < product.min_gsm:
+                    raise serializers.ValidationError({"paper": f"Paper GSM ({paper.gsm}) is below minimum ({product.min_gsm})."})
+                if product.max_gsm and paper.gsm > product.max_gsm:
+                    raise serializers.ValidationError({"paper": f"Paper GSM ({paper.gsm}) is above maximum ({product.max_gsm})."})
+            # Validate machine
+            machine = attrs.get("machine")
+            if machine and shop and machine.shop_id != shop.id:
+                raise serializers.ValidationError({"machine": "Machine must belong to this shop."})
+
+        elif pricing_mode == PricingMode.LARGE_FORMAT:
+            # Default dimensions from product if not provided
+            if not attrs.get("chosen_width_mm"):
+                attrs["chosen_width_mm"] = product.default_finished_width_mm
+            if not attrs.get("chosen_height_mm"):
+                attrs["chosen_height_mm"] = product.default_finished_height_mm
+            # Validate material
+            mat = attrs.get("material")
+            if mat and shop and mat.shop_id != shop.id:
+                raise serializers.ValidationError({"material": "Material must belong to this shop."})
+            # Validate minimum area
+            w = attrs.get("chosen_width_mm") or 0
+            h = attrs.get("chosen_height_mm") or 0
+            qty = attrs["quantity"]
+            area = (w / 1000) * (h / 1000) * qty
+            min_area = float(product.min_area_m2 or Decimal("0.50"))
+            if area < min_area:
+                raise serializers.ValidationError(
+                    {"chosen_width_mm": f"Total area ({area:.2f} m²) is below minimum ({min_area:.2f} m²)."}
+                )
+
+        # Validate finishings belong to the same shop
+        for fin in attrs.get("finishings", []):
+            fr = fin["finishing_rate"]
+            if shop and fr.shop_id != shop.id:
+                raise serializers.ValidationError({"finishings": f"Finishing '{fr.name}' does not belong to this shop."})
+
+        return attrs
+
+    def create(self, validated_data):
+        """
+        Create QuoteItem + QuoteItemFinishing records, then compute and store pricing.
+        Must be called inside transaction.atomic().
+        """
+        from django.db import transaction
+        from quotes.pricing_service import compute_and_store_pricing
+
+        product = validated_data["product"]
+        finishings_data = validated_data.pop("finishings", [])
+        quote_request = self.context["quote_request"]
+
+        with transaction.atomic():
+            item = QuoteItem.objects.create(
+                quote_request=quote_request,
+                item_type="PRODUCT",
+                product=product,
+                quantity=validated_data["quantity"],
+                pricing_mode=product.pricing_mode,
+                paper=validated_data.get("paper"),
+                material=validated_data.get("material"),
+                chosen_width_mm=validated_data.get("chosen_width_mm"),
+                chosen_height_mm=validated_data.get("chosen_height_mm"),
+                sides=validated_data.get("sides", ""),
+                color_mode=validated_data.get("color_mode", "COLOR"),
+                machine=validated_data.get("machine"),
+                special_instructions=validated_data.get("special_instructions", ""),
+                has_artwork=validated_data.get("has_artwork", False),
+            )
+            for fin in finishings_data:
+                QuoteItemFinishing.objects.create(
+                    quote_item=item,
+                    finishing_rate=fin["finishing_rate"],
+                    price_override=fin.get("price_override"),
+                )
+            compute_and_store_pricing(item)
+
+        return item
+
+
+class TweakedItemReadSerializer(serializers.ModelSerializer):
+    """
+    Read serializer for a tweaked quote item — returns chosen options,
+    computed totals, and full pricing breakdown.
+
+    Example response:
+    {
+        "id": 42,
+        "product": 5,
+        "product_name": "Standard Business Card",
+        "quantity": 200,
+        "pricing_mode": "SHEET",
+        "sides": "DUPLEX",
+        "color_mode": "COLOR",
+        "paper": 9,
+        "paper_label": "SRA3 300gsm GLOSS",
+        "machine": 1,
+        "finishings": [{"finishing_rate": 1, "name": "Lamination", "cost": "250.00"}],
+        "unit_price": "12.40",
+        "line_total": "2480.00",
+        "pricing_snapshot": { ...full breakdown... },
+        "special_instructions": "",
+        "created_at": "2026-03-03T..."
+    }
+    """
+    product_name = serializers.SerializerMethodField()
+    paper_label = serializers.SerializerMethodField()
+    material_label = serializers.SerializerMethodField()
+    finishings = serializers.SerializerMethodField()
+
+    class Meta:
+        model = QuoteItem
+        fields = [
+            "id",
+            "item_type",
+            "product",
+            "product_name",
+            "quantity",
+            "pricing_mode",
+            "sides",
+            "color_mode",
+            "paper",
+            "paper_label",
+            "material",
+            "material_label",
+            "machine",
+            "chosen_width_mm",
+            "chosen_height_mm",
+            "finishings",
+            "unit_price",
+            "line_total",
+            "pricing_snapshot",
+            "special_instructions",
+            "has_artwork",
+            "created_at",
+        ]
+
+    def get_product_name(self, obj):
+        if obj.product_id:
+            return obj.product.name
+        return obj.title or ""
+
+    def get_paper_label(self, obj):
+        if obj.paper_id:
+            p = obj.paper
+            return f"{p.sheet_size} {p.gsm}gsm {p.get_paper_type_display()}"
+        return None
+
+    def get_material_label(self, obj):
+        if obj.material_id:
+            return f"{obj.material.material_type} ({obj.material.unit})"
+        return None
+
+    def get_finishings(self, obj):
+        result = []
+        snapshot = obj.pricing_snapshot or {}
+        finishing_lines = {fl["name"]: fl["computed_cost"] for fl in snapshot.get("finishing_lines", [])}
+        for qif in obj.finishings.select_related("finishing_rate").all():
+            result.append({
+                "finishing_rate": qif.finishing_rate_id,
+                "name": qif.finishing_rate.name,
+                "charge_unit": qif.finishing_rate.charge_unit,
+                "cost": finishing_lines.get(qif.finishing_rate.name, str(qif.finishing_rate.price)),
+            })
+        return result
+
+
+class GalleryProductOptionsSerializer(serializers.ModelSerializer):
+    """
+    Gallery product with available tweaking options (papers, finishings, machines, materials).
+    No user-specific computed totals — just the template + available choices.
+    """
+    finishing_options = FinishingOptionSerializer(many=True, read_only=True)
+    images = ProductImageSerializer(many=True, read_only=True)
+    primary_image = serializers.SerializerMethodField()
+    available_papers = serializers.SerializerMethodField()
+    available_machines = serializers.SerializerMethodField()
+    available_materials = serializers.SerializerMethodField()
+    available_finishings = serializers.SerializerMethodField()
+    imposition_summary = serializers.SerializerMethodField()
+    final_size = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Product
+        fields = [
+            "id", "name", "description", "category", "pricing_mode",
+            "default_finished_width_mm", "default_finished_height_mm",
+            "default_bleed_mm", "default_sides", "min_quantity",
+            "min_gsm", "max_gsm", "min_area_m2",
+            "allow_simplex", "allow_duplex",
+            "finishing_options", "images", "primary_image",
+            "imposition_summary", "final_size",
+            "available_papers", "available_machines",
+            "available_materials", "available_finishings",
+        ]
+
+    def get_primary_image(self, obj):
+        img = obj.get_primary_image()
+        return img.image.name if img and img.image else None
+
+    def get_imposition_summary(self, obj):
+        if obj.pricing_mode != "SHEET":
+            return None
+        try:
+            from inventory.choices import SHEET_SIZE_DIMENSIONS
+            ss = (obj.default_sheet_size or "").strip() or "SRA3"
+            dims = SHEET_SIZE_DIMENSIONS.get(ss)
+            if dims:
+                cps = obj.get_copies_per_sheet(ss, dims[0], dims[1])
+                return f"{ss}: {cps}-up"
+        except Exception:
+            pass
+        return None
+
+    def get_final_size(self, obj):
+        w, h = obj.default_finished_width_mm, obj.default_finished_height_mm
+        return f"{w}×{h}mm" if w and h else None
+
+    def get_available_papers(self, obj):
+        papers = Paper.objects.filter(shop=obj.shop, is_active=True, selling_price__gt=0)
+        if obj.min_gsm:
+            papers = papers.filter(gsm__gte=obj.min_gsm)
+        if obj.max_gsm:
+            papers = papers.filter(gsm__lte=obj.max_gsm)
+        return [
+            {"id": p.id, "sheet_size": p.sheet_size, "gsm": p.gsm,
+             "paper_type": p.get_paper_type_display(), "selling_price": str(p.selling_price)}
+            for p in papers[:20]
+        ]
+
+    def get_available_machines(self, obj):
+        machines = Machine.objects.filter(shop=obj.shop, is_active=True)
+        return [{"id": m.id, "name": m.name, "machine_type": m.machine_type} for m in machines[:10]]
+
+    def get_available_materials(self, obj):
+        if obj.pricing_mode != "LARGE_FORMAT":
+            return []
+        materials = Material.objects.filter(shop=obj.shop, is_active=True, selling_price__gt=0)
+        return [
+            {"id": m.id, "material_type": m.material_type, "unit": m.unit,
+             "selling_price": str(m.selling_price)}
+            for m in materials[:10]
+        ]
+
+    def get_available_finishings(self, obj):
+        frs = FinishingRate.objects.filter(shop=obj.shop, is_active=True).select_related("category")
+        return [
+            {"id": f.id, "name": f.name, "charge_unit": f.charge_unit,
+             "price": str(f.price), "category": f.category.name if f.category else None}
+            for f in frs[:30]
+        ]
