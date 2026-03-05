@@ -2,6 +2,13 @@
 from rest_framework import permissions
 
 
+class IsStaffUser(permissions.BasePermission):
+    """Allow only authenticated staff users."""
+
+    def has_permission(self, request, view):
+        return request.user.is_authenticated and request.user.is_staff
+
+
 class IsShopOwner(permissions.BasePermission):
     """Allow only the shop owner."""
 

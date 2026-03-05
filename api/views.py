@@ -1,26 +1,35 @@
 """
 DRF viewsets and API views.
 """
+import math
+
 from django.shortcuts import get_object_or_404
+
+from common.geo import haversine_km
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.views import APIView
+from django_filters.rest_framework import DjangoFilterBackend
 
 from catalog.models import Product
 from inventory.models import Machine, Paper
 from pricing.models import FinishingCategory, FinishingRate, Material, PrintingRate
 from django.db.models import Avg, Count
 from quotes.choices import QuoteStatus
-from quotes.models import QuoteItem, QuoteRequest
+from quotes.models import QuoteItem, QuoteRequest, QuoteShareLink
 from quotes.quote_engine import recalculate_and_lock_quote_request
 from quotes.services import build_preview_price_response, calculate_quote_item
+from quotes.whatsapp_formatter import format_quote_for_whatsapp
 from shops.models import FavoriteShop, Shop, ShopRating
 
-from .permissions import IsQuoteRequestBuyer, IsQuoteRequestSeller, IsShopOwner, PublicReadOnly
+from .filters import QuoteFilterSet
+from .permissions import IsQuoteRequestBuyer, IsQuoteRequestSeller, IsShopOwner, IsStaffUser, PublicReadOnly
+from .serializers import QuoteCalculatorInputSerializer
 from catalog.models import ProductImage
 from .serializers import (
+    QuoteSharePublicSerializer,
     CatalogProductSerializer,
     CatalogProductWithShopSerializer,
     FavoriteShopCreateSerializer,
@@ -39,8 +48,13 @@ from .serializers import (
     ProductWriteSerializer,
     ProfileSerializer,
     PublicShopListSerializer,
+    QuoteCreateSerializer,
+    QuoteDetailSerializer,
+    QuoteItemAddSerializer,
+    QuoteItemWithBreakdownSerializer,
     QuoteItemReadSerializer,
     QuoteItemWriteSerializer,
+    QuoteCalculatorInputSerializer,
     QuoteRequestCreateSerializer,
     QuoteRequestPatchSerializer,
     QuoteRequestReadSerializer,
@@ -126,6 +140,79 @@ class PublicAllProductsView(APIView):
         )
         data = CatalogProductWithShopSerializer(products, many=True).data
         return Response({"products": data})
+
+
+class ShopsNearbyView(APIView):
+    """
+    GET /api/shops/nearby/?lat=...&lng=...&radius=10
+    Bounding box pre-filter, then Haversine distance. Sorted by distance ascending.
+    Optionally filter by exact radius (km). Returns distance_km per shop.
+    """
+
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        lat_s = request.query_params.get("lat")
+        lng_s = request.query_params.get("lng")
+        radius_s = request.query_params.get("radius", "10")
+
+        if lat_s is None or lng_s is None:
+            return Response({"results": []})
+
+        try:
+            lat = float(lat_s)
+            lng = float(lng_s)
+            radius_km = float(radius_s)
+        except (ValueError, TypeError):
+            return Response({"results": []})
+
+        if radius_km <= 0 or radius_km > 500:
+            return Response({"results": []})
+
+        if not (-90 <= lat <= 90) or not (-180 <= lng <= 180):
+            return Response({"results": []})
+
+        lat_delta = radius_km / 111.0
+        lng_scale = max(0.01, math.cos(math.radians(lat)))
+        lng_delta = radius_km / (111.0 * lng_scale)
+
+        lat_min = lat - lat_delta
+        lat_max = lat + lat_delta
+        lng_min = lng - lng_delta
+        lng_max = lng + lng_delta
+
+        shops = (
+            Shop.objects.filter(
+                is_active=True,
+                latitude__isnull=False,
+                longitude__isnull=False,
+                latitude__gte=lat_min,
+                latitude__lte=lat_max,
+                longitude__gte=lng_min,
+                longitude__lte=lng_max,
+            )
+            .exclude(slug__isnull=True)
+            .exclude(slug="")
+        )
+
+        # Compute Haversine distance, filter by exact radius, sort by distance
+        results_with_distance = []
+        for shop in shops:
+            shop_lat = float(shop.latitude)
+            shop_lng = float(shop.longitude)
+            dist_km = haversine_km(lat, lng, shop_lat, shop_lng)
+            if dist_km <= radius_km:
+                results_with_distance.append((shop, round(dist_km, 2)))
+
+        results_with_distance.sort(key=lambda x: x[1])
+
+        data = []
+        for shop, dist_km in results_with_distance:
+            item = PublicShopListSerializer(shop).data
+            item["distance_km"] = dist_km
+            data.append(item)
+
+        return Response({"results": data})
 
 
 # ---------------------------------------------------------------------------
@@ -343,6 +430,304 @@ class QuoteDraftViewSet(viewsets.ViewSet):
         draft.status = QuoteStatus.SUBMITTED
         draft.save(update_fields=["status", "updated_at"])
         return Response(QuoteRequestReadSerializer(draft).data)
+
+
+# ---------------------------------------------------------------------------
+# Quote calculator (staff-only, live preview)
+# ---------------------------------------------------------------------------
+
+
+class QuoteCalculatorView(APIView):
+    """
+    POST /api/calculator/quote-item/
+    Returns pricing JSON without saving. Staff-only.
+    """
+
+    permission_classes = [IsAuthenticated, IsStaffUser]
+
+    def post(self, request):
+        serializer = QuoteCalculatorInputSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+        from services.quote_calculator import calculate_quote_item
+
+        result = calculate_quote_item(
+            product_id=data["product_id"],
+            quantity=data["quantity"],
+            width_mm=data.get("width_mm"),
+            height_mm=data.get("height_mm"),
+            paper_id=data.get("paper_id"),
+            grammage=data.get("grammage"),
+            paper_type=data.get("paper_type") or None,
+            sheet_size=data.get("sheet_size") or None,
+            finishing_ids=data.get("finishing_ids") or [],
+            machine_id=data.get("machine_id"),
+            sides=data.get("sides", "SIMPLEX"),
+            color_mode=data.get("color_mode", "COLOR"),
+            overhead_percent=data.get("overhead_percent"),
+            margin_percent=data.get("margin_percent"),
+        )
+        return Response(result.to_dict())
+
+
+# ---------------------------------------------------------------------------
+# Public quote share (GET /api/share/<token>/)
+# ---------------------------------------------------------------------------
+
+
+class QuoteSharePublicView(APIView):
+    """
+    GET /api/share/<token>/ — public quote summary (no private shop settings).
+    No auth required. Token must be valid and not expired.
+    """
+
+    permission_classes = [AllowAny]
+
+    def get(self, request, token):
+        from django.utils import timezone
+
+        link = get_object_or_404(QuoteShareLink, token=token)
+        if link.expires_at and timezone.now() > link.expires_at:
+            return Response(
+                {"detail": "This share link has expired."},
+                status=status.HTTP_410_GONE,
+            )
+        quote = link.quote
+        quote = QuoteRequest.objects.filter(pk=quote.pk).select_related(
+            "shop"
+        ).prefetch_related(
+            "items__product",
+            "items__paper",
+            "items__material",
+            "items__finishings__finishing_rate",
+        ).first()
+        serializer = QuoteSharePublicSerializer(quote)
+        return Response(serializer.data)
+
+
+# ---------------------------------------------------------------------------
+# Staff quoting API (/api/quotes/) — staff-only, full control
+# ---------------------------------------------------------------------------
+
+
+class QuoteViewSet(viewsets.ModelViewSet):
+    """
+    Staff-only quoting API.
+    POST /api/quotes/ — create quote draft
+    GET /api/quotes/ — list quotes (filterable: status, date range, created_by, product)
+    GET /api/quotes/{id}/ — detail with items + pricing breakdown
+    POST /api/quotes/{id}/send/ — mark SENT, lock pricing, store whatsapp_message + sent_at
+    """
+
+    permission_classes = [IsAuthenticated, IsStaffUser]
+    filterset_class = QuoteFilterSet
+    filter_backends = [DjangoFilterBackend]
+
+    def get_queryset(self):
+        return QuoteRequest.objects.select_related("shop", "created_by").prefetch_related(
+            "items__product",
+            "items__paper",
+            "items__material",
+            "items__machine",
+            "items__finishings__finishing_rate",
+        ).order_by("-created_at")
+
+    def get_serializer_class(self):
+        if self.action == "create":
+            return QuoteCreateSerializer
+        return QuoteDetailSerializer
+
+    def create(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        self.perform_create(serializer)
+        return Response(
+            QuoteDetailSerializer(serializer.instance).data,
+            status=status.HTTP_201_CREATED,
+        )
+
+    def perform_create(self, serializer):
+        serializer.save()
+
+    @action(detail=True, methods=["post"], url_path="whatsapp-preview")
+    def whatsapp_preview(self, request, pk=None):
+        """POST /api/quotes/{id}/whatsapp-preview/ — returns { message }."""
+        quote = self.get_object()
+        shop = quote.shop
+        message = format_quote_for_whatsapp(
+            quote,
+            company_name=shop.name or "",
+            company_phone=shop.phone_number or "",
+            turnaround="2-3 business days",
+            payment_terms=None,
+        )
+        return Response({"message": message})
+
+    @action(detail=True, methods=["post"], url_path="share")
+    def share(self, request, pk=None):
+        """
+        POST /api/quotes/{id}/share/ — create share link, return { share_url, whatsapp_text }.
+        Optional body: { expires_at: "2025-12-31T23:59:59Z" }.
+        """
+        import secrets
+        from django.conf import settings
+
+        quote = self.get_object()
+        expires_at = None
+        if isinstance(request.data, dict) and request.data.get("expires_at"):
+            try:
+                from django.utils.dateparse import parse_datetime
+                expires_at = parse_datetime(request.data["expires_at"])
+            except (TypeError, ValueError):
+                pass
+
+        token = secrets.token_urlsafe(32)
+        frontend_url = getattr(settings, "FRONTEND_URL", "https://printy.ke").rstrip("/")
+        share_url = f"{frontend_url}/share/{token}"
+
+        QuoteShareLink.objects.create(
+            quote=quote,
+            token=token,
+            expires_at=expires_at,
+            created_by=request.user,
+        )
+
+        shop = quote.shop
+        whatsapp_text = format_quote_for_whatsapp(
+            quote,
+            company_name=shop.name or "",
+            company_phone=shop.phone_number or "",
+            turnaround="2-3 business days",
+            payment_terms=None,
+            share_url=share_url,
+        )
+
+        return Response({
+            "share_url": share_url,
+            "whatsapp_text": whatsapp_text,
+        })
+
+    @action(detail=True, methods=["post"], url_path="send")
+    def send(self, request, pk=None):
+        """Mark quote as SENT, lock pricing on all items, generate and store whatsapp_message + sent_at."""
+        from django.db import transaction
+        from django.utils import timezone
+
+        from quotes.pricing_service import compute_and_store_pricing
+
+        quote = self.get_object()
+
+        if quote.status not in (QuoteStatus.DRAFT, QuoteStatus.PRICED):
+            return Response(
+                {"detail": "Only DRAFT or PRICED quotes can be sent."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        now = timezone.now()
+        shop = quote.shop
+        with transaction.atomic():
+            for item in quote.items.all():
+                compute_and_store_pricing(item)
+                item.pricing_locked_at = now
+                item.save(update_fields=["pricing_locked_at", "updated_at"])
+            total = sum(
+                (item.line_total or 0) for item in quote.items.all()
+            )
+            quote.total = total
+            quote.status = QuoteStatus.SENT
+            quote.whatsapp_message = format_quote_for_whatsapp(
+                quote,
+                company_name=shop.name or "",
+                company_phone=shop.phone_number or "",
+                turnaround="2-3 business days",
+                payment_terms=None,
+            )
+            quote.sent_at = now
+            quote.pricing_locked_at = now
+            quote.save(update_fields=["total", "status", "whatsapp_message", "sent_at", "pricing_locked_at", "updated_at"])
+
+        return Response(QuoteDetailSerializer(quote).data)
+
+
+class QuoteItemViewSet(viewsets.ModelViewSet):
+    """
+    Staff: nested items under /api/quotes/{id}/items/
+    POST — add item (computes and stores pricing snapshot)
+    PATCH/PUT — update item (recomputes pricing)
+    """
+
+    permission_classes = [IsAuthenticated, IsStaffUser]
+
+    def get_queryset(self):
+        quote_pk = self.kwargs.get("quote_pk")
+        return QuoteItem.objects.filter(quote_request_id=quote_pk).select_related(
+            "product", "paper", "material", "machine"
+        ).prefetch_related("finishings__finishing_rate")
+
+    def get_quote(self):
+        return get_object_or_404(QuoteRequest, pk=self.kwargs["quote_pk"])
+
+    def get_serializer_class(self):
+        if self.action in ("create", "update", "partial_update"):
+            return QuoteItemAddSerializer
+        return QuoteItemWithBreakdownSerializer
+
+    def get_serializer_context(self):
+        ctx = super().get_serializer_context()
+        ctx["quote_request"] = self.get_quote()
+        if self.action in ("update", "partial_update") and self.kwargs.get("pk"):
+            item = QuoteItem.objects.filter(
+                quote_request_id=self.kwargs["quote_pk"],
+                pk=self.kwargs["pk"],
+            ).first()
+            if item:
+                ctx["quote_item"] = item
+        return ctx
+
+    def create(self, request, *args, **kwargs):
+        quote = self.get_quote()
+        if quote.status != QuoteStatus.DRAFT:
+            return Response(
+                {"detail": "Items can only be added to DRAFT quotes."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        self.perform_create(serializer)
+        return Response(
+            QuoteItemWithBreakdownSerializer(serializer.instance).data,
+            status=status.HTTP_201_CREATED,
+        )
+
+    def perform_create(self, serializer):
+        serializer.save()
+
+    def update(self, request, *args, **kwargs):
+        quote = self.get_quote()
+        if quote.status != QuoteStatus.DRAFT:
+            return Response(
+                {"detail": "Items can only be updated in DRAFT quotes."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        return super().update(request, *args, **kwargs)
+
+    def partial_update(self, request, *args, **kwargs):
+        quote = self.get_quote()
+        if quote.status != QuoteStatus.DRAFT:
+            return Response(
+                {"detail": "Items can only be updated in DRAFT quotes."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        return super().partial_update(request, *args, **kwargs)
+
+    def destroy(self, request, *args, **kwargs):
+        quote = self.get_quote()
+        if quote.status != QuoteStatus.DRAFT:
+            return Response(
+                {"detail": "Items can only be removed from DRAFT quotes."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        return super().destroy(request, *args, **kwargs)
 
 
 class MeFavoritesViewSet(viewsets.ViewSet):

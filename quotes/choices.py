@@ -10,3 +10,4 @@ class QuoteStatus(models.TextChoices):
     SENT = "SENT", "Sent"
     ACCEPTED = "ACCEPTED", "Accepted"
     REJECTED = "REJECTED", "Rejected"
+    EXPIRED = "EXPIRED", "Expired"

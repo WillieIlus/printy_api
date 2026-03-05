@@ -15,6 +15,37 @@ from core.querysets import QuoteRequestQuerySet, QuoteItemQuerySet
 from shops.models import Shop
 
 
+class CustomerInquiry(TimeStampedModel):
+    """Optional customer inquiry (name, phone, email) for tracking before quote creation."""
+
+    name = models.CharField(
+        max_length=255,
+        blank=True,
+        default="",
+        verbose_name=_("name"),
+        help_text=_("Customer name."),
+    )
+    phone = models.CharField(
+        max_length=50,
+        blank=True,
+        default="",
+        verbose_name=_("phone"),
+        help_text=_("Customer phone number."),
+    )
+    email = models.EmailField(
+        blank=True,
+        verbose_name=_("email"),
+        help_text=_("Customer email address."),
+    )
+
+    class Meta:
+        verbose_name = _("customer inquiry")
+        verbose_name_plural = _("customer inquiries")
+
+    def __str__(self):
+        return self.name or self.email or self.phone or f"Inquiry #{self.id}"
+
+
 class QuoteRequest(TimeStampedModel):
     """Quote request - buyer creates, seller prices."""
 
@@ -24,6 +55,7 @@ class QuoteRequest(TimeStampedModel):
     SENT = "SENT"
     ACCEPTED = "ACCEPTED"
     REJECTED = "REJECTED"
+    EXPIRED = "EXPIRED"
     STATUS_CHOICES = [
         (DRAFT, "Draft"),
         (SUBMITTED, "Submitted"),
@@ -31,6 +63,7 @@ class QuoteRequest(TimeStampedModel):
         (SENT, "Sent"),
         (ACCEPTED, "Accepted"),
         (REJECTED, "Rejected"),
+        (EXPIRED, "Expired"),
     ]
 
     objects = QuoteRequestQuerySet.as_manager()
@@ -94,6 +127,27 @@ class QuoteRequest(TimeStampedModel):
         blank=True,
         verbose_name=_("pricing locked at"),
         help_text=_("When pricing was locked."),
+    )
+    customer_inquiry = models.ForeignKey(
+        CustomerInquiry,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="quote_requests",
+        verbose_name=_("customer inquiry"),
+        help_text=_("Optional linked customer inquiry."),
+    )
+    whatsapp_message = models.TextField(
+        blank=True,
+        default="",
+        verbose_name=_("whatsapp message"),
+        help_text=_("Message sent via WhatsApp when quote was sent."),
+    )
+    sent_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        verbose_name=_("sent at"),
+        help_text=_("When the quote was sent to the customer."),
     )
 
     class Meta:
@@ -415,6 +469,47 @@ class QuoteRequestService(TimeStampedModel):
 
     def __str__(self):
         return f"{self.quote_request} - {self.service_rate.get_code_display()}"
+
+
+class QuoteShareLink(TimeStampedModel):
+    """Shareable link for a quote. Token is unguessable; optional expiry."""
+
+    quote = models.ForeignKey(
+        QuoteRequest,
+        on_delete=models.CASCADE,
+        related_name="share_links",
+        verbose_name=_("quote"),
+        help_text=_("Quote this share link points to."),
+    )
+    token = models.CharField(
+        max_length=64,
+        unique=True,
+        db_index=True,
+        verbose_name=_("token"),
+        help_text=_("URL-safe random token for public access."),
+    )
+    expires_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        verbose_name=_("expires at"),
+        help_text=_("Optional expiry. Null = no expiry."),
+    )
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="quote_share_links",
+        verbose_name=_("created by"),
+        help_text=_("User who created this share link."),
+    )
+
+    class Meta:
+        verbose_name = _("quote share link")
+        verbose_name_plural = _("quote share links")
+
+    def __str__(self):
+        return f"Share #{self.id} → Quote #{self.quote_id}"
 
 
 class QuoteItemService(TimeStampedModel):

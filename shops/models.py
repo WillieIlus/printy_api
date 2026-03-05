@@ -93,6 +93,22 @@ class Shop(AutoSlugMixin, models.Model):
         verbose_name=_("postal code"),
         help_text=_("Postal or ZIP code."),
     )
+    latitude = models.DecimalField(
+        max_digits=9,
+        decimal_places=6,
+        null=True,
+        blank=True,
+        verbose_name=_("latitude"),
+        help_text=_("Latitude for geo search."),
+    )
+    longitude = models.DecimalField(
+        max_digits=9,
+        decimal_places=6,
+        null=True,
+        blank=True,
+        verbose_name=_("longitude"),
+        help_text=_("Longitude for geo search."),
+    )
     pricing_ready = models.BooleanField(
         default=False,
         verbose_name=_("pricing ready"),
@@ -119,6 +135,9 @@ class Shop(AutoSlugMixin, models.Model):
     class Meta:
         verbose_name = _("shop")
         verbose_name_plural = _("shops")
+        indexes = [
+            models.Index(fields=["latitude", "longitude"], name="shops_geo_idx"),
+        ]
 
     def __str__(self):
         return self.name

@@ -3,7 +3,13 @@ from decimal import Decimal
 from django.contrib import admin
 from django.utils.html import format_html
 
-from .models import QuoteItem, QuoteItemFinishing, QuoteRequest, QuoteItemService, QuoteRequestService
+from .models import CustomerInquiry, QuoteItem, QuoteItemFinishing, QuoteRequest, QuoteItemService, QuoteRequestService, QuoteShareLink
+@admin.register(CustomerInquiry)
+class CustomerInquiryAdmin(admin.ModelAdmin):
+    list_display = ["id", "name", "email", "phone", "created_at"]
+    search_fields = ["name", "email", "phone"]
+
+
 from .services import (
     calculate_quote_item,
     get_quote_item_calculation_description,
@@ -182,3 +188,11 @@ class QuoteItemAdmin(admin.ModelAdmin):
         obj.unit_price = unit_price
         obj.line_total = line_total
         obj.save(update_fields=["unit_price", "line_total"])
+
+
+@admin.register(QuoteShareLink)
+class QuoteShareLinkAdmin(admin.ModelAdmin):
+    list_display = ["id", "quote", "token", "created_by", "created_at", "expires_at"]
+    list_filter = ["created_at"]
+    readonly_fields = ["token", "created_at"]
+    search_fields = ["token"]

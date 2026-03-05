@@ -77,7 +77,7 @@ class ProductInline(admin.TabularInline):
 
 @admin.register(Shop)
 class ShopAdmin(admin.ModelAdmin):
-    list_display = ["name", "slug", "owner", "currency", "is_active", "created_at"]
+    list_display = ["name", "slug", "owner", "currency", "is_active", "latitude", "longitude", "created_at"]
     list_filter = ["is_active"]
     search_fields = ["name", "slug", "owner__email"]
     inlines = [MachineInline, PaperInline, FinishingRateInline, MaterialInline, ServiceRateInline, ProductInline]

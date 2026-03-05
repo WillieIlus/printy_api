@@ -17,7 +17,7 @@ from inventory.models import Machine, Paper
 from pricing.choices import ColorMode, Sides
 from pricing.models import FinishingCategory, FinishingRate, Material, PrintingRate
 from quotes.choices import QuoteStatus
-from quotes.models import QuoteItem, QuoteItemFinishing, QuoteRequest
+from quotes.models import CustomerInquiry, QuoteItem, QuoteItemFinishing, QuoteRequest
 from shops.models import FavoriteShop, Shop, ShopRating
 
 from .validators import validate_shop_consistency
@@ -33,7 +33,7 @@ class PublicShopListSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Shop
-        fields = ["id", "name", "slug", "currency"]
+        fields = ["id", "name", "slug", "currency", "latitude", "longitude"]
         read_only_fields = ["slug"]
 
 
@@ -447,6 +447,188 @@ class QuoteRequestPatchSerializer(serializers.ModelSerializer):
 
 
 # ---------------------------------------------------------------------------
+# Staff quoting API (/api/quotes/) — staff-only, full control
+# ---------------------------------------------------------------------------
+
+
+class QuoteItemWithBreakdownSerializer(serializers.ModelSerializer):
+    """Read serializer for quote items including pricing_snapshot (breakdown)."""
+
+    product_name = serializers.SerializerMethodField()
+    finishings = QuoteItemFinishingWriteSerializer(many=True, read_only=True)
+
+    class Meta:
+        model = QuoteItem
+        fields = [
+            "id",
+            "item_type",
+            "product",
+            "product_name",
+            "title",
+            "spec_text",
+            "has_artwork",
+            "quantity",
+            "pricing_mode",
+            "paper",
+            "material",
+            "chosen_width_mm",
+            "chosen_height_mm",
+            "sides",
+            "color_mode",
+            "machine",
+            "special_instructions",
+            "unit_price",
+            "line_total",
+            "pricing_snapshot",
+            "pricing_locked_at",
+            "finishings",
+        ]
+
+    def get_product_name(self, obj):
+        if obj.item_type == "PRODUCT" and obj.product_id:
+            return obj.product.name
+        return obj.title or ""
+
+
+class QuoteCreateSerializer(serializers.ModelSerializer):
+    """Staff: create quote draft."""
+
+    class Meta:
+        model = QuoteRequest
+        fields = ["shop", "customer_name", "customer_email", "customer_phone", "notes", "customer_inquiry"]
+
+    def validate_shop(self, value):
+        if not value or not value.is_active:
+            raise serializers.ValidationError("Shop must be active.")
+        return value
+
+    def create(self, validated_data):
+        validated_data["created_by"] = self.context["request"].user
+        validated_data["status"] = QuoteStatus.DRAFT
+        return super().create(validated_data)
+
+
+class QuoteShareItemPublicSerializer(serializers.Serializer):
+    """Public quote item summary — no internal shop settings."""
+
+    product_name = serializers.SerializerMethodField()
+    title = serializers.CharField(allow_blank=True)
+    quantity = serializers.IntegerField()
+    size_label = serializers.SerializerMethodField()
+    sides = serializers.CharField(allow_blank=True, required=False)
+    finishing_label = serializers.SerializerMethodField()
+    line_total = serializers.DecimalField(max_digits=12, decimal_places=2, allow_null=True)
+
+    def get_product_name(self, obj):
+        if obj.item_type == "PRODUCT" and obj.product_id:
+            return obj.product.name
+        return obj.title or ""
+
+    def get_size_label(self, obj):
+        if obj.pricing_mode == "LARGE_FORMAT" and obj.chosen_width_mm and obj.chosen_height_mm:
+            return f"{obj.chosen_width_mm}×{obj.chosen_height_mm}mm"
+        if obj.product_id and obj.product:
+            w = obj.product.default_finished_width_mm
+            h = obj.product.default_finished_height_mm
+            if w and h:
+                return f"{w}×{h}mm"
+        return ""
+
+    def get_finishing_label(self, obj):
+        names = [
+            qif.finishing_rate.name
+            for qif in obj.finishings.select_related("finishing_rate").all()
+            if qif.finishing_rate
+        ]
+        return ", ".join(names) if names else ""
+
+
+class QuoteSharePublicSerializer(serializers.Serializer):
+    """Public quote summary for share link — no private shop settings."""
+
+    id = serializers.IntegerField()
+    shop_name = serializers.CharField(source="shop.name")
+    customer_name = serializers.CharField()
+    status = serializers.CharField()
+    total = serializers.DecimalField(max_digits=12, decimal_places=2, allow_null=True)
+    items = QuoteShareItemPublicSerializer(many=True)
+
+    class Meta:
+        fields = ["id", "shop_name", "customer_name", "status", "total", "items"]
+
+
+class QuoteDetailSerializer(serializers.ModelSerializer):
+    """Staff: full quote detail with items and pricing breakdown."""
+
+    items = QuoteItemWithBreakdownSerializer(many=True, read_only=True)
+    shop_name = serializers.CharField(source="shop.name", read_only=True)
+    shop_slug = serializers.CharField(source="shop.slug", read_only=True)
+
+    class Meta:
+        model = QuoteRequest
+        fields = [
+            "id",
+            "shop",
+            "shop_name",
+            "shop_slug",
+            "created_by",
+            "customer_name",
+            "customer_email",
+            "customer_phone",
+            "customer_inquiry",
+            "status",
+            "notes",
+            "total",
+            "pricing_locked_at",
+            "whatsapp_message",
+            "sent_at",
+            "created_at",
+            "updated_at",
+            "items",
+        ]
+
+
+class QuoteItemAddSerializer(QuoteItemWriteSerializer):
+    """
+    Staff: add/update quote item with calculator input.
+    On create/update, computes and stores pricing snapshot in a transaction.
+    """
+
+    class Meta(QuoteItemWriteSerializer.Meta):
+        pass
+
+    def create(self, validated_data):
+        from django.db import transaction
+        from quotes.pricing_service import compute_and_store_pricing
+
+        finishings_data = validated_data.pop("finishings", [])
+        quote_request = self.context["quote_request"]
+
+        with transaction.atomic():
+            item = QuoteItem.objects.create(quote_request=quote_request, **validated_data)
+            for fd in finishings_data:
+                QuoteItemFinishing.objects.create(quote_item=item, **fd)
+            compute_and_store_pricing(item)
+        return item
+
+    def update(self, instance, validated_data):
+        from django.db import transaction
+        from quotes.pricing_service import compute_and_store_pricing
+
+        finishings_data = validated_data.pop("finishings", None)
+        with transaction.atomic():
+            for attr, value in validated_data.items():
+                setattr(instance, attr, value)
+            instance.save()
+            if finishings_data is not None:
+                instance.finishings.all().delete()
+                for fd in finishings_data:
+                    QuoteItemFinishing.objects.create(quote_item=instance, **fd)
+            compute_and_store_pricing(instance)
+        return instance
+
+
+# ---------------------------------------------------------------------------
 # Seller serializers (shop-scoped with consistency validation)
 # ---------------------------------------------------------------------------
 
@@ -470,6 +652,8 @@ class ShopSerializer(serializers.ModelSerializer):
             "state",
             "country",
             "zip_code",
+            "latitude",
+            "longitude",
         ]
         read_only_fields = ["slug"]
 
@@ -1120,6 +1304,58 @@ class TweakedItemReadSerializer(serializers.ModelSerializer):
                 "cost": finishing_lines.get(qif.finishing_rate.name, str(qif.finishing_rate.price)),
             })
         return result
+
+
+class QuoteCalculatorInputSerializer(serializers.Serializer):
+    """Input for POST /api/calculator/quote-item/ — staff-only preview."""
+
+    product_id = serializers.IntegerField(required=True)
+    quantity = serializers.IntegerField(required=True, min_value=1)
+    width_mm = serializers.IntegerField(required=False, allow_null=True, min_value=1)
+    height_mm = serializers.IntegerField(required=False, allow_null=True, min_value=1)
+    paper_id = serializers.IntegerField(required=False, allow_null=True)
+    grammage = serializers.IntegerField(required=False, allow_null=True, min_value=1)
+    paper_type = serializers.CharField(required=False, allow_null=True, allow_blank=True)
+    sheet_size = serializers.CharField(required=False, allow_null=True, allow_blank=True)
+    finishing_ids = serializers.ListField(
+        child=serializers.IntegerField(),
+        required=False,
+        allow_empty=True,
+        default=list,
+    )
+    machine_id = serializers.IntegerField(required=False, allow_null=True)
+    sides = serializers.ChoiceField(
+        choices=[("SIMPLEX", "Simplex"), ("DUPLEX", "Duplex")],
+        required=False,
+        default="SIMPLEX",
+    )
+    color_mode = serializers.ChoiceField(
+        choices=[("COLOR", "Color"), ("BW", "B&W")],
+        required=False,
+        default="COLOR",
+    )
+    overhead_percent = serializers.DecimalField(
+        max_digits=5,
+        decimal_places=2,
+        required=False,
+        allow_null=True,
+    )
+    margin_percent = serializers.DecimalField(
+        max_digits=5,
+        decimal_places=2,
+        required=False,
+        allow_null=True,
+    )
+
+    def validate(self, attrs):
+        paper_id = attrs.get("paper_id")
+        grammage = attrs.get("grammage")
+        paper_type = attrs.get("paper_type") or ""
+        if not paper_id and (grammage is None or not paper_type.strip()):
+            raise serializers.ValidationError(
+                {"paper_id": "Provide paper_id or both grammage and paper_type."}
+            )
+        return attrs
 
 
 class GalleryProductOptionsSerializer(serializers.ModelSerializer):

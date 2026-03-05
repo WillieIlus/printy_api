@@ -48,10 +48,13 @@ INSTALLED_APPS = [
     "inventory",
     "pricing",
     "catalog",
+    "gallery",
     "quotes",
     "api",
     "feedback",
     "setup",
+    "jobs",
+    "subscriptions",
 ]
 
 AUTH_USER_MODEL = "accounts.User"
@@ -156,6 +159,8 @@ PASSWORD_RESET_URL = f"{FRONTEND_URL}/auth/reset-password"
 CSRF_TRUSTED_ORIGINS = [
     "http://localhost:3000",
     "http://127.0.0.1:3000",
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
     "http://localhost:8000",
     "http://127.0.0.1:8000",
     "https://printyke.netlify.app",
@@ -168,9 +173,12 @@ CSRF_TRUSTED_ORIGINS = [
 CORS_ALLOWED_ORIGINS = [
     "http://localhost:3000",
     "http://127.0.0.1:3000",
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
     "https://printyke.netlify.app",
     "https://printy.ke",
     "https://www.printy.ke",
+    "https://amazingace00.pythonanywhere.com",
     "https://willieilus.pythonanywhere.com",
 ]
 
@@ -205,6 +213,9 @@ if not DEBUG:
 # M-Pesa
 # =============================================================================
 
+MPESA_BASE_URL = os.environ.get(
+    "MPESA_BASE_URL", "https://sandbox.safaricom.co.ke"
+).rstrip("/")
 MPESA_CONSUMER_KEY = os.environ.get("MPESA_CONSUMER_KEY", "")
 MPESA_CONSUMER_SECRET = os.environ.get("MPESA_CONSUMER_SECRET", "")
 MPESA_SHORTCODE = os.environ.get("MPESA_SHORTCODE", "")
@@ -331,3 +342,45 @@ MEDIA_URL = "media/"
 MEDIA_ROOT = BASE_DIR / "media"
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
+
+# =============================================================================
+# Logging
+# =============================================================================
+
+LOGGING = {
+    "version": 1,
+    "disable_existing_loggers": False,
+    "formatters": {
+        "verbose": {
+            "format": "{levelname} {asctime} {module} {process:d} {thread:d} {message}",
+            "style": "{",
+        },
+        "simple": {
+            "format": "{levelname} {asctime} {message}",
+            "style": "{",
+        },
+    },
+    "handlers": {
+        "console": {
+            "class": "logging.StreamHandler",
+            "formatter": "simple",
+        },
+    },
+    "loggers": {
+        "django.request": {
+            "handlers": ["console"],
+            "level": "WARNING",
+            "propagate": False,
+        },
+        "api": {
+            "handlers": ["console"],
+            "level": "INFO",
+            "propagate": False,
+        },
+        "payments": {
+            "handlers": ["console"],
+            "level": "INFO",
+            "propagate": False,
+        },
+    },
+}
