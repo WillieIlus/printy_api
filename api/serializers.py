@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 from accounts.models import User
 from catalog.choices import PricingMode
 from catalog.models import Product, ProductFinishingOption, ProductImage
-from inventory.models import Machine, Paper
+from inventory.models import Machine, Paper, ProductionPaperSize
 from pricing.choices import ColorMode, Sides
 from pricing.models import FinishingCategory, FinishingRate, Material, PrintingRate
 from quotes.choices import QuoteStatus
@@ -656,6 +656,41 @@ class ShopSerializer(serializers.ModelSerializer):
             "longitude",
         ]
         read_only_fields = ["slug"]
+        extra_kwargs = {
+            # Coerce null to "" — model uses blank=True, default="" but no null=True
+            "description": {"allow_null": True, "default": ""},
+            "business_email": {"allow_null": True, "default": ""},
+            "phone_number": {"allow_null": True, "default": ""},
+            "address_line": {"allow_null": True, "default": ""},
+            "city": {"allow_null": True, "default": ""},
+            "state": {"allow_null": True, "default": ""},
+            "country": {"allow_null": True, "default": ""},
+            "zip_code": {"allow_null": True, "default": ""},
+        }
+
+    def validate_description(self, value):
+        return value or ""
+
+    def validate_business_email(self, value):
+        return value or ""
+
+    def validate_phone_number(self, value):
+        return value or ""
+
+    def validate_address_line(self, value):
+        return value or ""
+
+    def validate_city(self, value):
+        return value or ""
+
+    def validate_state(self, value):
+        return value or ""
+
+    def validate_country(self, value):
+        return value or ""
+
+    def validate_zip_code(self, value):
+        return value or ""
 
 
 class MachineSerializer(serializers.ModelSerializer):
@@ -682,13 +717,25 @@ class MachineSerializer(serializers.ModelSerializer):
         return attrs
 
 
+class ProductionPaperSizeSerializer(serializers.ModelSerializer):
+    """Read-only production size for imposition."""
+
+    class Meta:
+        model = ProductionPaperSize
+        fields = ["id", "code", "name", "width_mm", "height_mm"]
+
+
 class PaperSerializer(serializers.ModelSerializer):
     """CRUD for shop papers."""
+
+    production_size_detail = ProductionPaperSizeSerializer(source="production_size", read_only=True)
 
     class Meta:
         model = Paper
         fields = [
             "id",
+            "production_size",
+            "production_size_detail",
             "sheet_size",
             "gsm",
             "paper_type",
@@ -757,11 +804,15 @@ class FinishingRateSerializer(serializers.ModelSerializer):
 class MaterialSerializer(serializers.ModelSerializer):
     """CRUD for shop materials."""
 
+    production_size_detail = ProductionPaperSizeSerializer(source="production_size", read_only=True)
+
     class Meta:
         model = Material
         fields = [
             "id",
             "material_type",
+            "production_size",
+            "production_size_detail",
             "unit",
             "buying_price",
             "selling_price",
@@ -818,13 +869,19 @@ class ProductWriteSerializer(serializers.ModelSerializer):
             "pricing_mode",
             "default_finished_width_mm",
             "default_finished_height_mm",
+            "default_sheet_size",
             "default_bleed_mm",
             "default_sides",
             "min_quantity",
             "min_width_mm",
             "min_height_mm",
+            "max_width_mm",
+            "max_height_mm",
             "min_gsm",
             "max_gsm",
+            "allowed_sheet_sizes",
+            "allow_simplex",
+            "allow_duplex",
             "is_active",
             "status",
             "finishing_options",
@@ -839,8 +896,13 @@ class ProductWriteSerializer(serializers.ModelSerializer):
             "min_quantity": {"required": False, "min_value": 1},
             "min_width_mm": {"required": False},
             "min_height_mm": {"required": False},
+            "max_width_mm": {"required": False},
+            "max_height_mm": {"required": False},
             "min_gsm": {"required": False},
             "max_gsm": {"required": False},
+            "allowed_sheet_sizes": {"required": False},
+            "allow_simplex": {"required": False},
+            "allow_duplex": {"required": False},
             "status": {"required": False},
         }
 
@@ -921,13 +983,19 @@ class ProductListSerializer(serializers.ModelSerializer):
             "pricing_mode",
             "default_finished_width_mm",
             "default_finished_height_mm",
+            "default_sheet_size",
             "default_bleed_mm",
             "default_sides",
             "min_quantity",
             "min_width_mm",
             "min_height_mm",
+            "max_width_mm",
+            "max_height_mm",
             "min_gsm",
             "max_gsm",
+            "allowed_sheet_sizes",
+            "allow_simplex",
+            "allow_duplex",
             "is_active",
             "status",
             "can_publish",
@@ -961,13 +1029,19 @@ class ProductSerializer(serializers.ModelSerializer):
             "pricing_mode",
             "default_finished_width_mm",
             "default_finished_height_mm",
+            "default_sheet_size",
             "default_bleed_mm",
             "default_sides",
             "min_quantity",
             "min_width_mm",
             "min_height_mm",
+            "max_width_mm",
+            "max_height_mm",
             "min_gsm",
             "max_gsm",
+            "allowed_sheet_sizes",
+            "allow_simplex",
+            "allow_duplex",
             "is_active",
             "finishing_options",
             "price_hint",
@@ -1136,15 +1210,17 @@ class TweakAndAddSerializer(serializers.Serializer):
         pricing_mode = product.pricing_mode
 
         if pricing_mode == PricingMode.SHEET:
-            # Validate paper belongs to same shop and GSM constraints
+            # Validate paper belongs to same shop and product rules (gsm, allowed_sheet_sizes, dimensions)
             paper = attrs.get("paper")
             if paper and shop and paper.shop_id != shop.id:
                 raise serializers.ValidationError({"paper": "Paper must belong to this shop."})
             if paper:
-                if product.min_gsm and paper.gsm < product.min_gsm:
-                    raise serializers.ValidationError({"paper": f"Paper GSM ({paper.gsm}) is below minimum ({product.min_gsm})."})
-                if product.max_gsm and paper.gsm > product.max_gsm:
-                    raise serializers.ValidationError({"paper": f"Paper GSM ({paper.gsm}) is above maximum ({product.max_gsm})."})
+                from catalog.validation import validate_product_configuration
+                w_mm = attrs.get("chosen_width_mm") or product.default_finished_width_mm
+                h_mm = attrs.get("chosen_height_mm") or product.default_finished_height_mm
+                v = validate_product_configuration(product, paper=paper, width_mm=w_mm, height_mm=h_mm)
+                if not v["is_valid"]:
+                    raise serializers.ValidationError({"paper": "; ".join(v["errors"])})
             # Validate machine
             machine = attrs.get("machine")
             if machine and shop and machine.shop_id != shop.id:
@@ -1156,13 +1232,18 @@ class TweakAndAddSerializer(serializers.Serializer):
                 attrs["chosen_width_mm"] = product.default_finished_width_mm
             if not attrs.get("chosen_height_mm"):
                 attrs["chosen_height_mm"] = product.default_finished_height_mm
+            w = attrs.get("chosen_width_mm") or 0
+            h = attrs.get("chosen_height_mm") or 0
+            # Validate dimensions against product rules
+            from catalog.validation import validate_product_configuration
+            v = validate_product_configuration(product, width_mm=w, height_mm=h)
+            if not v["is_valid"]:
+                raise serializers.ValidationError({"chosen_width_mm": "; ".join(v["errors"])})
             # Validate material
             mat = attrs.get("material")
             if mat and shop and mat.shop_id != shop.id:
                 raise serializers.ValidationError({"material": "Material must belong to this shop."})
             # Validate minimum area
-            w = attrs.get("chosen_width_mm") or 0
-            h = attrs.get("chosen_height_mm") or 0
             qty = attrs["quantity"]
             area = (w / 1000) * (h / 1000) * qty
             min_area = float(product.min_area_m2 or Decimal("0.50"))

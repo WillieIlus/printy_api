@@ -140,9 +140,10 @@ def format_quote_for_whatsapp(
         lines.append("")
         lines.append(f"View full quote: {share_url}")
 
-    # Sign-off
+    # Sign-off (avoid double blank when turnaround already added one)
     if company_name:
-        lines.append("")
+        if lines and lines[-1] != "":
+            lines.append("")
         lines.append(f"Best regards,")
         lines.append(company_name)
         if company_phone:

@@ -5,7 +5,7 @@ from django.test import TestCase
 from rest_framework.test import APIClient
 
 from accounts.models import User
-from catalog.choices import PricingMode
+from catalog.choices import PricingMode, ProductStatus
 from catalog.models import Product
 from inventory.models import Machine, Paper
 from pricing.choices import Sides
@@ -33,6 +33,7 @@ class PublicShopsAPITestCase(TestCase):
             default_bleed_mm=3,
             default_sides=Sides.SIMPLEX,
             is_active=True,
+            status=ProductStatus.PUBLISHED,
         )
 
     def test_list_public_shops(self):

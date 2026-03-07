@@ -1,7 +1,8 @@
 """
 Product price range calculation.
 Returns "From KES X" / "Up to KES Y" or structured missing_fields when data is incomplete.
-Uses sensible defaults: quantity = min_quantity (default 1); size = default size if present.
+Uses explicit schema: Product fields, Paper, Machine, PrintingRate, Material.
+No fuzzy introspection; validation via catalog.validation.
 """
 from decimal import Decimal
 from math import ceil
@@ -10,6 +11,7 @@ from django.db.models import Q
 
 from catalog.choices import PricingMode
 from catalog.models import Product
+from catalog.validation import validate_product_configuration
 from inventory.choices import MachineType, SheetSize, SHEET_SIZE_DIMENSIONS
 from inventory.models import Machine, Paper
 from pricing.choices import ColorMode, Sides
@@ -39,6 +41,161 @@ def _format_price_display(min_val, max_val, can_calculate) -> str:
     if max_f is None or abs(max_f - min_f) < 0.01:
         return f"From KES {min_f:,.0f}"
     return f"KES {min_f:,.0f} – {max_f:,.0f}"
+
+
+def _get_valid_sheet_papers(product: Product, shop) -> list:
+    """Return papers that pass product validation (gsm, allowed_sheet_sizes)."""
+    papers_qs = Paper.objects.filter(
+        shop=shop,
+        is_active=True,
+        selling_price__gt=0,
+    )
+    if product.min_gsm is not None:
+        papers_qs = papers_qs.filter(gsm__gte=product.min_gsm)
+    if product.max_gsm is not None:
+        papers_qs = papers_qs.filter(gsm__lte=product.max_gsm)
+    papers = list(papers_qs)
+    allowed = product.allowed_sheet_sizes
+    if allowed is not None and len(allowed) > 0:
+        papers = [p for p in papers if p.sheet_size in allowed]
+    return [p for p in papers if validate_product_configuration(product, paper=p)["is_valid"]]
+
+
+def get_product_starting_price(product: Product) -> dict:
+    """
+    Compute a real starting price from valid defaults.
+    No silent zero fallbacks; returns clear validation errors when data is missing.
+
+    Returns:
+        {
+            "price": Decimal | None,
+            "is_valid": bool,
+            "errors": list[str],
+            "warnings": list[str],
+            "assumptions": dict,
+        }
+    """
+    errors: list[str] = []
+    warnings: list[str] = []
+    assumptions: dict = {}
+
+    if product.pricing_mode not in (PricingMode.SHEET, PricingMode.LARGE_FORMAT):
+        return {
+            "price": None,
+            "is_valid": False,
+            "errors": [f"Unknown pricing mode: {product.pricing_mode}"],
+            "warnings": [],
+            "assumptions": {},
+        }
+
+    shop = product.shop
+    min_qty = product.min_quantity or 1
+
+    if product.pricing_mode == PricingMode.SHEET:
+        if not product.default_finished_width_mm or not product.default_finished_height_mm:
+            errors.append("Product requires default_finished_width_mm and default_finished_height_mm for pricing.")
+            return {"price": None, "is_valid": False, "errors": errors, "warnings": warnings, "assumptions": {}}
+
+        v = validate_product_configuration(
+            product,
+            width_mm=product.default_finished_width_mm,
+            height_mm=product.default_finished_height_mm,
+        )
+        if not v["is_valid"]:
+            errors.extend(v["errors"])
+            return {"price": None, "is_valid": False, "errors": errors, "warnings": warnings, "assumptions": {}}
+
+        valid_papers = _get_valid_sheet_papers(product, shop)
+        if not valid_papers:
+            errors.append("No paper matches product rules (gsm range, allowed sheet sizes). Add paper or adjust product rules.")
+            return {"price": None, "is_valid": False, "errors": errors, "warnings": warnings, "assumptions": {}}
+
+        paper = valid_papers[0]
+        w_mm, h_mm = paper.get_dimensions_mm()
+        if not w_mm or not h_mm:
+            errors.append(f"Paper {paper} has no dimensions. Set sheet_size or production_size.")
+            return {"price": None, "is_valid": False, "errors": errors, "warnings": warnings, "assumptions": {}}
+
+        cps = product.get_copies_per_sheet(paper.sheet_size, w_mm, h_mm)
+        if cps <= 0:
+            errors.append("Product dimensions do not fit on sheet.")
+            return {"price": None, "is_valid": False, "errors": errors, "warnings": warnings, "assumptions": {}}
+
+        sheets = ceil(min_qty / cps)
+        sides = product.default_sides or Sides.SIMPLEX
+        if sides == Sides.DUPLEX and not product.allow_duplex:
+            sides = Sides.SIMPLEX
+        if sides == Sides.SIMPLEX and not product.allow_simplex:
+            sides = Sides.DUPLEX if product.allow_duplex else Sides.SIMPLEX
+
+        machine = Machine.objects.filter(shop=shop, is_active=True).first()
+        if not machine:
+            errors.append("No active machine for shop.")
+            return {"price": None, "is_valid": False, "errors": errors, "warnings": warnings, "assumptions": {}}
+
+        rate, print_price = PrintingRate.resolve(machine, paper.sheet_size, ColorMode.COLOR, sides)
+        if not rate or print_price is None:
+            errors.append(f"No printing rate for {machine.name} / {paper.sheet_size} / color.")
+            return {"price": None, "is_valid": False, "errors": errors, "warnings": warnings, "assumptions": {}}
+
+        paper_cost = paper.selling_price * sheets
+        print_cost = print_price * sheets
+        total = paper_cost + print_cost
+
+        assumptions = {
+            "quantity": min_qty,
+            "sheet_size": paper.sheet_size,
+            "paper_label": f"{paper.sheet_size} {paper.gsm}gsm",
+            "paper_id": paper.id,
+            "machine_id": machine.id,
+            "sides": sides,
+            "sheets_used": sheets,
+            "copies_per_sheet": cps,
+        }
+        return {
+            "price": total,
+            "is_valid": True,
+            "errors": [],
+            "warnings": warnings,
+            "assumptions": assumptions,
+        }
+
+    # LARGE_FORMAT
+    w_mm = product.min_width_mm or product.default_finished_width_mm
+    h_mm = product.min_height_mm or product.default_finished_height_mm
+    if not w_mm or not h_mm:
+        errors.append("Product requires dimensions (min_width_mm/min_height_mm or default_finished) for LARGE_FORMAT.")
+        return {"price": None, "is_valid": False, "errors": errors, "warnings": warnings, "assumptions": {}}
+
+    v = validate_product_configuration(product, width_mm=w_mm, height_mm=h_mm)
+    if not v["is_valid"]:
+        errors.extend(v["errors"])
+        return {"price": None, "is_valid": False, "errors": errors, "warnings": warnings, "assumptions": {}}
+
+    materials = list(Material.objects.filter(shop=shop, is_active=True, selling_price__gt=0))
+    if not materials:
+        errors.append("No active material with selling_price for LARGE_FORMAT.")
+        return {"price": None, "is_valid": False, "errors": errors, "warnings": warnings, "assumptions": {}}
+
+    area_sqm = (Decimal(w_mm) / 1000) * (Decimal(h_mm) / 1000) * min_qty
+    mat = materials[0]
+    total = mat.selling_price * area_sqm
+
+    assumptions = {
+        "quantity": min_qty,
+        "width_mm": w_mm,
+        "height_mm": h_mm,
+        "area_sqm": float(area_sqm),
+        "material_id": mat.id,
+        "material_type": mat.material_type,
+    }
+    return {
+        "price": total,
+        "is_valid": True,
+        "errors": [],
+        "warnings": warnings,
+        "assumptions": assumptions,
+    }
 
 
 def product_price_hint(product: Product) -> dict:
@@ -82,9 +239,9 @@ def compute_product_price_range_est(product: Product) -> dict:
     Returns structure for price_range_est serializer field.
     """
     shop = product.shop
-    min_qty = getattr(product, "min_quantity", 1) or 1
+    min_qty = product.min_quantity or 1
     color_mode = ColorMode.COLOR
-    sides = getattr(product, "default_sides", Sides.SIMPLEX) or Sides.SIMPLEX
+    sides = product.default_sides or Sides.SIMPLEX
     sheets_used = 1  # Start with 1 for range display unless dimensions available
 
     if product.pricing_mode != PricingMode.SHEET:
@@ -107,37 +264,48 @@ def compute_product_price_range_est(product: Product) -> dict:
     missing = []
     suggestions = []
 
-    # Infer sheet_size: product.default_sheet_size, or SRA3 for digital, else first from shop papers
-    sheet_size = (getattr(product, "default_sheet_size", None) or "").strip()
-    if not sheet_size:
-        papers_any = list(Paper.objects.filter(shop=shop, is_active=True, selling_price__gt=0).values_list("sheet_size", flat=True).distinct())
-        digital_machines = Machine.objects.filter(shop=shop, is_active=True, machine_type=MachineType.DIGITAL).exists()
-        if digital_machines and SheetSize.SRA3 in papers_any:
-            sheet_size = SheetSize.SRA3
-        elif papers_any:
-            sheet_size = papers_any[0]
-        else:
-            sheet_size = SheetSize.SRA3  # Default fallback
+    # Validate default dimensions against product rules
+    if product.default_finished_width_mm and product.default_finished_height_mm:
+        v = validate_product_configuration(
+            product,
+            width_mm=product.default_finished_width_mm,
+            height_mm=product.default_finished_height_mm,
+        )
+        if not v["is_valid"]:
+            missing.append("product_rules")
+            suggestions.extend([{"code": "PRODUCT_RULES", "message": e} for e in v["errors"]])
+            return {
+                "can_calculate": False,
+                "price_display": "Price on request",
+                "pricing_mode_label": PRICING_MODE_LABELS.get(product.pricing_mode, str(product.pricing_mode or "—")),
+                "pricing_mode_explanation": PRICING_MODE_EXPLANATIONS.get(
+                    product.pricing_mode,
+                    "Price depends on your choices (paper, quantity, finishing).",
+                ),
+                "lowest": _empty_range_payload(),
+                "highest": _empty_range_payload(),
+                "reason": "; ".join(v["errors"]),
+                "missing_fields": missing,
+                "suggestions": suggestions,
+            }
 
-    # Eligible papers: shop, sheet_size, selling_price > 0, gsm range
-    papers_qs = Paper.objects.filter(
-        shop=shop,
-        is_active=True,
-        selling_price__gt=0,
-        sheet_size=sheet_size,
-    )
-    if product.min_gsm is not None:
-        papers_qs = papers_qs.filter(gsm__gte=product.min_gsm)
-    if product.max_gsm is not None:
-        papers_qs = papers_qs.filter(gsm__lte=product.max_gsm)
-    eligible_papers = list(papers_qs)
-
+    # Use only valid papers (pass product rules)
+    eligible_papers = _get_valid_sheet_papers(product, shop)
+    sheet_size = product.default_sheet_size or SheetSize.SRA3
     if not eligible_papers:
         missing.append("paper")
         suggestions.append({
             "code": "ADD_PAPER",
-            "message": f"Add paper selling prices for {sheet_size} papers under Shop → Papers.",
+            "message": "Add paper that matches product rules (gsm range, allowed sheet sizes).",
         })
+    else:
+        valid_sheet_sizes = [p.sheet_size for p in eligible_papers]
+        sheet_size = (
+            product.default_sheet_size
+            if product.default_sheet_size in valid_sheet_sizes
+            else eligible_papers[0].sheet_size
+        )
+        eligible_papers = [p for p in eligible_papers if p.sheet_size == sheet_size]
 
     # Machine: first active that supports sheet size (fits sw×sh or sh×sw)
     sheet_dims = SHEET_SIZE_DIMENSIONS.get(sheet_size, (0, 0))
@@ -255,7 +423,9 @@ def _empty_range_payload():
 
 def get_product_price_range(product: Product) -> dict:
     """
-    Compute price range for a product.
+    Compute price range for a product using only valid pricing combinations.
+    Validates product configuration; no silent zero fallbacks.
+
     Returns:
         {
             "lowest_price": Decimal | None,
@@ -264,22 +434,13 @@ def get_product_price_range(product: Product) -> dict:
             "missing_fields": list[str],
         }
     """
-    missing = []
+    missing: list[str] = []
     shop = product.shop
-    min_qty = getattr(product, "min_quantity", 1) or 1
+    min_qty = product.min_quantity or 1
 
     if product.pricing_mode == PricingMode.SHEET:
-        # Need: dimensions, paper, machine, printing rate
         if not product.default_finished_width_mm or not product.default_finished_height_mm:
             missing.append("dimensions")
-        papers = list(Paper.objects.filter(shop=shop, is_active=True, selling_price__gt=0))
-        if not papers:
-            missing.append("paper")
-        machines = list(Machine.objects.filter(shop=shop, is_active=True))
-        if not machines:
-            missing.append("machine")
-
-        if missing:
             return {
                 "lowest_price": None,
                 "highest_price": None,
@@ -287,21 +448,64 @@ def get_product_price_range(product: Product) -> dict:
                 "missing_fields": missing,
             }
 
-        # Find cheapest and most expensive combinations
+        v = validate_product_configuration(
+            product,
+            width_mm=product.default_finished_width_mm,
+            height_mm=product.default_finished_height_mm,
+        )
+        if not v["is_valid"]:
+            missing.append("product_rules")
+            return {
+                "lowest_price": None,
+                "highest_price": None,
+                "can_calculate": False,
+                "missing_fields": missing,
+            }
+
+        valid_papers = _get_valid_sheet_papers(product, shop)
+        if not valid_papers:
+            missing.append("paper")
+            return {
+                "lowest_price": None,
+                "highest_price": None,
+                "can_calculate": False,
+                "missing_fields": missing,
+            }
+
+        machines = list(Machine.objects.filter(shop=shop, is_active=True))
+        if not machines:
+            missing.append("machine")
+            return {
+                "lowest_price": None,
+                "highest_price": None,
+                "can_calculate": False,
+                "missing_fields": missing,
+            }
+
         low_total = Decimal("999999")
         high_total = Decimal("0")
+        has_valid_combination = False
 
-        for paper in papers:
-            if not paper.selling_price or not paper.width_mm or not paper.height_mm:
+        for paper in valid_papers:
+            w_mm, h_mm = paper.get_dimensions_mm()
+            if not w_mm or not h_mm:
                 continue
-            cps = product.get_copies_per_sheet(paper.sheet_size, paper.width_mm, paper.height_mm)
+            cps = product.get_copies_per_sheet(paper.sheet_size, w_mm, h_mm)
             if cps <= 0:
                 continue
             sheets = ceil(min_qty / cps)
 
+            sides_options = []
+            if product.allow_simplex:
+                sides_options.append(Sides.SIMPLEX)
+            if product.allow_duplex:
+                sides_options.append(Sides.DUPLEX)
+            if not sides_options:
+                sides_options = [product.default_sides or Sides.SIMPLEX]
+
             for machine in machines:
                 for color in [ColorMode.BW, ColorMode.COLOR]:
-                    for sides in [Sides.SIMPLEX, Sides.DUPLEX]:
+                    for sides in sides_options:
                         rate, price = PrintingRate.resolve(
                             machine, paper.sheet_size, color, sides
                         )
@@ -311,8 +515,9 @@ def get_product_price_range(product: Product) -> dict:
                             total = paper_cost + print_cost
                             low_total = min(low_total, total)
                             high_total = max(high_total, total)
+                            has_valid_combination = True
 
-        if low_total == Decimal("999999"):
+        if not has_valid_combination:
             missing.append("printing_rate")
             return {
                 "lowest_price": None,
@@ -322,23 +527,37 @@ def get_product_price_range(product: Product) -> dict:
             }
 
         return {
-            "lowest_price": low_total if low_total < Decimal("999999") else None,
-            "highest_price": high_total if high_total > 0 else None,
+            "lowest_price": low_total,
+            "highest_price": high_total,
             "can_calculate": True,
             "missing_fields": [],
         }
 
-    elif product.pricing_mode == PricingMode.LARGE_FORMAT:
+    if product.pricing_mode == PricingMode.LARGE_FORMAT:
+        w_mm = product.min_width_mm or product.default_finished_width_mm
+        h_mm = product.min_height_mm or product.default_finished_height_mm
+        if not w_mm or not h_mm:
+            missing.append("dimensions")
+            return {
+                "lowest_price": None,
+                "highest_price": None,
+                "can_calculate": False,
+                "missing_fields": missing,
+            }
+
+        v = validate_product_configuration(product, width_mm=w_mm, height_mm=h_mm)
+        if not v["is_valid"]:
+            missing.append("product_rules")
+            return {
+                "lowest_price": None,
+                "highest_price": None,
+                "can_calculate": False,
+                "missing_fields": missing,
+            }
+
         materials = list(Material.objects.filter(shop=shop, is_active=True, selling_price__gt=0))
         if not materials:
             missing.append("material")
-
-        w_mm = getattr(product, "min_width_mm", None) or product.default_finished_width_mm
-        h_mm = getattr(product, "min_height_mm", None) or product.default_finished_height_mm
-        if not w_mm or not h_mm:
-            missing.append("dimensions")
-
-        if missing:
             return {
                 "lowest_price": None,
                 "highest_price": None,
@@ -347,16 +566,12 @@ def get_product_price_range(product: Product) -> dict:
             }
 
         area_sqm = (Decimal(w_mm) / 1000) * (Decimal(h_mm) / 1000) * min_qty
-        low_total = Decimal("999999")
-        high_total = Decimal("0")
-        for mat in materials:
-            total = mat.selling_price * area_sqm
-            low_total = min(low_total, total)
-            high_total = max(high_total, total)
+        low_total = min(m.selling_price * area_sqm for m in materials)
+        high_total = max(m.selling_price * area_sqm for m in materials)
 
         return {
-            "lowest_price": low_total if low_total < Decimal("999999") else None,
-            "highest_price": high_total if high_total > 0 else None,
+            "lowest_price": low_total,
+            "highest_price": high_total,
             "can_calculate": True,
             "missing_fields": [],
         }

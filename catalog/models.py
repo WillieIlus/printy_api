@@ -99,6 +99,24 @@ class Product(TimeStampedModel):
         verbose_name=_("min height (mm)"),
         help_text=_("Min height for LARGE_FORMAT price range (defaults to default_finished_height_mm)."),
     )
+    max_width_mm = models.PositiveIntegerField(
+        null=True,
+        blank=True,
+        verbose_name=_("max width (mm)"),
+        help_text=_("Max finished width (e.g. 105 for A6 business cards). Rejects larger sizes."),
+    )
+    max_height_mm = models.PositiveIntegerField(
+        null=True,
+        blank=True,
+        verbose_name=_("max height (mm)"),
+        help_text=_("Max finished height (e.g. 148 for A6). Rejects larger sizes."),
+    )
+    allowed_sheet_sizes = models.JSONField(
+        null=True,
+        blank=True,
+        verbose_name=_("allowed sheet sizes"),
+        help_text=_("List of allowed parent sheet codes (e.g. [\"A4\",\"A3\",\"SRA3\"]). Empty = no restriction."),
+    )
     min_gsm = models.PositiveIntegerField(
         null=True,
         blank=True,
@@ -180,6 +198,16 @@ class Product(TimeStampedModel):
             if self.min_gsm > self.max_gsm:
                 raise ValidationError(
                     {"max_gsm": _("Max GSM must be >= min GSM.")}
+                )
+        if self.min_width_mm is not None and self.max_width_mm is not None:
+            if self.min_width_mm > self.max_width_mm:
+                raise ValidationError(
+                    {"max_width_mm": _("Max width must be >= min width.")}
+                )
+        if self.min_height_mm is not None and self.max_height_mm is not None:
+            if self.min_height_mm > self.max_height_mm:
+                raise ValidationError(
+                    {"max_height_mm": _("Max height must be >= min height.")}
                 )
 
     def get_copies_per_sheet(self, sheet_size: str, sheet_width_mm: int = None, sheet_height_mm: int = None) -> int:

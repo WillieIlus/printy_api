@@ -338,65 +338,32 @@ def calculate_quote_item(item: QuoteItem, force: bool = False) -> tuple[Decimal,
 
 def _build_item_breakdown_lines(item: QuoteItem) -> list[dict]:
     """
-    Build breakdown lines for SHEET items: Paper charge, Printing (Single/Double), Total.
-    Single total = paper + printing single; Double total = paper + printing double.
-    Returns list of {label, amount} for frontend.
+    Build breakdown lines for quote items using the summary layer.
+    Reuses build_quote_item_summary; no recalculated imposition or costing.
     """
-    lines = []
-    pricing_mode = _get_effective_pricing_mode(item)
-    if pricing_mode != PricingMode.SHEET or not item.paper_id:
-        return lines
+    from quotes.summary import build_quote_item_summary, summary_to_breakdown_lines
 
-    paper = item.paper
-    quantity = item.quantity or 0
-    if quantity <= 0:
-        return lines
+    summary = build_quote_item_summary(item)
+    lines = summary_to_breakdown_lines(summary)
 
-    product = item.product
-    if product and paper.width_mm and paper.height_mm:
-        pieces = product.get_copies_per_sheet(
-            paper.sheet_size, paper.width_mm, paper.height_mm
+    # Add printing detail (Color Single/Double) when available
+    if item.machine_id and item.machine and item.paper_id and item.sides and item.color_mode:
+        from pricing.models import PrintingRate
+        rate, _ = PrintingRate.resolve(
+            item.machine, item.paper.sheet_size, item.color_mode, item.sides
         )
-    else:
-        pieces = 1
-    sheets_count = sheets_needed(quantity, pieces)
-
-    # Sheets / imposition (for transparency)
-    lines.append({"label": f"Sheets: {sheets_count} (×{pieces} up)", "amount": ""})
-
-    # Paper charge
-    paper_total = paper.selling_price * sheets_count
-    lines.append({"label": f"Paper: {paper.sheet_size} {paper.gsm}gsm", "amount": f"{paper_total:,.0f}"})
-
-    # Printing charge (Single or Double - Kenyan price list style)
-    if item.machine_id and item.sides and item.color_mode:
-        rate, press_price = PrintingRate.resolve(
-            item.machine, paper.sheet_size, item.color_mode, item.sides
-        )
-        if rate and press_price is not None:
-            press_total = press_price * sheets_count
+        if rate:
             side_label = "Double" if item.sides == Sides.DUPLEX else "Single"
-            lines.append(
-                {"label": f"Printing: {rate.get_color_mode_display()} {side_label}", "amount": f"{press_total:,.0f}"}
-            )
+            # Replace generic "Print" with detailed label
+            for i, ln in enumerate(lines):
+                if ln.get("label") == "Print":
+                    lines[i] = {
+                        "label": f"Printing: {rate.get_color_mode_display()} {side_label}",
+                        "amount": ln.get("amount", ""),
+                    }
+                    break
 
-    # Finishing (uses sheets_count for PER_SHEET)
-    sides_count = _sides_count(item.sides)
-    area_sqm = _sheet_area_sqm(paper) * sheets_count
-    for qif in item.finishings.select_related("finishing_rate").all():
-        fin_cost = _apply_finishing_cost(
-            qif.finishing_rate,
-            quantity,
-            area_sqm,
-            sides_count,
-            qif.price_override,
-            getattr(qif, "apply_to_sides", None) or "BOTH",
-            sheets_needed_val=sheets_count,
-        )
-        if fin_cost and fin_cost > 0:
-            lines.append({"label": f"Finishing: {qif.finishing_rate.name}", "amount": f"{fin_cost:,.0f}"})
-
-    # Services
+    # Add services (not in summary)
     for qis in item.services.select_related("service_rate").filter(is_selected=True):
         price = _get_service_price(qis.service_rate, qis.price_override, None)
         if price is not None:

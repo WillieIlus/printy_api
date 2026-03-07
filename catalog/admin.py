@@ -52,19 +52,22 @@ class ProductAdmin(admin.ModelAdmin):
                 "fields": (
                     "default_finished_width_mm",
                     "default_finished_height_mm",
+                    "default_sheet_size",
                     "default_sides",
                     "min_quantity",
                     "min_width_mm",
                     "min_height_mm",
+                    "max_width_mm",
+                    "max_height_mm",
                 ),
-                "description": f"Bleed is {BLEED_MM}mm (used for auto imposition). min_* for price range.",
+                "description": f"Bleed is {BLEED_MM}mm (used for auto imposition). min/max for size rules (e.g. business cards max A6).",
             },
         ),
         (
             "Paper constraints",
             {
-                "fields": ("min_gsm", "max_gsm", "allow_simplex", "allow_duplex"),
-                "description": "e.g. business card 250–350 gsm; flyer 130–170 gsm.",
+                "fields": ("min_gsm", "max_gsm", "allowed_sheet_sizes", "allow_simplex", "allow_duplex"),
+                "description": "e.g. business card 250–350 gsm; flyer 130–170 gsm. allowed_sheet_sizes: JSON list like [\"A4\",\"A3\",\"SRA3\"] or empty.",
             },
         ),
         (
