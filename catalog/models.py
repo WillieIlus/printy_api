@@ -5,6 +5,7 @@ from django.db import models
 from django.utils.translation import gettext_lazy as _
 
 from common.models import TimeStampedModel
+from common.slug import AutoSlugMixin
 from inventory.choices import SheetSize, SHEET_SIZE_DIMENSIONS
 from pricing.choices import FinishingSides, Sides
 from pricing.models import FinishingRate
@@ -17,8 +18,63 @@ from .imposition import pieces_per_sheet as imposition_pieces_per_sheet
 BLEED_MM = 3
 
 
-class Product(TimeStampedModel):
-    """Product in a shop's catalog."""
+class ProductCategory(AutoSlugMixin, models.Model):
+    """Product category for gallery/catalog. shop=null means global category."""
+
+    slug_source_field = "name"
+
+    shop = models.ForeignKey(
+        Shop,
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="product_categories",
+        verbose_name=_("shop"),
+        help_text=_("Null = global category."),
+    )
+    name = models.CharField(max_length=255, verbose_name=_("name"))
+    slug = models.SlugField(
+        max_length=100,
+        verbose_name=_("slug"),
+        help_text=_("Unique per shop or global."),
+    )
+    icon_svg_path = models.TextField(
+        blank=True,
+        default="",
+        verbose_name=_("icon SVG path"),
+    )
+    description = models.TextField(
+        blank=True,
+        default="",
+        verbose_name=_("description"),
+    )
+
+    class Meta:
+        verbose_name = _("product category")
+        verbose_name_plural = _("product categories")
+        constraints = [
+            models.UniqueConstraint(
+                fields=["shop", "slug"],
+                name="catalog_category_shop_slug_unique",
+            ),
+            models.UniqueConstraint(
+                fields=["slug"],
+                condition=models.Q(shop__isnull=True),
+                name="catalog_category_global_slug_unique",
+            ),
+        ]
+
+    def get_slug_scope(self):
+        return {"shop_id": self.shop_id} if self.shop_id else {"shop__isnull": True}
+
+    def __str__(self):
+        return self.name
+
+
+class Product(TimeStampedModel, AutoSlugMixin):
+    """Product in a shop's catalog. Merged with gallery product (images, slug, display fields)."""
+
+    slug_source_field = "name"
 
     shop = models.ForeignKey(
         Shop,
@@ -39,12 +95,21 @@ class Product(TimeStampedModel):
         verbose_name=_("description"),
         help_text=_("Product description."),
     )
-    category = models.CharField(
-        max_length=255,
+    category = models.ForeignKey(
+        ProductCategory,
+        on_delete=models.SET_NULL,
+        null=True,
         blank=True,
-        default="",
+        related_name="products",
         verbose_name=_("category"),
         help_text=_("Product category."),
+    )
+    slug = models.SlugField(
+        max_length=100,
+        blank=True,
+        default="",
+        verbose_name=_("slug"),
+        help_text=_("URL-friendly identifier. Unique per shop."),
     )
     pricing_mode = models.CharField(
         max_length=20,
@@ -176,14 +241,41 @@ class Product(TimeStampedModel):
         verbose_name=_("highest price (est.)"),
         help_text=_("Estimated highest price for this product (display only)."),
     )
+    # Gallery display fields (merged from gallery.Product)
+    dimensions_label = models.CharField(
+        max_length=100,
+        blank=True,
+        default="",
+        verbose_name=_("dimensions label"),
+        help_text=_("e.g. 90 × 55 mm"),
+    )
+    weight_label = models.CharField(
+        max_length=100,
+        blank=True,
+        default="",
+        verbose_name=_("weight label"),
+        help_text=_("e.g. 350gsm"),
+    )
+    is_popular = models.BooleanField(default=False, verbose_name=_("is popular"))
+    is_best_value = models.BooleanField(default=False, verbose_name=_("is best value"))
+    is_new = models.BooleanField(default=False, verbose_name=_("is new"))
 
     class Meta:
         ordering = ["shop", "name"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["shop", "slug"],
+                name="catalog_product_shop_slug_unique",
+            ),
+        ]
         verbose_name = _("product")
         verbose_name_plural = _("products")
 
     def __str__(self):
         return f"{self.name} ({self.shop.name})"
+
+    def get_slug_scope(self):
+        return {"shop_id": self.shop_id} if self.shop_id else None
 
     def get_primary_image(self):
         """Return the primary image, or the first image, or None."""

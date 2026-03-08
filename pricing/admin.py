@@ -19,8 +19,9 @@ class PrintingRateAdmin(admin.ModelAdmin):
         "single_price",
         "double_price",
         "is_active",
+        "is_default",
     ]
-    list_filter = ["sheet_size", "color_mode", "is_active"]
+    list_filter = ["sheet_size", "color_mode", "is_active", "is_default"]
 
 
 @admin.register(FinishingRate)
@@ -30,6 +31,8 @@ class FinishingRateAdmin(admin.ModelAdmin):
         "shop",
         "category",
         "charge_unit",
+        "thickness_microns",
+        "is_single_sided_only",
         "price",
         "double_side_price",
         "setup_fee",
@@ -47,14 +50,23 @@ class FinishingRateAdmin(admin.ModelAdmin):
                 "description": "double_side_price: for lamination etc. when applied to both sides. Blank = 2× single.",
             },
         ),
+        (
+            "Lamination",
+            {
+                "fields": ("thickness_microns", "is_single_sided_only"),
+                "description": "thickness_microns: e.g. 12, 25, 50. is_single_sided_only: can only apply to one side.",
+                "classes": ("collapse",),
+            },
+        ),
     )
 
 
 @admin.register(Material)
 class MaterialAdmin(admin.ModelAdmin):
-    list_display = ["material_type", "shop", "unit", "selling_price", "is_active"]
+    list_display = ["material_type", "shop", "production_size", "unit", "selling_price", "is_active"]
     list_filter = ["is_active"]
     search_fields = ["material_type"]
+    autocomplete_fields = ["production_size"]
 
 
 class ServiceRateTierInline(admin.TabularInline):

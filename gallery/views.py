@@ -26,7 +26,7 @@ class ProductGalleryView(APIView):
         categories = ProductCategory.objects.prefetch_related("products").order_by("name")
         result = []
         for cat in categories:
-            products = cat.products.filter(is_active=True).order_by("title")
+            products = cat.products.filter(is_active=True).order_by("name")
             if not products.exists():
                 continue
             result.append({
@@ -80,7 +80,7 @@ class GalleryProductViewSet(GalleryShopScopedMixin, viewsets.ModelViewSet):
 
     def get_queryset(self):
         shop = self._get_shop()
-        return Product.objects.filter(shop=shop).select_related("category").order_by("title")
+        return Product.objects.filter(shop=shop).select_related("category").order_by("name")
 
     def get_serializer_context(self):
         ctx = super().get_serializer_context()

@@ -40,9 +40,12 @@ job_claims_router = DefaultRouter()
 job_claims_router.register(r"job-claims", JobClaimViewSet, basename="job-claim")
 
 urlpatterns = [
+    # Demo calculator (public, no auth)
+    path("", include("demo.urls")),
     path("", include(public_router.urls)),
     path("", include(finishing_category_router.urls)),
     path("public/products/", views.PublicAllProductsView.as_view(), name="public-all-products"),
+    path("public/match-shops/", views.MatchShopsView.as_view(), name="public-match-shops"),
     path("products/gallery/", ProductGalleryView.as_view(), name="products-gallery"),
     path("", include(quote_router.urls)),
     path("", include(quotes_router.urls)),
@@ -132,6 +135,11 @@ urlpatterns = [
         name="tweaked-item-update",
     ),
     # Gallery product with full tweaking options (public, no auth)
+    path(
+        "public/shops/<slug:slug>/custom-options/",
+        views.ShopCustomOptionsView.as_view(),
+        name="public-shop-custom-options",
+    ),
     path(
         "public/products/<int:pk>/options/",
         views.GalleryProductDetailView.as_view(),
@@ -299,6 +307,11 @@ urlpatterns = [
         "shops/<slug:shop_slug>/gallery/products/<slug:slug>/calculate-price/",
         GalleryProductViewSet.as_view({"post": "calculate_price"}),
         name="gallery-product-calculate-price",
+    ),
+    path(
+        "shops/<slug:shop_slug>/rate-card/",
+        views.ShopRateCardView.as_view(),
+        name="shop-rate-card",
     ),
     path(
         "shops/<slug:shop_slug>/products/",

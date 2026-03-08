@@ -1,7 +1,7 @@
 from django.contrib import admin
 from django.utils.html import format_html
 
-from .models import Imposition, Product, ProductFinishingOption, ProductImage
+from .models import Imposition, Product, ProductCategory, ProductFinishingOption, ProductImage
 from .models import BLEED_MM
 from inventory.choices import SHEET_SIZE_DIMENSIONS
 
@@ -40,12 +40,12 @@ class ProductAdmin(admin.ModelAdmin):
         "is_active",
     ]
     list_filter = ["pricing_mode", "is_active"]
-    search_fields = ["name", "category"]
+    search_fields = ["name", "category__name"]
     inlines = [ImpositionInline, ProductFinishingOptionInline, ProductImageInline]
     readonly_fields = ["imposition_preview", "calculation_formula_display", "price_status_display"]
 
     fieldsets = (
-        (None, {"fields": ("shop", "name", "description", "category", "pricing_mode", "is_active")}),
+        (None, {"fields": ("shop", "name", "description", "category", "slug", "pricing_mode", "is_active")}),
         (
             "Dimensions",
             {
@@ -73,6 +73,10 @@ class ProductAdmin(admin.ModelAdmin):
         (
             "Price range (est.)",
             {"fields": ("lowest_price", "highest_price")},
+        ),
+        (
+            "Gallery display",
+            {"fields": ("dimensions_label", "weight_label", "is_popular", "is_best_value", "is_new")},
         ),
         (
             "Calculated",
@@ -119,6 +123,13 @@ class ProductAdmin(admin.ModelAdmin):
         return format_html("".join(parts))
 
     price_status_display.short_description = "Price range / missing fields"
+
+
+@admin.register(ProductCategory)
+class ProductCategoryAdmin(admin.ModelAdmin):
+    list_display = ["name", "shop", "slug"]
+    list_filter = ["shop"]
+    search_fields = ["name"]
 
 
 @admin.register(Imposition)

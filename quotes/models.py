@@ -342,6 +342,23 @@ class QuoteItem(TimeStampedModel):
         verbose_name=_("pricing locked at"),
         help_text=_("When this item was priced."),
     )
+    item_spec_snapshot = models.JSONField(
+        null=True,
+        blank=True,
+        verbose_name=_("item spec snapshot"),
+        help_text=_(
+            "Frozen snapshot of buyer choices at add-to-quote time. "
+            "Never mutates the source product template."
+        ),
+    )
+    needs_review = models.BooleanField(
+        default=False,
+        verbose_name=_("needs review"),
+        help_text=_(
+            "True when pricing cannot be calculated (missing setup). "
+            "Item is saved; seller reviews and prices manually."
+        ),
+    )
 
     class Meta:
         ordering = ["pk"]
@@ -416,6 +433,90 @@ class QuoteItemFinishing(TimeStampedModel):
 
     def __str__(self):
         return f"{self.quote_item} - {self.finishing_rate.name}"
+
+
+class QuoteItemComponent(TimeStampedModel):
+    """
+    Multi-part job component: cover, insert, body.
+    For simple items: one BODY component. For booklets: COVER + INSERT.
+    Each component has its own paper/material, sides, color_mode.
+    """
+
+    COMPONENT_TYPE_CHOICES = [
+        ("BODY", _("Body")),
+        ("COVER", _("Cover")),
+        ("INSERT", _("Insert")),
+    ]
+
+    quote_item = models.ForeignKey(
+        QuoteItem,
+        on_delete=models.CASCADE,
+        related_name="components",
+        verbose_name=_("quote item"),
+        help_text=_("Quote item this component belongs to."),
+    )
+    component_type = models.CharField(
+        max_length=20,
+        choices=COMPONENT_TYPE_CHOICES,
+        default="BODY",
+        verbose_name=_("component type"),
+        help_text=_("BODY = single-part; COVER/INSERT = booklet parts."),
+    )
+    display_order = models.PositiveIntegerField(
+        default=0,
+        verbose_name=_("display order"),
+        help_text=_("Order for display (lower = first)."),
+    )
+    paper = models.ForeignKey(
+        "inventory.Paper",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="quote_item_components",
+        verbose_name=_("paper"),
+        help_text=_("Paper for SHEET mode."),
+    )
+    material = models.ForeignKey(
+        "pricing.Material",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="quote_item_components",
+        verbose_name=_("material"),
+        help_text=_("Material for LARGE_FORMAT mode."),
+    )
+    chosen_width_mm = models.PositiveIntegerField(
+        null=True,
+        blank=True,
+        verbose_name=_("chosen width (mm)"),
+    )
+    chosen_height_mm = models.PositiveIntegerField(
+        null=True,
+        blank=True,
+        verbose_name=_("chosen height (mm)"),
+    )
+    sides = models.CharField(
+        max_length=10,
+        choices=QuoteItem.SIDES_CHOICES,
+        blank=True,
+        default="",
+        verbose_name=_("sides"),
+    )
+    color_mode = models.CharField(
+        max_length=10,
+        choices=QuoteItem.COLOR_MODE_CHOICES,
+        blank=True,
+        default="",
+        verbose_name=_("color mode"),
+    )
+
+    class Meta:
+        ordering = ["quote_item", "display_order", "pk"]
+        verbose_name = _("quote item component")
+        verbose_name_plural = _("quote item components")
+
+    def __str__(self):
+        return f"{self.quote_item} – {self.get_component_type_display()}"
 
 
 class QuoteRequestService(TimeStampedModel):

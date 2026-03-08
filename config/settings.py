@@ -55,6 +55,7 @@ INSTALLED_APPS = [
     "setup",
     "jobs",
     "subscriptions",
+    "demo",
 ]
 
 AUTH_USER_MODEL = "accounts.User"
@@ -72,6 +73,7 @@ REST_FRAMEWORK = {
     "DEFAULT_PERMISSION_CLASSES": [
         "rest_framework.permissions.IsAuthenticated",
     ],
+    "EXCEPTION_HANDLER": "api.exception_handlers.api_exception_handler",
     "DEFAULT_PAGINATION_CLASS": "rest_framework.pagination.PageNumberPagination",
     "PAGE_SIZE": 20,
     "DEFAULT_THROTTLE_CLASSES": [

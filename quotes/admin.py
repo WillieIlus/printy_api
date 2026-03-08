@@ -3,7 +3,7 @@ from decimal import Decimal
 from django.contrib import admin
 from django.utils.html import format_html
 
-from .models import CustomerInquiry, QuoteItem, QuoteItemFinishing, QuoteRequest, QuoteItemService, QuoteRequestService, QuoteShareLink
+from .models import CustomerInquiry, QuoteItem, QuoteItemComponent, QuoteItemFinishing, QuoteRequest, QuoteItemService, QuoteRequestService, QuoteShareLink
 @admin.register(CustomerInquiry)
 class CustomerInquiryAdmin(admin.ModelAdmin):
     list_display = ["id", "name", "email", "phone", "created_at"]
@@ -85,6 +85,12 @@ class QuoteItemFinishingInline(admin.TabularInline):
     fields = ["finishing_rate", "apply_to_sides", "coverage_qty", "price_override"]
 
 
+class QuoteItemComponentInline(admin.TabularInline):
+    model = QuoteItemComponent
+    extra = 0
+    fields = ["component_type", "display_order", "paper", "material", "chosen_width_mm", "chosen_height_mm", "sides", "color_mode"]
+
+
 class QuoteRequestServiceInline(admin.TabularInline):
     model = QuoteRequestService
     extra = 0
@@ -132,7 +138,7 @@ class QuoteItemServiceInline(admin.TabularInline):
 class QuoteItemAdmin(admin.ModelAdmin):
     list_display = ["id", "quote_request", "product", "quantity", "unit_price", "line_total"]
     list_filter = ["quote_request__shop"]
-    inlines = [QuoteItemFinishingInline, QuoteItemServiceInline]
+    inlines = [QuoteItemComponentInline, QuoteItemFinishingInline, QuoteItemServiceInline]
     readonly_fields = ["price_diagnostic", "calculation_help"]
 
     fieldsets = (

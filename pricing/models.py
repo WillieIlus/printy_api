@@ -4,7 +4,7 @@ from django.utils.translation import gettext_lazy as _
 
 from common.models import TimeStampedModel
 from inventory.choices import SheetSize
-from inventory.models import Machine
+from inventory.models import Machine, ProductionPaperSize
 from shops.models import Shop
 
 from .choices import ChargeUnit, ColorMode, ServiceCode, ServicePricingType, Sides
@@ -91,6 +91,14 @@ class PrintingRate(TimeStampedModel):
         verbose_name=_("is active"),
         help_text=_("Whether this rate is active."),
     )
+    is_default = models.BooleanField(
+        default=False,
+        verbose_name=_("is default"),
+        help_text=_(
+            "Use this rate as the main rate for the price list when no specific rate is specified. "
+            "One default per machine."
+        ),
+    )
 
     class Meta:
         ordering = ["machine", "sheet_size", "color_mode"]
@@ -100,8 +108,18 @@ class PrintingRate(TimeStampedModel):
             models.UniqueConstraint(
                 fields=["machine", "sheet_size", "color_mode"],
                 name="unique_machine_sheet_color",
-            )
+            ),
+            models.UniqueConstraint(
+                fields=["machine"],
+                condition=models.Q(is_default=True),
+                name="unique_machine_default_printing_rate",
+            ),
         ]
+
+    def save(self, *args, **kwargs):
+        if self.is_default and self.machine_id:
+            PrintingRate.objects.filter(machine_id=self.machine_id).exclude(pk=self.pk).update(is_default=False)
+        super().save(*args, **kwargs)
 
     def __str__(self):
         return f"{self.machine.name} - {self.sheet_size} {self.get_color_mode_display()}"
@@ -114,7 +132,10 @@ class PrintingRate(TimeStampedModel):
 
     @classmethod
     def resolve(cls, machine, sheet_size, color_mode, sides):
-        """Resolve PrintingRate and return price for given sides."""
+        """
+        Resolve PrintingRate and return price for given sides.
+        Order: 1) exact match (machine, sheet_size, color_mode), 2) default rate when sheet_size matches.
+        """
         rate = cls.objects.filter(
             machine=machine,
             sheet_size=sheet_size,
@@ -123,6 +144,14 @@ class PrintingRate(TimeStampedModel):
         ).first()
         if rate:
             return rate, rate.get_price_for_sides(sides)
+        # Fallback: use machine's default rate when sheet_size matches
+        default_rate = cls.objects.filter(
+            machine=machine,
+            is_default=True,
+            is_active=True,
+        ).first()
+        if default_rate and default_rate.sheet_size == sheet_size:
+            return default_rate, default_rate.get_price_for_sides(sides)
         return None, None
 
 
@@ -150,6 +179,17 @@ class FinishingRate(TimeStampedModel):
         default="",
         verbose_name=_("name"),
         help_text=_("Display name of the finishing service."),
+    )
+    thickness_microns = models.PositiveIntegerField(
+        null=True,
+        blank=True,
+        verbose_name=_("thickness (µm)"),
+        help_text=_("Lamination thickness in microns (e.g. 12, 25, 50)."),
+    )
+    is_single_sided_only = models.BooleanField(
+        default=False,
+        verbose_name=_("single-sided only"),
+        help_text=_("If true, this finishing can only be applied to one side (e.g. single-sided lamination)."),
     )
     charge_unit = models.CharField(
         max_length=20,
@@ -213,6 +253,15 @@ class Material(TimeStampedModel):
         related_name="materials",
         verbose_name=_("shop"),
         help_text=_("Shop that owns this material."),
+    )
+    production_size = models.ForeignKey(
+        ProductionPaperSize,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="materials",
+        verbose_name=_("production size"),
+        help_text=_("Optional default parent sheet size for roll/sheet materials."),
     )
     material_type = models.CharField(
         max_length=255,

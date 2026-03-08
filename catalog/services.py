@@ -43,6 +43,24 @@ def _format_price_display(min_val, max_val, can_calculate) -> str:
     return f"KES {min_f:,.0f} – {max_f:,.0f}"
 
 
+def _infer_unit_label(product_name: str) -> str:
+    """Infer per-item label from product name (e.g. 'Business Cards' -> 'per card')."""
+    if not product_name:
+        return "per item"
+    name_lower = product_name.lower()
+    if "card" in name_lower:
+        return "per card"
+    if "flyer" in name_lower or "flyers" in name_lower:
+        return "per flyer"
+    if "poster" in name_lower or "posters" in name_lower:
+        return "per poster"
+    if "brochure" in name_lower or "brochures" in name_lower:
+        return "per brochure"
+    if "sticker" in name_lower or "stickers" in name_lower:
+        return "per sticker"
+    return "per item"
+
+
 def _get_valid_sheet_papers(product: Product, shop) -> list:
     """Return papers that pass product validation (gsm, allowed_sheet_sizes)."""
     papers_qs = Paper.objects.filter(
@@ -59,6 +77,68 @@ def _get_valid_sheet_papers(product: Product, shop) -> list:
     if allowed is not None and len(allowed) > 0:
         papers = [p for p in papers if p.sheet_size in allowed]
     return [p for p in papers if validate_product_configuration(product, paper=p)["is_valid"]]
+
+
+def select_paper_for_imposition(
+    product: Product,
+    shop,
+    machine=None,
+    sides=None,
+    color_mode=None,
+) -> "Paper | None":
+    """
+    Select paper for imposition/pricing when none is specified.
+    Order: 1) default paper (is_default=True), 2) most economical, 3) only available.
+    Most economical = lowest total cost for min_quantity (paper + printing per sheet × sheets_needed).
+    """
+    valid_papers = _get_valid_sheet_papers(product, shop)
+    if not valid_papers:
+        return None
+    if len(valid_papers) == 1:
+        return valid_papers[0]
+
+    # 1) Default paper
+    default = Paper.objects.filter(shop=shop, is_default=True, is_active=True).first()
+    if default and default in valid_papers:
+        return default
+
+    # 2) Most economical (lowest total cost for min_quantity). Prefer papers matching default rate's sheet_size.
+    if not machine:
+        machine = (
+            Machine.objects.filter(shop=shop, is_active=True)
+            .filter(printing_rates__is_default=True, printing_rates__is_active=True)
+            .distinct()
+            .first()
+        ) or Machine.objects.filter(shop=shop, is_active=True).first()
+    sides = sides or (product.default_sides if product else Sides.SIMPLEX) or Sides.SIMPLEX
+    color_mode = color_mode or ColorMode.COLOR
+    min_qty = (product.min_quantity or 1) if product else 1
+
+    default_rate = (
+        PrintingRate.objects.filter(machine=machine, is_default=True, is_active=True).first()
+        if machine else None
+    )
+    default_sheet_size = default_rate.sheet_size if default_rate else None
+
+    def total_cost_for_paper(p: Paper) -> tuple:
+        w_mm, h_mm = p.get_dimensions_mm()
+        if not w_mm or not h_mm:
+            return (Decimal("999999"), 1, p.id)
+        cps = product.get_copies_per_sheet(p.sheet_size, w_mm, h_mm)
+        if cps <= 0:
+            return (Decimal("999999"), 1, p.id)
+        rate, print_price = PrintingRate.resolve(machine, p.sheet_size, color_mode, sides)
+        if not rate or print_price is None:
+            return (Decimal("999999"), 1, p.id)
+        sheets = ceil(min_qty / cps)
+        cost_per_sheet = p.selling_price + print_price
+        total = cost_per_sheet * sheets
+        # Tie-breaker: prefer paper matching default rate's sheet_size (0 = match, 1 = no match)
+        matches_default = 0 if (default_sheet_size and p.sheet_size == default_sheet_size) else 1
+        return (total, matches_default, p.id)
+
+    valid_papers.sort(key=total_cost_for_paper)
+    return valid_papers[0]
 
 
 def get_product_starting_price(product: Product) -> dict:
@@ -110,7 +190,18 @@ def get_product_starting_price(product: Product) -> dict:
             errors.append("No paper matches product rules (gsm range, allowed sheet sizes). Add paper or adjust product rules.")
             return {"price": None, "is_valid": False, "errors": errors, "warnings": warnings, "assumptions": {}}
 
-        paper = valid_papers[0]
+        # Prefer machine that has a default printing rate (for consistent pricing)
+        machine = (
+            Machine.objects.filter(shop=shop, is_active=True)
+            .filter(printing_rates__is_default=True, printing_rates__is_active=True)
+            .distinct()
+            .first()
+        ) or Machine.objects.filter(shop=shop, is_active=True).first()
+        if not machine:
+            errors.append("No active machine for shop.")
+            return {"price": None, "is_valid": False, "errors": errors, "warnings": warnings, "assumptions": {}}
+
+        paper = select_paper_for_imposition(product, shop, machine=machine)
         w_mm, h_mm = paper.get_dimensions_mm()
         if not w_mm or not h_mm:
             errors.append(f"Paper {paper} has no dimensions. Set sheet_size or production_size.")
@@ -127,11 +218,6 @@ def get_product_starting_price(product: Product) -> dict:
             sides = Sides.SIMPLEX
         if sides == Sides.SIMPLEX and not product.allow_simplex:
             sides = Sides.DUPLEX if product.allow_duplex else Sides.SIMPLEX
-
-        machine = Machine.objects.filter(shop=shop, is_active=True).first()
-        if not machine:
-            errors.append("No active machine for shop.")
-            return {"price": None, "is_valid": False, "errors": errors, "warnings": warnings, "assumptions": {}}
 
         rate, print_price = PrintingRate.resolve(machine, paper.sheet_size, ColorMode.COLOR, sides)
         if not rate or print_price is None:
@@ -202,7 +288,7 @@ def product_price_hint(product: Product) -> dict:
     """
     Compute price hint for product list display.
     Returns a clean structure: price_display (human-readable), pricing_mode_label, pricing_mode_explanation,
-    and only non-empty diagnostic fields when can_calculate is False.
+    total_low/high, per_unit_low/high, unit_label, and only non-empty diagnostic fields when can_calculate is False.
     """
     result = get_product_price_range(product)
     min_val = result["lowest_price"]
@@ -210,6 +296,7 @@ def product_price_hint(product: Product) -> dict:
     missing = result["missing_fields"]
     can_calculate = result["can_calculate"]
     diag = build_product_diagnostics(product, missing)
+    min_qty = product.min_quantity or 1
 
     out = {
         "can_calculate": can_calculate,
@@ -221,6 +308,12 @@ def product_price_hint(product: Product) -> dict:
             product.pricing_mode,
             "Price depends on your choices (paper, quantity, finishing).",
         ),
+        "quantity_used": min_qty,
+        "total_low": float(min_val) if min_val is not None else None,
+        "total_high": float(max_val) if max_val is not None else None,
+        "per_unit_low": round(float(min_val) / min_qty, 2) if min_val is not None and min_qty else None,
+        "per_unit_high": round(float(max_val) / min_qty, 2) if max_val is not None and min_qty else None,
+        "unit_label": _infer_unit_label(product.name or ""),
     }
     # Only include diagnostic fields when we cannot calculate
     if not can_calculate:
@@ -300,18 +393,35 @@ def compute_product_price_range_est(product: Product) -> dict:
         })
     else:
         valid_sheet_sizes = [p.sheet_size for p in eligible_papers]
-        sheet_size = (
-            product.default_sheet_size
-            if product.default_sheet_size in valid_sheet_sizes
-            else eligible_papers[0].sheet_size
-        )
+        if product.default_sheet_size and product.default_sheet_size in valid_sheet_sizes:
+            sheet_size = product.default_sheet_size
+        else:
+            # Prefer default printing rate's sheet_size when product has no default
+            default_rate = PrintingRate.objects.filter(
+                machine__shop=shop,
+                machine__is_active=True,
+                is_default=True,
+                is_active=True,
+            ).first()
+            default_sheet = default_rate.sheet_size if default_rate else None
+            sheet_size = (
+                default_sheet if default_sheet and default_sheet in valid_sheet_sizes
+                else eligible_papers[0].sheet_size
+            )
         eligible_papers = [p for p in eligible_papers if p.sheet_size == sheet_size]
 
-    # Machine: first active that supports sheet size (fits sw×sh or sh×sw)
+    # Machine: prefer one with default rate for sheet_size, then first that fits
     sheet_dims = SHEET_SIZE_DIMENSIONS.get(sheet_size, (0, 0))
     sw, sh = sheet_dims
     sheet_fits = (Q(max_width_mm__gte=sw) & Q(max_height_mm__gte=sh)) | (Q(max_width_mm__gte=sh) & Q(max_height_mm__gte=sw))
-    machine = Machine.objects.filter(shop=shop, is_active=True).filter(sheet_fits).first()
+    machine = (
+        Machine.objects.filter(shop=shop, is_active=True)
+        .filter(sheet_fits, printing_rates__is_default=True, printing_rates__sheet_size=sheet_size, printing_rates__is_active=True)
+        .distinct()
+        .first()
+    )
+    if not machine:
+        machine = Machine.objects.filter(shop=shop, is_active=True).filter(sheet_fits).first()
     if not machine:
         machine = Machine.objects.filter(shop=shop, is_active=True).first()
     if not machine:
@@ -349,7 +459,45 @@ def compute_product_price_range_est(product: Product) -> dict:
             "suggestions": suggestions,
         }
 
-    # Compute unit_price_est for each eligible paper; select min and max
+    # Compute total for min_qty per paper (sheets = ceil(min_qty / copies_per_sheet))
+    paper_costs = []
+    for paper in eligible_papers:
+        w_mm, h_mm = paper.get_dimensions_mm()
+        if not w_mm or not h_mm:
+            continue
+        cps = product.get_copies_per_sheet(paper.sheet_size, w_mm, h_mm)
+        if cps <= 0:
+            continue
+        sheets = ceil(min_qty / cps)
+        unit_price_est = float(paper.selling_price) + float(print_price)
+        total_est = unit_price_est * sheets
+        paper_label = f"{paper.sheet_size} {paper.gsm}gsm {paper.get_paper_type_display()}"
+        paper_costs.append({
+            "paper": paper,
+            "unit_price_est": unit_price_est,
+            "total_est": total_est,
+            "sheets": sheets,
+            "paper_label": paper_label,
+        })
+
+    if not paper_costs:
+        return {
+            "can_calculate": False,
+            "price_display": "Price on request",
+            "pricing_mode_label": PRICING_MODE_LABELS.get(product.pricing_mode, str(product.pricing_mode or "—")),
+            "pricing_mode_explanation": PRICING_MODE_EXPLANATIONS.get(
+                product.pricing_mode,
+                "Price depends on your choices (paper, quantity, finishing).",
+            ),
+            "lowest": _empty_range_payload(),
+            "highest": _empty_range_payload(),
+            "reason": "No valid paper dimensions for pricing.",
+            "missing_fields": missing,
+            "suggestions": suggestions,
+        }
+
+    paper_costs.sort(key=lambda x: x["total_est"])
+    sheets_used = paper_costs[0]["sheets"]
     assumptions = {
         "quantity_used": min_qty,
         "sheet_size": sheet_size,
@@ -357,20 +505,6 @@ def compute_product_price_range_est(product: Product) -> dict:
         "sides": sides,
         "sheets_used": sheets_used,
     }
-
-    paper_costs = []
-    for paper in eligible_papers:
-        unit_price_est = float(paper.selling_price) + float(print_price)
-        total_est = unit_price_est * sheets_used
-        paper_label = f"{paper.sheet_size} {paper.gsm}gsm {paper.get_paper_type_display()}"
-        paper_costs.append({
-            "paper": paper,
-            "unit_price_est": unit_price_est,
-            "total_est": total_est,
-            "paper_label": paper_label,
-        })
-
-    paper_costs.sort(key=lambda x: x["unit_price_est"])
     lowest_data = paper_costs[0]
     highest_data = paper_costs[-1]
 
@@ -396,6 +530,11 @@ def compute_product_price_range_est(product: Product) -> dict:
     high_total = high_payload["total"]
     price_display = _format_price_display(low_total, high_total, True) if (low_total and high_total) else "Price on request"
 
+    # Per-unit (per item) for display
+    per_unit_low = float(low_total) / min_qty if low_total and min_qty else None
+    per_unit_high = float(high_total) / min_qty if high_total and min_qty else None
+    unit_label = _infer_unit_label(product.name or "")
+
     return {
         "can_calculate": True,
         "price_display": price_display,
@@ -404,6 +543,12 @@ def compute_product_price_range_est(product: Product) -> dict:
             PricingMode.SHEET,
             "Charged per sheet. Price depends on paper type, single/double-sided printing, and quantity.",
         ),
+        "quantity_used": min_qty,
+        "total_low": float(low_total) if low_total else None,
+        "total_high": float(high_total) if high_total else None,
+        "per_unit_low": round(per_unit_low, 2) if per_unit_low is not None else None,
+        "per_unit_high": round(per_unit_high, 2) if per_unit_high is not None else None,
+        "unit_label": unit_label,
         "lowest": low_payload,
         "highest": high_payload,
     }

@@ -19,6 +19,7 @@ from pricing.models import FinishingCategory, FinishingRate, Material, PrintingR
 from django.db.models import Avg, Count
 from quotes.choices import QuoteStatus
 from quotes.models import QuoteItem, QuoteRequest, QuoteShareLink
+from quotes.services_match_shops import find_shops_for_spec
 from quotes.quote_engine import recalculate_and_lock_quote_request
 from quotes.services import build_preview_price_response, calculate_quote_item
 from quotes.whatsapp_formatter import format_quote_for_whatsapp
@@ -29,6 +30,8 @@ from .permissions import IsQuoteRequestBuyer, IsQuoteRequestSeller, IsShopOwner,
 from .serializers import QuoteCalculatorInputSerializer
 from catalog.models import ProductImage
 from .serializers import (
+    MatchShopsInputSerializer,
+    MatchShopsResponseSerializer,
     QuoteSharePublicSerializer,
     CatalogProductSerializer,
     CatalogProductWithShopSerializer,
@@ -1506,6 +1509,113 @@ class TweakedItemUpdateView(APIView):
         item.refresh_from_db()
         serializer = TweakedItemReadSerializer(item, context={"request": request})
         return Response(serializer.data)
+
+
+class MatchShopsView(APIView):
+    """
+    POST /api/public/match-shops/
+
+    Find shops that can fulfill buyer specs. Public, no auth.
+    Payload: pricing_mode, dimensions, quantity, sides, color_mode, paper specs, finishing_ids, lat/lng/radius.
+    Response: list of shops with can_calculate, reason, missing_fields.
+    """
+
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        serializer = MatchShopsInputSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+
+        shops = find_shops_for_spec(
+            pricing_mode=data["pricing_mode"],
+            finished_width_mm=data["finished_width_mm"],
+            finished_height_mm=data["finished_height_mm"],
+            quantity=data["quantity"],
+            sides=data["sides"],
+            color_mode=data["color_mode"],
+            sheet_size=data.get("sheet_size") or "SRA3",
+            paper_gsm=data.get("paper_gsm"),
+            paper_type=data.get("paper_type") or "",
+            finishing_ids=data.get("finishing_ids") or [],
+            lat=data.get("lat"),
+            lng=data.get("lng"),
+            radius_km=data.get("radius_km") or 50,
+        )
+
+        results = [
+            {
+                "id": s.id,
+                "name": s.name,
+                "slug": s.slug or "",
+                "can_calculate": True,
+                "reason": "Ready to price",
+                "missing_fields": [],
+            }
+            for s in shops
+        ]
+
+        return Response(
+            MatchShopsResponseSerializer({"shops": results, "total": len(results)}).data,
+            status=status.HTTP_200_OK,
+        )
+
+
+class ShopCustomOptionsView(APIView):
+    """
+    GET /api/public/shops/{slug}/custom-options/
+
+    Returns papers, materials, finishings for custom quote building.
+    No product required. Public, no auth.
+    """
+
+    permission_classes = [AllowAny]
+
+    def get(self, request, slug):
+        shop = get_object_or_404(Shop, slug=slug, is_active=True)
+        papers = list(
+            Paper.objects.filter(shop=shop, is_active=True, selling_price__gt=0)
+            .order_by("sheet_size", "gsm", "paper_type")[:30]
+        )
+        materials = list(
+            Material.objects.filter(shop=shop, is_active=True, selling_price__gt=0)
+            .order_by("material_type")[:20]
+        )
+        finishings = list(
+            FinishingRate.objects.filter(shop=shop, is_active=True)
+            .select_related("category")
+            .order_by("name")[:30]
+        )
+        return Response({
+            "available_papers": [
+                {
+                    "id": p.id,
+                    "sheet_size": p.sheet_size,
+                    "gsm": p.gsm,
+                    "paper_type": p.get_paper_type_display() or p.paper_type,
+                    "selling_price": str(p.selling_price),
+                }
+                for p in papers
+            ],
+            "available_materials": [
+                {
+                    "id": m.id,
+                    "material_type": m.material_type,
+                    "unit": m.unit,
+                    "selling_price": str(m.selling_price),
+                }
+                for m in materials
+            ],
+            "available_finishings": [
+                {
+                    "id": f.id,
+                    "name": f.name,
+                    "price": str(f.price),
+                    "charge_unit": f.charge_unit,
+                }
+                for f in finishings
+            ],
+        })
 
 
 class GalleryProductDetailView(APIView):

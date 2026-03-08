@@ -37,6 +37,46 @@ class PublicShopListSerializer(serializers.ModelSerializer):
         read_only_fields = ["slug"]
 
 
+class MatchShopsInputSerializer(serializers.Serializer):
+    """Input for POST /api/public/match-shops/."""
+
+    pricing_mode = serializers.ChoiceField(choices=["SHEET", "LARGE_FORMAT"], default="SHEET")
+    finished_width_mm = serializers.IntegerField(default=0, min_value=0)
+    finished_height_mm = serializers.IntegerField(default=0, min_value=0)
+    quantity = serializers.IntegerField(default=100, min_value=1)
+    sides = serializers.ChoiceField(choices=[("SIMPLEX", "Simplex"), ("DUPLEX", "Duplex")], default="SIMPLEX")
+    color_mode = serializers.ChoiceField(choices=[("BW", "B&W"), ("COLOR", "Color")], default="COLOR")
+    sheet_size = serializers.CharField(required=False, allow_blank=True, default="SRA3")
+    paper_gsm = serializers.IntegerField(required=False, allow_null=True)
+    paper_type = serializers.CharField(required=False, allow_blank=True, default="")
+    finishing_ids = serializers.ListField(
+        child=serializers.IntegerField(),
+        required=False,
+        default=list,
+    )
+    lat = serializers.FloatField(required=False, allow_null=True)
+    lng = serializers.FloatField(required=False, allow_null=True)
+    radius_km = serializers.FloatField(default=50, min_value=0.1, max_value=500)
+
+
+class MatchShopsResultSerializer(serializers.Serializer):
+    """Single shop match result."""
+
+    id = serializers.IntegerField()
+    name = serializers.CharField()
+    slug = serializers.CharField()
+    can_calculate = serializers.BooleanField()
+    reason = serializers.CharField()
+    missing_fields = serializers.ListField(child=serializers.CharField())
+
+
+class MatchShopsResponseSerializer(serializers.Serializer):
+    """Response for POST /api/public/match-shops/."""
+
+    shops = MatchShopsResultSerializer(many=True)
+    total = serializers.IntegerField()
+
+
 class FavoriteShopSerializer(serializers.ModelSerializer):
     """Favorite shop (buyer) - returns shop info."""
 
@@ -258,6 +298,7 @@ class QuoteItemWriteSerializer(serializers.ModelSerializer):
     """Write serializer for quote items (PRODUCT + CUSTOM, validates shop consistency)."""
 
     finishings = QuoteItemFinishingWriteSerializer(many=True, required=False)
+    item_spec_snapshot = serializers.JSONField(required=False, allow_null=True)
 
     class Meta:
         model = QuoteItem
@@ -278,6 +319,7 @@ class QuoteItemWriteSerializer(serializers.ModelSerializer):
             "machine",
             "special_instructions",
             "finishings",
+            "item_spec_snapshot",
         ]
 
     def validate(self, attrs):
@@ -334,7 +376,11 @@ class QuoteItemWriteSerializer(serializers.ModelSerializer):
         return attrs
 
     def create(self, validated_data):
+        from django.db import transaction
+        from quotes.pricing_service import compute_and_store_pricing
+
         finishings_data = validated_data.pop("finishings", [])
+        item_spec_snapshot = validated_data.pop("item_spec_snapshot", None)
         quote_request = self.context["quote_request"]
         item_type = validated_data.get("item_type", "PRODUCT")
         product = validated_data.get("product")
@@ -347,9 +393,19 @@ class QuoteItemWriteSerializer(serializers.ModelSerializer):
             elif item_type == "CUSTOM":
                 validated_data["pricing_mode"] = "LARGE_FORMAT" if material else "SHEET"
 
-        item = QuoteItem.objects.create(quote_request=quote_request, **validated_data)
-        for fd in finishings_data:
-            QuoteItemFinishing.objects.create(quote_item=item, **fd)
+        with transaction.atomic():
+            item = QuoteItem.objects.create(
+                quote_request=quote_request,
+                item_spec_snapshot=item_spec_snapshot,
+                **validated_data,
+            )
+            for fd in finishings_data:
+                QuoteItemFinishing.objects.create(quote_item=item, **fd)
+            try:
+                compute_and_store_pricing(item)
+            except Exception:
+                item.needs_review = True
+                item.save(update_fields=["needs_review"])
         return item
 
     def update(self, instance, validated_data):
@@ -1279,6 +1335,17 @@ class TweakAndAddSerializer(serializers.Serializer):
         finishings_data = validated_data.pop("finishings", [])
         quote_request = self.context["quote_request"]
 
+        item_spec_snapshot = {
+            "product_id": product.id,
+            "quantity": validated_data["quantity"],
+            "paper_id": validated_data.get("paper"),
+            "material_id": validated_data.get("material"),
+            "sides": validated_data.get("sides", ""),
+            "color_mode": validated_data.get("color_mode", "COLOR"),
+            "machine_id": validated_data.get("machine"),
+            "finishings": [{"finishing_rate": f.get("finishing_rate")} for f in finishings_data],
+        }
+
         with transaction.atomic():
             item = QuoteItem.objects.create(
                 quote_request=quote_request,
@@ -1295,6 +1362,7 @@ class TweakAndAddSerializer(serializers.Serializer):
                 machine=validated_data.get("machine"),
                 special_instructions=validated_data.get("special_instructions", ""),
                 has_artwork=validated_data.get("has_artwork", False),
+                item_spec_snapshot=item_spec_snapshot,
             )
             for fin in finishings_data:
                 QuoteItemFinishing.objects.create(

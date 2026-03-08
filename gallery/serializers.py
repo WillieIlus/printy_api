@@ -1,9 +1,9 @@
-"""Gallery API serializers."""
+"""Gallery API serializers — use catalog.Product and catalog.ProductCategory."""
 from rest_framework import serializers
 
 from shops.models import Shop
 
-from .models import Product, ProductCategory
+from catalog.models import Product, ProductCategory
 
 
 class ShopMinimalSerializer(serializers.ModelSerializer):
@@ -32,7 +32,9 @@ class ProductCategoryListSerializer(serializers.ModelSerializer):
 
 
 class ProductSerializer(serializers.ModelSerializer):
-    """CRUD for Product."""
+    """CRUD for gallery product (catalog.Product with gallery fields)."""
+
+    preview_image = serializers.SerializerMethodField()
 
     class Meta:
         model = Product
@@ -40,7 +42,7 @@ class ProductSerializer(serializers.ModelSerializer):
             "id",
             "category",
             "shop",
-            "title",
+            "name",
             "slug",
             "description",
             "preview_image",
@@ -53,17 +55,24 @@ class ProductSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = ["slug"]
 
+    def get_preview_image(self, obj):
+        img = obj.get_primary_image()
+        return img.image.url if img and img.image else None
+
 
 class ProductGallerySerializer(serializers.ModelSerializer):
     """Public gallery product (read-only, for grouped display)."""
 
     shop = ShopMinimalSerializer(read_only=True)
+    title = serializers.CharField(source="name", read_only=True)
+    preview_image = serializers.SerializerMethodField()
 
     class Meta:
         model = Product
         fields = [
             "id",
             "title",
+            "name",
             "slug",
             "description",
             "preview_image",
@@ -74,3 +83,7 @@ class ProductGallerySerializer(serializers.ModelSerializer):
             "is_new",
             "shop",
         ]
+
+    def get_preview_image(self, obj):
+        img = obj.get_primary_image()
+        return img.image.url if img and img.image else None

@@ -3,7 +3,7 @@ from django.test import TestCase
 from rest_framework.test import APIClient
 
 from accounts.models import User
-from gallery.models import Product, ProductCategory
+from catalog.models import Product, ProductCategory
 from shops.models import Shop
 
 
@@ -26,7 +26,7 @@ class ProductGalleryPublicAPITests(TestCase):
         self.product = Product.objects.create(
             category=self.cat,
             shop=self.shop,
-            title="Premium Business Card",
+            name="Premium Business Card",
             slug="premium-business-card",
             dimensions_label="90 × 55 mm",
             weight_label="350gsm",
@@ -53,7 +53,7 @@ class ProductGalleryPublicAPITests(TestCase):
         Product.objects.create(
             category=self.cat,
             shop=self.shop,
-            title="Inactive Card",
+            name="Inactive Card",
             slug="inactive-card",
             is_active=False,
         )
@@ -72,7 +72,7 @@ class ProductGalleryPublicAPITests(TestCase):
         Product.objects.create(
             category=empty_cat,
             shop=self.shop,
-            title="Inactive",
+            name="Inactive",
             slug="inactive",
             is_active=False,
         )
@@ -156,7 +156,7 @@ class GalleryProductCRUDTests(TestCase):
         self.product = Product.objects.create(
             category=self.cat,
             shop=self.shop,
-            title="Business Card",
+            name="Business Card",
             slug="business-card",
             is_active=True,
         )
@@ -172,7 +172,7 @@ class GalleryProductCRUDTests(TestCase):
         data = response.json()
         results = data.get("results", data)
         self.assertGreaterEqual(len(results), 1)
-        self.assertEqual(results[0]["title"], "Business Card")
+        self.assertEqual(results[0]["title"], "Business Card")  # title = name in serializer
 
     def test_retrieve_product_owner_succeeds(self):
         self.client.force_authenticate(user=self.owner)
@@ -193,13 +193,13 @@ class GalleryProductCRUDTests(TestCase):
             "/api/shops/my-shop/gallery/products/",
             {
                 "category": self.cat.id,
-                "title": "Premium Card",
+                "name": "Premium Card",
                 "dimensions_label": "90 × 55 mm",
             },
             format="json",
         )
         self.assertEqual(response.status_code, 201)
-        self.assertEqual(response.json()["title"], "Premium Card")
+        self.assertEqual(response.json()["name"], "Premium Card")
         self.assertEqual(response.json()["slug"], "premium-card")
 
 
@@ -218,7 +218,7 @@ class CalculatePriceStubTests(TestCase):
         self.product = Product.objects.create(
             category=self.cat,
             shop=self.shop,
-            title="Business Card",
+            name="Business Card",
             slug="business-card",
         )
 
