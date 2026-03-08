@@ -97,7 +97,7 @@ class PublicShopViewSet(viewsets.ReadOnlyModelViewSet):
             shop=shop,
             is_active=True,
             status="PUBLISHED",
-        ).prefetch_related(
+        ).select_related("category").prefetch_related(
             "finishing_options__finishing_rate",
             "images",
         )
@@ -119,6 +119,101 @@ class PublicShopViewSet(viewsets.ReadOnlyModelViewSet):
         return Response(ShopRatingSummarySerializer(data).data)
 
 
+class ShopRateCardView(APIView):
+    """
+    GET /api/shops/{slug}/rate-card/ — public rate card for a shop.
+    Returns printing rates, paper prices, and finishing services for buyer display.
+    No auth required.
+    """
+
+    permission_classes = [AllowAny]
+
+    def get(self, request, shop_slug):
+        shop = get_object_or_404(Shop, slug=shop_slug, is_active=True)
+
+        # Printing: from PrintingRate via Machine (shop's machines). Default rates first.
+        printing = []
+        for rate in (
+            PrintingRate.objects.filter(machine__shop=shop, is_active=True)
+            .select_related("machine")
+            .order_by("-is_default", "sheet_size", "color_mode")[:50]
+        ):
+            printing.append({
+                "sheet_size": rate.sheet_size,
+                "color_mode": rate.get_color_mode_display() or rate.color_mode,
+                "price_per_side": str(rate.single_price),
+                "price_double_sided": str(rate.double_price),
+                "is_default": rate.is_default,
+            })
+        # Dedupe by sheet_size+color_mode (keep first)
+        seen = set()
+        printing_deduped = []
+        for p in printing:
+            key = (p["sheet_size"], p["color_mode"])
+            if key not in seen:
+                seen.add(key)
+                printing_deduped.append(p)
+
+        # Paper: computed per-sheet price = paper + printing (per sheet size)
+        # Buyers see single/double; owners see breakdown (paper + printing)
+        from decimal import Decimal
+        from pricing.choices import ColorMode
+
+        is_owner = request.user.is_authenticated and getattr(shop, "owner_id", None) == request.user.id
+
+        # Build printing lookup by sheet_size (prefer default rate, then COLOR)
+        printing_by_sheet = {}
+        for rate in PrintingRate.objects.filter(
+            machine__shop=shop, is_active=True
+        ).select_related("machine").order_by("-is_default", "sheet_size", "color_mode"):
+            key = rate.sheet_size
+            if key not in printing_by_sheet:
+                printing_by_sheet[key] = rate
+
+        paper = []
+        for p in Paper.objects.filter(shop=shop, is_active=True, selling_price__gt=0).order_by("sheet_size", "gsm", "paper_type")[:50]:
+            pr = printing_by_sheet.get(p.sheet_size)
+            paper_sell = Decimal(str(p.selling_price))
+            if pr:
+                single = paper_sell + pr.single_price
+                double = paper_sell + pr.double_price
+            else:
+                single = paper_sell
+                double = paper_sell
+
+            row = {
+                "gsm": p.gsm,
+                "paper_type": p.get_paper_type_display() or p.paper_type,
+                "sheet_size": p.sheet_size,
+                "single_price": str(single),
+                "double_price": str(double),
+            }
+            if is_owner and pr:
+                row["price_per_sheet"] = str(p.selling_price)
+                row["printing_single"] = str(pr.single_price)
+                row["printing_double"] = str(pr.double_price)
+            paper.append(row)
+
+        # Finishing: from FinishingRate
+        finishing = []
+        for f in FinishingRate.objects.filter(shop=shop, is_active=True).select_related("category").order_by("name")[:50]:
+            finishing.append({
+                "id": f.id,
+                "name": f.name,
+                "category": f.category.name if f.category else "",
+                "price": str(f.price),
+                "charge_by": f.get_charge_unit_display() or f.charge_unit,
+                "is_default": False,
+            })
+
+        return Response({
+            "printing": printing_deduped,
+            "paper": paper,
+            "finishing": finishing,
+            "is_owner": is_owner,
+        })
+
+
 class PublicAllProductsView(APIView):
     """GET /api/public/products/ — only PUBLISHED products from pricing-ready active shops."""
 
@@ -132,7 +227,7 @@ class PublicAllProductsView(APIView):
                 is_active=True,
                 status="PUBLISHED",
             )
-            .select_related("shop")
+            .select_related("shop", "category")
             .prefetch_related(
                 "finishing_options__finishing_rate",
                 "images",

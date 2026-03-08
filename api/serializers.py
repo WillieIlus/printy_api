@@ -117,6 +117,7 @@ class CatalogProductSerializer(serializers.ModelSerializer):
     finishing_options = FinishingOptionSerializer(many=True, read_only=True)
     images = ProductImageSerializer(many=True, read_only=True)
     primary_image = serializers.SerializerMethodField()
+    category = serializers.SerializerMethodField()
     default_sides = serializers.CharField()
     pricing_mode = serializers.CharField()
     price_hint = serializers.SerializerMethodField()
@@ -158,6 +159,10 @@ class CatalogProductSerializer(serializers.ModelSerializer):
         if img and img.image:
             return img.image.name
         return None
+
+    def get_category(self, obj):
+        """Category name for display (frontend expects string, not FK id)."""
+        return obj.category.name if obj.category else None
 
     def get_price_hint(self, obj):
         from catalog.services import product_price_hint
@@ -746,6 +751,7 @@ class PaperSerializer(serializers.ModelSerializer):
             "quantity_in_stock",
             "reorder_level",
             "is_active",
+            "is_default",
         ]
 
 
@@ -761,6 +767,7 @@ class PrintingRateSerializer(serializers.ModelSerializer):
             "single_price",
             "double_price",
             "is_active",
+            "is_default",
         ]
 
     def validate(self, attrs):
@@ -890,7 +897,7 @@ class ProductWriteSerializer(serializers.ModelSerializer):
             "id": {"read_only": True},
             "name": {"required": True, "allow_blank": False},
             "description": {"required": False, "allow_blank": True},
-            "category": {"required": False, "allow_blank": True},
+            "category": {"required": False, "allow_null": True},
             "default_bleed_mm": {"required": False},
             "default_sides": {"required": False},
             "min_quantity": {"required": False, "min_value": 1},
@@ -925,7 +932,7 @@ class ProductWriteSerializer(serializers.ModelSerializer):
         finishings_data = validated_data.pop("finishing_options", [])
         shop = validated_data.pop("shop", None) or self.context.get("shop")
         validated_data.setdefault("description", "")
-        validated_data.setdefault("category", "")
+        validated_data.setdefault("category", None)
         validated_data.setdefault("min_quantity", 1)
         validated_data.setdefault("default_bleed_mm", 3)
         validated_data.setdefault("default_sides", "SIMPLEX")
