@@ -172,17 +172,23 @@ CSRF_TRUSTED_ORIGINS = [
     "https://willieilus.pythonanywhere.com",
 ]
 
-CORS_ALLOWED_ORIGINS = [
-    "http://localhost:3000",
-    "http://127.0.0.1:3000",
-    "http://localhost:5173",
-    "http://127.0.0.1:5173",
-    "https://printyke.netlify.app",
-    "https://printy.ke",
-    "https://www.printy.ke",
-    "https://amazingace00.pythonanywhere.com",
-    "https://willieilus.pythonanywhere.com",
-]
+# Override via CORS_ALLOWED_ORIGINS env (comma-separated) if needed on PythonAnywhere
+_cors_env = os.environ.get("CORS_ALLOWED_ORIGINS", "").strip()
+CORS_ALLOWED_ORIGINS = (
+    [o.strip() for o in _cors_env.split(",") if o.strip()]
+    if _cors_env
+    else [
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "https://printyke.netlify.app",
+        "https://printy.ke",
+        "https://www.printy.ke",
+        "https://amazingace00.pythonanywhere.com",
+        "https://willieilus.pythonanywhere.com",
+    ]
+)
 
 # JWT in header: no cookies needed for API. Set False for cross-site SPA.
 CORS_ALLOW_CREDENTIALS = False

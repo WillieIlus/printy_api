@@ -32,7 +32,7 @@ All required and optional environment variables. Use `.env` or your deployment c
 | Variable | Required | Default | Description |
 |----------|----------|---------|--------------|
 | `FRONTEND_URL` | No | `https://printy.ke` | Frontend base URL for email links, redirects |
-| `CORS_ALLOWED_ORIGINS` | No | (see settings) | Override in settings if needed; defaults include printy.ke, localhost:3000, localhost:5173 |
+| `CORS_ALLOWED_ORIGINS` | No | (see settings) | Comma-separated origins to allow; if set, overrides defaults. Must include `https://printy.ke` for production frontend. |
 
 **Configured origins (in settings):**
 - `http://localhost:3000`
