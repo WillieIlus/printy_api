@@ -30,9 +30,9 @@ class Shop(AutoSlugMixin, models.Model):
     )
     currency = models.CharField(
         max_length=3,
-        default="USD",
+        default="KES",
         verbose_name=_("currency"),
-        help_text=_("ISO 4217 currency code (e.g. USD, EUR)."),
+        help_text=_("ISO 4217 currency code (e.g. KES, USD)."),
     )
     is_active = models.BooleanField(
         default=True,
