@@ -256,6 +256,15 @@ class Product(TimeStampedModel, AutoSlugMixin):
         verbose_name=_("weight label"),
         help_text=_("e.g. 350gsm"),
     )
+    default_machine = models.ForeignKey(
+        "inventory.Machine",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="default_for_products",
+        verbose_name=_("default machine"),
+        help_text=_("Default printing machine for this product. Clients can override when adding to quote."),
+    )
     is_popular = models.BooleanField(default=False, verbose_name=_("is popular"))
     is_best_value = models.BooleanField(default=False, verbose_name=_("is best value"))
     is_new = models.BooleanField(default=False, verbose_name=_("is new"))

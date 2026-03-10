@@ -935,6 +935,7 @@ class ProductWriteSerializer(serializers.ModelSerializer):
             "default_sheet_size",
             "default_bleed_mm",
             "default_sides",
+            "default_machine",
             "min_quantity",
             "min_width_mm",
             "min_height_mm",
@@ -1273,6 +1274,12 @@ class TweakAndAddSerializer(serializers.Serializer):
         pricing_mode = product.pricing_mode
 
         if pricing_mode == PricingMode.SHEET:
+            # Default machine from product if not provided
+            machine = attrs.get("machine")
+            default_machine = getattr(product, "default_machine", None)
+            if machine is None and default_machine and shop and default_machine.shop_id == shop.id:
+                attrs["machine"] = default_machine
+                machine = attrs["machine"]
             # Validate paper belongs to same shop and product rules (gsm, allowed_sheet_sizes, dimensions)
             paper = attrs.get("paper")
             if paper and shop and paper.shop_id != shop.id:
@@ -1335,15 +1342,23 @@ class TweakAndAddSerializer(serializers.Serializer):
         finishings_data = validated_data.pop("finishings", [])
         quote_request = self.context["quote_request"]
 
+        paper = validated_data.get("paper")
+        material = validated_data.get("material")
+        machine = validated_data.get("machine")
         item_spec_snapshot = {
             "product_id": product.id,
             "quantity": validated_data["quantity"],
-            "paper_id": validated_data.get("paper"),
-            "material_id": validated_data.get("material"),
+            "paper_id": paper.id if paper else None,
+            "material_id": material.id if material else None,
             "sides": validated_data.get("sides", ""),
             "color_mode": validated_data.get("color_mode", "COLOR"),
-            "machine_id": validated_data.get("machine"),
-            "finishings": [{"finishing_rate": f.get("finishing_rate")} for f in finishings_data],
+            "machine_id": machine.id if machine else None,
+            "finishings": [
+                {"finishing_rate_id": fr.id}
+                for f in finishings_data
+                for fr in [f.get("finishing_rate")]
+                if fr
+            ],
         }
 
         with transaction.atomic():
@@ -1534,7 +1549,7 @@ class GalleryProductOptionsSerializer(serializers.ModelSerializer):
         fields = [
             "id", "name", "description", "category", "pricing_mode",
             "default_finished_width_mm", "default_finished_height_mm",
-            "default_bleed_mm", "default_sides", "min_quantity",
+            "default_bleed_mm", "default_sides", "default_machine", "min_quantity",
             "min_gsm", "max_gsm", "min_area_m2",
             "allow_simplex", "allow_duplex",
             "finishing_options", "images", "primary_image",
