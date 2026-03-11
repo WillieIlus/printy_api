@@ -322,6 +322,15 @@ def product_price_hint(product: Product) -> dict:
             out["missing_fields"] = missing
         if diag["suggestions"]:
             out["suggestions"] = diag["suggestions"]
+        # #region agent log
+        try:
+            import json, os
+            _lp = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "debug-8ad3d3.log")
+            with open(_lp, "a", encoding="utf-8") as _f:
+                _f.write(json.dumps({"sessionId":"8ad3d3","hypothesisId":"H1","location":"catalog/services.py:product_price_hint","message":"price_hint can_calculate false","data":{"product_id":getattr(product,"id",None),"product_name":getattr(product,"name",""),"reason":out.get("reason"),"missing_fields":missing},"timestamp":__import__("time").time()*1000})+"\n")
+        except Exception:
+            pass
+        # #endregion
     return out
 
 
@@ -338,6 +347,15 @@ def compute_product_price_range_est(product: Product) -> dict:
     sheets_used = 1  # Start with 1 for range display unless dimensions available
 
     if product.pricing_mode != PricingMode.SHEET:
+        # #region agent log
+        try:
+            import json, os
+            _lp = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "debug-8ad3d3.log")
+            with open(_lp, "a", encoding="utf-8") as _f:
+                _f.write(json.dumps({"sessionId":"8ad3d3","hypothesisId":"H3","location":"catalog/services.py:compute_product_price_range_est","message":"LARGE_FORMAT product - price_range_est unsupported","data":{"product_id":getattr(product,"id",None),"pricing_mode":str(getattr(product,"pricing_mode",""))},"timestamp":__import__("time").time()*1000})+"\n")
+        except Exception:
+            pass
+        # #endregion
         return {
             "can_calculate": False,
             "price_display": "Price on request",
@@ -444,6 +462,15 @@ def compute_product_price_range_est(product: Product) -> dict:
         })
 
     if missing:
+        # #region agent log
+        try:
+            import json, os
+            _lp = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "debug-8ad3d3.log")
+            with open(_lp, "a", encoding="utf-8") as _f:
+                _f.write(json.dumps({"sessionId":"8ad3d3","hypothesisId":"H1","location":"catalog/services.py:compute_product_price_range_est","message":"price_range_est missing setup","data":{"product_id":getattr(product,"id",None),"missing":missing},"timestamp":__import__("time").time()*1000})+"\n")
+        except Exception:
+            pass
+        # #endregion
         return {
             "can_calculate": False,
             "price_display": "Price on request",

@@ -217,6 +217,127 @@ class ShopRateCardView(APIView):
         })
 
 
+class ShopRateCardForCalculatorView(APIView):
+    """
+    GET /api/shops/{slug}/rate-card-for-calculator/ — demo-compatible rate card.
+    Returns templates, papers, printing_rates, finishing_rates, materials for landing calculator.
+    No auth required. Use when demo/rate-card is unavailable (e.g. demo app not deployed).
+    """
+
+    permission_classes = [AllowAny]
+
+    def get(self, request, shop_slug):
+        shop = get_object_or_404(Shop, slug=shop_slug, is_active=True)
+
+        # Templates from shop's PUBLISHED products
+        products = Product.objects.filter(
+            shop=shop,
+            is_active=True,
+            status="PUBLISHED",
+        ).prefetch_related("finishing_options__finishing_rate", "impositions").select_related("category")[:50]
+
+        templates = []
+        for p in products:
+            sheet_size = p.default_sheet_size or "SRA3"
+            imp = p.impositions.filter(sheet_size=sheet_size, is_default=True).first()
+            if not imp:
+                imp = p.impositions.filter(sheet_size=sheet_size).first()
+            copies = imp.copies_per_sheet if imp else max(1, p.get_copies_per_sheet(sheet_size))
+
+            finishing_opts = [
+                {
+                    "finishing_rate": opt.finishing_rate_id,
+                    "is_default": opt.is_default,
+                    "price_adjustment": str(opt.price_adjustment) if opt.price_adjustment else None,
+                }
+                for opt in p.finishing_options.select_related("finishing_rate").all()
+                if opt.finishing_rate.is_active
+            ]
+
+            templates.append({
+                "id": p.id,
+                "name": p.name,
+                "description": p.description or "",
+                "category": p.category.slug if p.category else "general",
+                "pricing_mode": p.pricing_mode,
+                "default_finished_width_mm": p.default_finished_width_mm or 0,
+                "default_finished_height_mm": p.default_finished_height_mm or 0,
+                "default_sides": p.default_sides,
+                "min_quantity": p.min_quantity or 100,
+                "default_sheet_size": sheet_size,
+                "copies_per_sheet": copies,
+                "min_gsm": p.min_gsm,
+                "max_gsm": p.max_gsm,
+                "finishing_options": finishing_opts,
+                "badge": "Popular" if getattr(p, "is_popular", False) else None,
+            })
+
+        # Papers
+        papers = []
+        for p in Paper.objects.filter(shop=shop, is_active=True, selling_price__gt=0).order_by("sheet_size", "gsm")[:50]:
+            pt = p.paper_type
+            if hasattr(pt, "value"):
+                pt = pt.value
+            papers.append({
+                "id": p.id,
+                "sheet_size": p.sheet_size,
+                "gsm": p.gsm,
+                "paper_type": str(pt) if pt else "UNCOATED",
+                "selling_price": str(p.selling_price),
+                "is_active": p.is_active,
+            })
+
+        # Printing rates (dedupe by sheet_size+color_mode)
+        printing_rates = []
+        seen_pr = set()
+        for r in PrintingRate.objects.filter(
+            machine__shop=shop, is_active=True
+        ).order_by("-is_default", "sheet_size", "color_mode")[:50]:
+            key = (r.sheet_size, r.color_mode)
+            if key not in seen_pr:
+                seen_pr.add(key)
+                printing_rates.append({
+                    "id": r.id,
+                    "sheet_size": r.sheet_size,
+                    "color_mode": r.color_mode,
+                    "single_price": str(r.single_price),
+                    "double_price": str(r.double_price),
+                    "is_active": r.is_active,
+                })
+
+        # Finishing rates
+        finishing_rates = []
+        for f in FinishingRate.objects.filter(shop=shop, is_active=True).order_by("name")[:50]:
+            finishing_rates.append({
+                "id": f.id,
+                "name": f.name,
+                "charge_unit": f.charge_unit,
+                "price": str(f.price),
+                "setup_fee": str(f.setup_fee) if f.setup_fee else None,
+                "min_qty": f.min_qty,
+                "is_active": f.is_active,
+            })
+
+        # Materials (large format)
+        materials = []
+        for m in Material.objects.filter(shop=shop, is_active=True).order_by("material_type")[:20]:
+            materials.append({
+                "id": m.id,
+                "material_type": m.material_type or "Unknown",
+                "unit": m.unit or "SQM",
+                "selling_price": str(m.selling_price),
+                "is_active": m.is_active,
+            })
+
+        return Response({
+            "templates": templates,
+            "papers": papers,
+            "printing_rates": printing_rates,
+            "finishing_rates": finishing_rates,
+            "materials": materials,
+        })
+
+
 class PublicAllProductsView(APIView):
     """GET /api/public/products/ — only PUBLISHED products from pricing-ready active shops."""
 
@@ -1464,6 +1585,17 @@ class TweakedItemUpdateView(APIView):
     permission_classes = [IsAuthenticated]
 
     def patch(self, request, item_id):
+        # #region agent log
+        import json
+        import traceback
+        from pathlib import Path
+        try:
+            _log_path = str(Path(__file__).resolve().parent.parent.parent / "debug-981bc1.log")
+            with open(_log_path, "a") as _f:
+                _f.write(json.dumps({"sessionId": "981bc1", "hypothesisId": "H0", "location": "views.py:TweakedItemUpdateView.patch:entry", "message": "PATCH tweaked-items entry", "data": {"item_id": item_id, "request_data": dict(request.data)}, "timestamp": __import__("time").time() * 1000}) + "\n")
+        except Exception:
+            pass
+        # #endregion
         item = get_object_or_404(
             QuoteItem.objects.select_related("quote_request__shop", "product", "paper", "material", "machine"),
             pk=item_id,
@@ -1479,36 +1611,50 @@ class TweakedItemUpdateView(APIView):
         updatable_fields = ["quantity", "sides", "color_mode", "special_instructions", "has_artwork"]
         fk_fields = {"paper": Paper, "material": Material, "machine": Machine}
 
-        with transaction.atomic():
-            for field in updatable_fields:
-                if field in request.data:
-                    setattr(item, field, request.data[field])
-            for field, model in fk_fields.items():
-                if field in request.data:
-                    val = request.data[field]
-                    setattr(item, f"{field}_id", val)
-            if "chosen_width_mm" in request.data:
-                item.chosen_width_mm = request.data["chosen_width_mm"]
-            if "chosen_height_mm" in request.data:
-                item.chosen_height_mm = request.data["chosen_height_mm"]
+        try:
+            with transaction.atomic():
+                for field in updatable_fields:
+                    if field in request.data:
+                        setattr(item, field, request.data[field])
+                for field, model in fk_fields.items():
+                    if field in request.data:
+                        val = request.data[field]
+                        setattr(item, f"{field}_id", val)
+                if "chosen_width_mm" in request.data:
+                    item.chosen_width_mm = request.data["chosen_width_mm"]
+                if "chosen_height_mm" in request.data:
+                    item.chosen_height_mm = request.data["chosen_height_mm"]
 
-            item.save()
+                item.save()
 
-            if "finishings" in request.data:
-                item.finishings.all().delete()
-                for fin in request.data["finishings"]:
-                    fr_id = fin.get("finishing_rate") if isinstance(fin, dict) else fin
-                    QuoteItemFinishing.objects.create(
-                        quote_item=item,
-                        finishing_rate_id=fr_id,
-                        price_override=fin.get("price_override") if isinstance(fin, dict) else None,
-                    )
+                if "finishings" in request.data:
+                    item.finishings.all().delete()
+                    for fin in request.data["finishings"]:
+                        fr_id = fin.get("finishing_rate") if isinstance(fin, dict) else fin
+                        QuoteItemFinishing.objects.create(
+                            quote_item=item,
+                            finishing_rate_id=fr_id,
+                            price_override=fin.get("price_override") if isinstance(fin, dict) else None,
+                        )
 
-            compute_and_store_pricing(item)
+                compute_and_store_pricing(item)
 
-        item.refresh_from_db()
-        serializer = TweakedItemReadSerializer(item, context={"request": request})
-        return Response(serializer.data)
+            item.refresh_from_db()
+            serializer = TweakedItemReadSerializer(item, context={"request": request})
+            return Response(serializer.data)
+        except Exception as e:
+            # #region agent log
+            try:
+                import json
+                import traceback as _tb
+                from pathlib import Path
+                _log_path = str(Path(__file__).resolve().parent.parent.parent / "debug-981bc1.log")
+                with open(_log_path, "a") as _f:
+                    _f.write(json.dumps({"sessionId": "981bc1", "hypothesisId": "H1-H5", "location": "views.py:TweakedItemUpdateView.patch:exception", "message": "PATCH tweaked-items 500", "data": {"error": str(e), "error_type": type(e).__name__, "traceback": _tb.format_exc(), "request_data": dict(request.data)}, "timestamp": __import__("time").time() * 1000}) + "\n")
+            except Exception:
+                pass
+            # #endregion
+            raise
 
 
 class MatchShopsView(APIView):

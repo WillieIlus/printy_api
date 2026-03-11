@@ -1,13 +1,117 @@
 """
 Public API for demo calculator — no auth required.
 """
+from django.core.cache import cache
 from rest_framework import status
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 
-from .models import DemoProduct
+from .models import (
+    DemoProduct,
+    DemoPaper,
+    DemoPrintingRate,
+    DemoFinishingRate,
+    DemoMaterial,
+)
+from .cache_keys import RATE_CARD_CACHE_KEY
 from .services import compute_demo_quote
+
+RATE_CARD_CACHE_TTL = 300  # 5 minutes
+
+
+def _build_rate_card():
+    """Build full rate card for frontend local computation."""
+    products = DemoProduct.objects.filter(is_active=True).prefetch_related(
+        "product_finishing_options__finishing_rate"
+    ).order_by("display_order", "name")
+
+    templates = []
+    for p in products:
+        finishing_options = [
+            {
+                "finishing_rate": opt.finishing_rate_id,
+                "is_default": opt.is_default,
+                "price_adjustment": str(opt.price_adjustment) if opt.price_adjustment else None,
+            }
+            for opt in p.product_finishing_options.all()
+        ]
+        templates.append({
+            "id": p.id,
+            "name": p.name,
+            "description": p.description,
+            "category": p.category,
+            "pricing_mode": p.pricing_mode,
+            "default_finished_width_mm": p.default_finished_width_mm,
+            "default_finished_height_mm": p.default_finished_height_mm,
+            "default_sides": p.default_sides,
+            "min_quantity": p.min_quantity,
+            "default_sheet_size": p.default_sheet_size or "SRA3",
+            "copies_per_sheet": p.copies_per_sheet,
+            "min_gsm": p.min_gsm,
+            "max_gsm": p.max_gsm,
+            "finishing_options": finishing_options,
+            "badge": p.badge or None,
+        })
+
+    papers = list(
+        DemoPaper.objects.filter(is_active=True).order_by("sheet_size", "gsm").values(
+            "id", "sheet_size", "gsm", "paper_type", "selling_price", "is_active"
+        )
+    )
+    for p in papers:
+        p["selling_price"] = str(p["selling_price"])
+
+    printing_rates = list(
+        DemoPrintingRate.objects.filter(is_active=True).values(
+            "id", "sheet_size", "color_mode", "single_price", "double_price", "is_active"
+        )
+    )
+    for r in printing_rates:
+        r["single_price"] = str(r["single_price"])
+        r["double_price"] = str(r["double_price"])
+
+    finishing_rates = list(
+        DemoFinishingRate.objects.filter(is_active=True).values(
+            "id", "name", "charge_unit", "price", "setup_fee", "min_qty", "is_active"
+        )
+    )
+    for f in finishing_rates:
+        f["price"] = str(f["price"])
+        f["setup_fee"] = str(f["setup_fee"]) if f["setup_fee"] else None
+
+    materials = list(
+        DemoMaterial.objects.filter(is_active=True).values(
+            "id", "material_type", "unit", "selling_price", "is_active"
+        )
+    )
+    for m in materials:
+        m["selling_price"] = str(m["selling_price"])
+
+    return {
+        "templates": templates,
+        "papers": papers,
+        "printing_rates": printing_rates,
+        "finishing_rates": finishing_rates,
+        "materials": materials,
+    }
+
+
+@api_view(["GET"])
+@permission_classes([AllowAny])
+def demo_rate_card(request):
+    """
+    Return full rate card for frontend local computation.
+    Cached for 5 minutes. No auth required.
+    """
+    cache_key = RATE_CARD_CACHE_KEY
+    data = cache.get(cache_key)
+    if data is None:
+        data = _build_rate_card()
+        from django.utils import timezone
+        data["version"] = timezone.now().strftime("%Y%m%d%H%M")
+        cache.set(cache_key, data, RATE_CARD_CACHE_TTL)
+    return Response(data)
 
 
 @api_view(["GET"])

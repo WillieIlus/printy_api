@@ -5,3 +5,6 @@ class DemoConfig(AppConfig):
     default_auto_field = "django.db.models.BigAutoField"
     name = "demo"
     verbose_name = "Demo Calculator"
+
+    def ready(self):
+        import demo.signals  # noqa: F401

@@ -314,6 +314,11 @@ urlpatterns = [
         name="shop-rate-card",
     ),
     path(
+        "shops/<slug:shop_slug>/rate-card-for-calculator/",
+        views.ShopRateCardForCalculatorView.as_view(),
+        name="shop-rate-card-for-calculator",
+    ),
+    path(
         "shops/<slug:shop_slug>/products/",
         views.ShopProductViewSet.as_view({"get": "list", "post": "create"}),
         name="shop-products",

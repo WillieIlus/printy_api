@@ -9,6 +9,9 @@ from typing import TYPE_CHECKING
 
 from catalog.choices import PricingMode
 
+# Allow 1mm over max for bleed / rounding (e.g. 106mm when max 105mm for A6 business cards)
+DIMENSION_TOLERANCE_MM = 1
+
 if TYPE_CHECKING:
     from catalog.models import Product
     from inventory.models import Paper
@@ -54,11 +57,11 @@ def validate_product_configuration(
             errors.append(
                 f"Height {h}mm is below minimum {product.min_height_mm}mm."
             )
-        if product.max_width_mm is not None and w > product.max_width_mm:
+        if product.max_width_mm is not None and w > product.max_width_mm + DIMENSION_TOLERANCE_MM:
             errors.append(
                 f"Width {w}mm exceeds maximum {product.max_width_mm}mm (e.g. business cards max A6)."
             )
-        if product.max_height_mm is not None and h > product.max_height_mm:
+        if product.max_height_mm is not None and h > product.max_height_mm + DIMENSION_TOLERANCE_MM:
             errors.append(
                 f"Height {h}mm exceeds maximum {product.max_height_mm}mm."
             )

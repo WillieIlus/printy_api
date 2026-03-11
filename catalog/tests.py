@@ -7,6 +7,7 @@ from django.test import TestCase
 from catalog.choices import PricingMode
 from catalog.models import Product
 from catalog.services import compute_product_price_range_est
+from catalog.validation import validate_product_configuration
 from inventory.choices import MachineType, PaperType, SheetSize
 from inventory.models import Machine, Paper
 from pricing.choices import ColorMode, Sides
@@ -99,3 +100,44 @@ class ProductPriceRangeEstTests(TestCase):
         self.assertIn("ADD_PRINTING_RATE", codes)
         self.assertIsNone(result["lowest"]["total"])
         self.assertIsNone(result["highest"]["total"])
+
+
+class ProductValidationTests(TestCase):
+    """Tests for validate_product_configuration."""
+
+    def setUp(self):
+        self.user = get_user_model().objects.create_user(email="v@test.com", password="pass")
+        self.shop = Shop.objects.create(
+            owner=self.user, name="Val Shop", slug="val-shop", is_active=True
+        )
+        self.product = Product.objects.create(
+            shop=self.shop,
+            name="Business Cards",
+            pricing_mode=PricingMode.SHEET,
+            default_finished_width_mm=106,
+            default_finished_height_mm=74,
+            max_width_mm=105,
+            max_height_mm=148,
+            default_sides=Sides.SIMPLEX,
+            min_quantity=100,
+        )
+
+    def test_dimension_tolerance_allows_1mm_over_max_for_bleed(self):
+        """106mm width is allowed when max is 105mm (1mm tolerance for bleed)."""
+        v = validate_product_configuration(
+            self.product,
+            width_mm=106,
+            height_mm=74,
+        )
+        self.assertTrue(v["is_valid"], f"Expected valid, got errors: {v['errors']}")
+        self.assertEqual(v["errors"], [])
+
+    def test_dimension_tolerance_rejects_more_than_1mm_over(self):
+        """107mm width is rejected when max is 105mm."""
+        v = validate_product_configuration(
+            self.product,
+            width_mm=107,
+            height_mm=74,
+        )
+        self.assertFalse(v["is_valid"])
+        self.assertTrue(any("107" in e and "105" in e for e in v["errors"]))
