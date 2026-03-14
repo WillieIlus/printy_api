@@ -6,13 +6,165 @@ from rest_framework.test import APIClient
 
 from accounts.models import User
 from catalog.choices import PricingMode, ProductStatus
-from catalog.models import Product
+from catalog.models import Product, ProductCategory
 from inventory.models import Machine, Paper
+from locations.models import Location
 from pricing.choices import Sides
 from pricing.models import PrintingRate
 from quotes.choices import QuoteStatus
 from quotes.models import QuoteItem, QuoteRequest
 from shops.models import Shop
+
+
+class SEOAPITestCase(TestCase):
+    """Test public SEO endpoints — no auth required."""
+
+    def setUp(self):
+        self.client = APIClient()
+        self.user = User.objects.create_user(email="s@t.com", password="pass")
+        self.location = Location.objects.create(
+            name="Westlands",
+            slug="westlands",
+            location_type="neighborhood",
+            is_active=True,
+        )
+        self.shop = Shop.objects.create(
+            owner=self.user,
+            name="Test Shop",
+            slug="test-shop",
+            is_active=True,
+            location=self.location,
+            pricing_ready=True,
+        )
+        self.global_cat = ProductCategory.objects.create(
+            shop=None,
+            name="Business Cards",
+            slug="business-cards",
+            is_active=True,
+        )
+        self.product = Product.objects.create(
+            shop=self.shop,
+            category=self.global_cat,
+            name="Business Card",
+            slug="business-card",
+            pricing_mode=PricingMode.SHEET,
+            default_finished_width_mm=90,
+            default_finished_height_mm=55,
+            default_bleed_mm=3,
+            default_sides=Sides.SIMPLEX,
+            is_active=True,
+            status=ProductStatus.PUBLISHED,
+        )
+
+    def test_seo_locations_list_no_auth_required(self):
+        """GET /api/seo/locations/ returns active locations without auth."""
+        r = self.client.get("/api/seo/locations/")
+        self.assertEqual(r.status_code, 200)
+        data = r.json()
+        self.assertEqual(len(data), 1)
+        self.assertEqual(data[0]["slug"], "westlands")
+        self.assertEqual(data[0]["name"], "Westlands")
+        self.assertIn("updated_at", data[0])
+
+    def test_seo_products_list_no_auth_required(self):
+        """GET /api/seo/products/ returns global categories without auth."""
+        r = self.client.get("/api/seo/products/")
+        self.assertEqual(r.status_code, 200)
+        data = r.json()
+        self.assertEqual(len(data), 1)
+        self.assertEqual(data[0]["slug"], "business-cards")
+        self.assertEqual(data[0]["name"], "Business Cards")
+
+    def test_seo_routes_returns_canonical_urls(self):
+        """GET /api/seo/routes/ returns loc and lastmod for sitemap."""
+        r = self.client.get("/api/seo/routes/")
+        self.assertEqual(r.status_code, 200)
+        data = r.json()
+        locs = [d["loc"] for d in data]
+        self.assertIn("/", locs)
+        self.assertIn("/locations", locs)
+        self.assertIn("/products", locs)
+        self.assertIn("/shops", locs)
+        self.assertIn("/gallery", locs)
+        self.assertIn("/locations/westlands", locs)
+        self.assertIn("/products/business-cards", locs)
+        self.assertIn("/locations/westlands/products/business-cards", locs)
+        self.assertIn("/shops/test-shop", locs)
+        for d in data:
+            self.assertIn("loc", d)
+            self.assertIn("lastmod", d)
+
+    def test_seo_location_detail_returns_shops(self):
+        """GET /api/seo/locations/{slug}/ returns location with shops."""
+        r = self.client.get("/api/seo/locations/westlands/")
+        self.assertEqual(r.status_code, 200)
+        data = r.json()
+        self.assertEqual(data["slug"], "westlands")
+        self.assertEqual(data["name"], "Westlands")
+        self.assertEqual(len(data["shops"]), 1)
+        self.assertEqual(data["shops"][0]["slug"], "test-shop")
+
+    def test_seo_location_products_returns_categories_in_location(self):
+        """GET /api/seo/locations/{slug}/products/ returns product categories available in location."""
+        r = self.client.get("/api/seo/locations/westlands/products/")
+        self.assertEqual(r.status_code, 200)
+        data = r.json()
+        self.assertIsInstance(data, list)
+        self.assertEqual(len(data), 1)
+        self.assertEqual(data[0]["slug"], "business-cards")
+        self.assertEqual(data[0]["name"], "Business Cards")
+
+    def test_seo_location_detail_404_invalid_slug(self):
+        """GET /api/seo/locations/{slug}/ returns 404 for invalid slug."""
+        r = self.client.get("/api/seo/locations/nonexistent/")
+        self.assertEqual(r.status_code, 404)
+
+    def test_seo_product_detail_returns_product_count(self):
+        """GET /api/seo/products/{slug}/ returns category with product_count."""
+        r = self.client.get("/api/seo/products/business-cards/")
+        self.assertEqual(r.status_code, 200)
+        data = r.json()
+        self.assertEqual(data["slug"], "business-cards")
+        self.assertEqual(data["product_count"], 1)
+
+    def test_seo_product_detail_404_invalid_slug(self):
+        """GET /api/seo/products/{slug}/ returns 404 for invalid slug."""
+        r = self.client.get("/api/seo/products/nonexistent/")
+        self.assertEqual(r.status_code, 404)
+
+    def test_seo_location_product_returns_shops(self):
+        """GET /api/seo/locations/{loc}/products/{prod}/ returns shops offering category."""
+        r = self.client.get("/api/seo/locations/westlands/products/business-cards/")
+        self.assertEqual(r.status_code, 200)
+        data = r.json()
+        self.assertEqual(data["location"]["slug"], "westlands")
+        self.assertEqual(data["category"]["slug"], "business-cards")
+        self.assertEqual(len(data["shops"]), 1)
+        self.assertEqual(data["shops"][0]["slug"], "test-shop")
+
+    def test_seo_location_product_empty_shops_when_none_offer_category(self):
+        """Location+product returns empty shops when no shop offers that category."""
+        ProductCategory.objects.create(
+            shop=None,
+            name="Posters",
+            slug="posters",
+            is_active=True,
+        )
+        r = self.client.get("/api/seo/locations/westlands/products/posters/")
+        self.assertEqual(r.status_code, 200)
+        data = r.json()
+        self.assertEqual(data["category"]["slug"], "posters")
+        self.assertEqual(len(data["shops"]), 0)
+
+    def test_seo_location_product_404_invalid_location(self):
+        """GET /api/seo/locations/{loc}/products/{prod}/ returns 404 for invalid location."""
+        r = self.client.get("/api/seo/locations/nonexistent/products/business-cards/")
+        self.assertEqual(r.status_code, 404)
+
+    def test_seo_location_product_404_invalid_product(self):
+        """GET /api/seo/locations/{loc}/products/{prod}/ returns 404 for invalid product."""
+        r = self.client.get("/api/seo/locations/westlands/products/nonexistent/")
+        self.assertEqual(r.status_code, 404)
 
 
 class PublicShopsAPITestCase(TestCase):

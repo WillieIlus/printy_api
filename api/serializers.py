@@ -167,6 +167,7 @@ class CatalogProductSerializer(serializers.ModelSerializer):
     printing_total = serializers.SerializerMethodField()
     finishing_summary = serializers.SerializerMethodField()
     final_size = serializers.SerializerMethodField()
+    is_owner = serializers.SerializerMethodField()
 
     class Meta:
         model = Product
@@ -191,7 +192,26 @@ class CatalogProductSerializer(serializers.ModelSerializer):
             "printing_total",
             "finishing_summary",
             "final_size",
+            "is_owner",
         ]
+
+    def get_is_owner(self, obj):
+        request = self.context.get("request")
+        if not request or not request.user.is_authenticated:
+            return False
+        shop = self.context.get("shop") or getattr(obj, "shop", None)
+        if not shop:
+            return False
+        owner_id = getattr(shop, "owner_id", None)
+        return owner_id == request.user.id
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        # When shop is in context (catalog view), add shop to product for edit URL
+        shop = self.context.get("shop")
+        if shop and "shop" not in data:
+            data["shop"] = PublicShopListSerializer(shop).data
+        return data
 
     def get_primary_image(self, obj):
         """Path of primary or first image for card display (frontend prepends mediaBase)."""
@@ -705,6 +725,7 @@ class ShopSerializer(serializers.ModelSerializer):
             "slug",
             "currency",
             "is_active",
+            "owner",
             "description",
             "business_email",
             "phone_number",

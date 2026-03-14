@@ -48,6 +48,23 @@ class ProductCategory(AutoSlugMixin, models.Model):
         default="",
         verbose_name=_("description"),
     )
+    is_active = models.BooleanField(
+        default=True,
+        verbose_name=_("is active"),
+        help_text=_("Whether this category is visible in SEO and gallery."),
+    )
+    created_at = models.DateTimeField(
+        auto_now_add=True,
+        verbose_name=_("created at"),
+        null=True,
+        blank=True,
+    )
+    updated_at = models.DateTimeField(
+        auto_now=True,
+        verbose_name=_("updated at"),
+        null=True,
+        blank=True,
+    )
 
     class Meta:
         verbose_name = _("product category")

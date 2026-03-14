@@ -109,6 +109,15 @@ class Shop(AutoSlugMixin, models.Model):
         verbose_name=_("longitude"),
         help_text=_("Longitude for geo search."),
     )
+    location = models.ForeignKey(
+        "locations.Location",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="shops",
+        verbose_name=_("location"),
+        help_text=_("SEO location (neighborhood/city) for marketplace pages."),
+    )
     pricing_ready = models.BooleanField(
         default=False,
         verbose_name=_("pricing ready"),

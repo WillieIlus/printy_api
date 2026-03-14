@@ -104,7 +104,9 @@ class PublicShopViewSet(viewsets.ReadOnlyModelViewSet):
             "finishing_options__finishing_rate",
             "images",
         )
-        products_data = CatalogProductSerializer(products, many=True).data
+        products_data = CatalogProductSerializer(
+            products, many=True, context={"request": request, "shop": shop}
+        ).data
         shop_data = PublicShopListSerializer(shop).data
         return Response({"shop": shop_data, "products": products_data})
 
@@ -357,7 +359,7 @@ class PublicAllProductsView(APIView):
                 "images",
             )
         )
-        data = CatalogProductWithShopSerializer(products, many=True).data
+        data = CatalogProductWithShopSerializer(products, many=True, context={"request": request}).data
         return Response({"products": data})
 
 

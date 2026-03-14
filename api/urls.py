@@ -5,6 +5,15 @@ from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 
 from . import views
+from .seo_views import (
+    SEOLocationDetailView,
+    SEOLocationProductView,
+    SEOLocationProductsView,
+    SEOLocationsView,
+    SEOProductDetailView,
+    SEOProductsView,
+    SEORoutesView,
+)
 from gallery.views import (
     GalleryCategoryViewSet,
     GalleryProductViewSet,
@@ -46,6 +55,14 @@ urlpatterns = [
     path("", include(finishing_category_router.urls)),
     path("public/products/", views.PublicAllProductsView.as_view(), name="public-all-products"),
     path("public/match-shops/", views.MatchShopsView.as_view(), name="public-match-shops"),
+    # SEO (public, no auth — for sitemap and dynamic pages)
+    path("seo/locations/", SEOLocationsView.as_view(), name="seo-locations"),
+    path("seo/locations/<slug:slug>/", SEOLocationDetailView.as_view(), name="seo-location-detail"),
+    path("seo/locations/<slug:slug>/products/", SEOLocationProductsView.as_view(), name="seo-location-products"),
+    path("seo/products/", SEOProductsView.as_view(), name="seo-products"),
+    path("seo/products/<slug:slug>/", SEOProductDetailView.as_view(), name="seo-product-detail"),
+    path("seo/locations/<slug:location_slug>/products/<slug:product_slug>/", SEOLocationProductView.as_view(), name="seo-location-product"),
+    path("seo/routes/", SEORoutesView.as_view(), name="seo-routes"),
     path("products/gallery/", ProductGalleryView.as_view(), name="products-gallery"),
     path("", include(quote_router.urls)),
     path("", include(quotes_router.urls)),
