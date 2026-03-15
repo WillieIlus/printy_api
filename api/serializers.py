@@ -15,12 +15,50 @@ from catalog.choices import PricingMode
 from catalog.models import Product, ProductFinishingOption, ProductImage
 from inventory.models import Machine, Paper, ProductionPaperSize
 from pricing.choices import ColorMode, Sides
-from pricing.models import FinishingCategory, FinishingRate, Material, PrintingRate
+from pricing.models import FinishingCategory, FinishingRate, Material, PrintingRate, VolumeDiscount
 from quotes.choices import QuoteStatus
 from quotes.models import CustomerInquiry, QuoteItem, QuoteItemFinishing, QuoteRequest
-from shops.models import FavoriteShop, Shop, ShopRating
+from shops.models import FavoriteShop, OpeningHours, Shop, ShopRating
 
 from .validators import validate_shop_consistency
+
+
+def get_shop_status(shop):
+    """
+    Compute shop status: 'opening' | 'closing_soon' | 'closed'.
+    Uses shop's timezone-naive times; assumes local timezone.
+    """
+    from datetime import datetime
+
+    from django.utils import timezone
+
+    now = timezone.localtime(timezone.now())
+    weekday = now.isoweekday()  # 1=Mon .. 7=Sun
+    try:
+        hours = OpeningHours.objects.get(shop=shop, weekday=weekday)
+    except OpeningHours.DoesNotExist:
+        return "closed"
+
+    if hours.is_closed:
+        return "closed"
+
+    from_hour = hours.from_hour or "08:00"
+    to_hour = hours.to_hour or "18:00"
+    try:
+        open_h = datetime.strptime(from_hour, "%H:%M").time()
+        close_h = datetime.strptime(to_hour, "%H:%M").time()
+    except (ValueError, TypeError):
+        return "closed"
+
+    now_time = now.time()
+    if now_time < open_h or now_time > close_h:
+        return "closed"
+
+    delta = datetime.combine(now.date(), close_h) - datetime.combine(now.date(), now_time)
+    minutes_before_close = int(delta.total_seconds() // 60)
+    if minutes_before_close <= getattr(shop, "closing_soon_minutes", 30):
+        return "closing_soon"
+    return "opening"
 
 
 # ---------------------------------------------------------------------------
@@ -28,13 +66,63 @@ from .validators import validate_shop_consistency
 # ---------------------------------------------------------------------------
 
 
+class OpeningHoursSerializer(serializers.ModelSerializer):
+    """Opening hours per weekday. Help text from model = single source of truth."""
+
+    weekday_display = serializers.SerializerMethodField()
+
+    class Meta:
+        model = OpeningHours
+        fields = ["id", "weekday", "weekday_display", "from_hour", "to_hour", "is_closed"]
+        read_only_fields = ["weekday_display"]
+
+    def get_weekday_display(self, obj):
+        return obj.get_weekday_display()
+
+
+class OpeningHoursBulkInputSerializer(serializers.Serializer):
+    """Single item for bulk hours update. Help text from model."""
+
+    id = serializers.IntegerField(required=False, allow_null=True)
+    weekday = serializers.IntegerField(min_value=1, max_value=7)
+    from_hour = serializers.CharField(required=False, allow_blank=True, default="08:00")
+    to_hour = serializers.CharField(required=False, allow_blank=True, default="18:00")
+    is_closed = serializers.BooleanField(default=False)
+
+
+class OpeningHoursBulkSerializer(serializers.Serializer):
+    """Bulk update opening hours. { hours: [{ weekday, from_hour, to_hour, is_closed }, ...] }."""
+
+    hours = OpeningHoursBulkInputSerializer(many=True)
+
+
 class PublicShopListSerializer(serializers.ModelSerializer):
     """List active shops (public)."""
 
+    opening_hours = OpeningHoursSerializer(many=True, read_only=True)
+    status = serializers.SerializerMethodField()
+    description = serializers.CharField(read_only=True)
+
     class Meta:
         model = Shop
-        fields = ["id", "name", "slug", "currency", "latitude", "longitude"]
+        fields = [
+            "id",
+            "name",
+            "slug",
+            "currency",
+            "description",
+            "latitude",
+            "longitude",
+            "opening_hours",
+            "status",
+            "opening_time",
+            "closing_time",
+            "closing_soon_minutes",
+        ]
         read_only_fields = ["slug"]
+
+    def get_status(self, obj):
+        return get_shop_status(obj)
 
 
 class MatchShopsInputSerializer(serializers.Serializer):
@@ -173,6 +261,7 @@ class CatalogProductSerializer(serializers.ModelSerializer):
         model = Product
         fields = [
             "id",
+            "slug",
             "name",
             "description",
             "category",
@@ -301,7 +390,7 @@ class QuoteItemFinishingWriteSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = QuoteItemFinishing
-        fields = ["finishing_rate", "coverage_qty", "price_override"]
+        fields = ["finishing_rate", "coverage_qty", "price_override", "apply_to_sides"]
 
     def validate_finishing_rate(self, value):
         quote_item = self.context.get("quote_item")
@@ -429,6 +518,8 @@ class QuoteItemWriteSerializer(serializers.ModelSerializer):
         return item
 
     def update(self, instance, validated_data):
+        from quotes.pricing_service import compute_and_store_pricing
+
         finishings_data = validated_data.pop("finishings", None)
         for attr, value in validated_data.items():
             setattr(instance, attr, value)
@@ -437,6 +528,11 @@ class QuoteItemWriteSerializer(serializers.ModelSerializer):
             instance.finishings.all().delete()
             for fd in finishings_data:
                 QuoteItemFinishing.objects.create(quote_item=instance, **fd)
+        try:
+            compute_and_store_pricing(instance)
+        except Exception:
+            instance.needs_review = True
+            instance.save(update_fields=["needs_review"])
         return instance
 
 
@@ -444,6 +540,7 @@ class QuoteItemReadSerializer(serializers.ModelSerializer):
     """Read serializer for quote items (PRODUCT + CUSTOM)."""
 
     product_name = serializers.SerializerMethodField()
+    product_slug = serializers.SerializerMethodField()
     finishings = QuoteItemFinishingWriteSerializer(many=True, read_only=True)
 
     class Meta:
@@ -453,6 +550,7 @@ class QuoteItemReadSerializer(serializers.ModelSerializer):
             "item_type",
             "product",
             "product_name",
+            "product_slug",
             "title",
             "spec_text",
             "has_artwork",
@@ -475,6 +573,11 @@ class QuoteItemReadSerializer(serializers.ModelSerializer):
         if obj.item_type == "PRODUCT" and obj.product_id:
             return obj.product.name
         return obj.title or ""
+
+    def get_product_slug(self, obj):
+        if obj.item_type == "PRODUCT" and obj.product_id and obj.product:
+            return getattr(obj.product, "slug", None) or ""
+        return ""
 
 
 class QuoteRequestCreateSerializer(serializers.ModelSerializer):
@@ -500,6 +603,7 @@ class QuoteRequestReadSerializer(serializers.ModelSerializer):
 
     items = QuoteItemReadSerializer(many=True, read_only=True)
     shop_name = serializers.CharField(source="shop.name", read_only=True)
+    shop_currency = serializers.CharField(source="shop.currency", read_only=True)
 
     class Meta:
         model = QuoteRequest
@@ -507,6 +611,7 @@ class QuoteRequestReadSerializer(serializers.ModelSerializer):
             "id",
             "shop",
             "shop_name",
+            "shop_currency",
             "customer_name",
             "customer_email",
             "customer_phone",
@@ -715,7 +820,7 @@ class QuoteItemAddSerializer(QuoteItemWriteSerializer):
 
 
 class ShopSerializer(serializers.ModelSerializer):
-    """CRUD for seller's own shop."""
+    """CRUD for seller's own shop. Owner set by view on create."""
 
     class Meta:
         model = Shop
@@ -736,8 +841,12 @@ class ShopSerializer(serializers.ModelSerializer):
             "zip_code",
             "latitude",
             "longitude",
+            "google_place_id",
+            "opening_time",
+            "closing_time",
+            "closing_soon_minutes",
         ]
-        read_only_fields = ["slug"]
+        read_only_fields = ["slug", "owner"]
         extra_kwargs = {
             # Coerce null to "" — model uses blank=True, default="" but no null=True
             "description": {"allow_null": True, "default": ""},
@@ -748,6 +857,7 @@ class ShopSerializer(serializers.ModelSerializer):
             "state": {"allow_null": True, "default": ""},
             "country": {"allow_null": True, "default": ""},
             "zip_code": {"allow_null": True, "default": ""},
+            "google_place_id": {"allow_null": True, "default": ""},
         }
 
     def validate_description(self, value):
@@ -883,6 +993,18 @@ class FinishingRateSerializer(serializers.ModelSerializer):
             "min_qty",
             "is_active",
         ]
+
+
+class VolumeDiscountSerializer(serializers.ModelSerializer):
+    """CRUD for shop volume discounts."""
+
+    discount_percent = serializers.DecimalField(
+        max_digits=5, decimal_places=2, coerce_to_string=True
+    )
+
+    class Meta:
+        model = VolumeDiscount
+        fields = ["id", "name", "min_quantity", "discount_percent", "is_active"]
 
 
 class MaterialSerializer(serializers.ModelSerializer):

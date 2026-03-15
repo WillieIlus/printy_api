@@ -52,6 +52,13 @@ class Location(AutoSlugMixin, models.Model):
         verbose_name=_("longitude"),
         help_text=_("Longitude for geo display and search."),
     )
+    google_place_id = models.CharField(
+        max_length=255,
+        blank=True,
+        default="",
+        verbose_name=_("Google Place ID"),
+        help_text=_("Stable identifier from Google Places for reuse and geocoding."),
+    )
     description = models.TextField(
         blank=True,
         default="",
