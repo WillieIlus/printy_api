@@ -49,6 +49,8 @@ job_claims_router = DefaultRouter()
 job_claims_router.register(r"job-claims", JobClaimViewSet, basename="job-claim")
 
 urlpatterns = [
+    # Production tracking (jobs, processes, dashboard)
+    path("", include("production.urls")),
     # Demo calculator (public, no auth)
     path("", include("demo.urls")),
     path("", include(public_router.urls)),
@@ -272,6 +274,21 @@ urlpatterns = [
         name="shop-paper-detail",
     ),
     path(
+        "shops/<slug:shop_slug>/papers/<int:pk>/adjust/",
+        views.ShopPaperViewSet.as_view({"post": "adjust"}),
+        name="shop-paper-adjust",
+    ),
+    path(
+        "shops/<slug:shop_slug>/hours/",
+        views.ShopOpeningHoursViewSet.as_view({"get": "list"}),
+        name="shop-hours",
+    ),
+    path(
+        "shops/<slug:shop_slug>/hours/bulk/",
+        views.ShopOpeningHoursBulkView.as_view(),
+        name="shop-hours-bulk",
+    ),
+    path(
         "shops/<slug:shop_slug>/finishing-rates/",
         views.ShopFinishingRateViewSet.as_view({"get": "list", "post": "create"}),
         name="shop-finishing-rates",
@@ -294,6 +311,18 @@ urlpatterns = [
             {"get": "retrieve", "put": "update", "patch": "partial_update", "delete": "destroy"}
         ),
         name="shop-material-detail",
+    ),
+    path(
+        "shops/<slug:shop_slug>/pricing/discounts/",
+        views.ShopVolumeDiscountViewSet.as_view({"get": "list", "post": "create"}),
+        name="shop-pricing-discounts",
+    ),
+    path(
+        "shops/<slug:shop_slug>/pricing/discounts/<int:pk>/",
+        views.ShopVolumeDiscountViewSet.as_view(
+            {"get": "retrieve", "put": "update", "patch": "partial_update", "delete": "destroy"}
+        ),
+        name="shop-pricing-discount-detail",
     ),
     # Gallery: products/categories + products (shop-scoped, slug lookup)
     path(

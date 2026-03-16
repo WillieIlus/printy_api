@@ -426,3 +426,43 @@ class ServiceRateTier(TimeStampedModel):
     def __str__(self):
         r = f"{self.min_km}–{self.max_km}km" if self.max_km else f"{self.min_km}+km"
         return f"{self.service_rate}: {r} → {self.price}"
+
+
+class VolumeDiscount(TimeStampedModel):
+    """Bulk/volume discount for a shop (e.g. 10% off for 500+ items)."""
+
+    shop = models.ForeignKey(
+        Shop,
+        on_delete=models.CASCADE,
+        related_name="volume_discounts",
+        verbose_name=_("shop"),
+        help_text=_("Shop that owns this discount."),
+    )
+    name = models.CharField(
+        max_length=255,
+        verbose_name=_("name"),
+        help_text=_("Display name (e.g. Bulk 500+, High Volume)."),
+    )
+    min_quantity = models.PositiveIntegerField(
+        verbose_name=_("min quantity"),
+        help_text=_("Minimum quantity to qualify for this discount."),
+    )
+    discount_percent = models.DecimalField(
+        max_digits=5,
+        decimal_places=2,
+        verbose_name=_("discount percent"),
+        help_text=_("Discount percentage (e.g. 10 for 10% off)."),
+    )
+    is_active = models.BooleanField(
+        default=True,
+        verbose_name=_("is active"),
+        help_text=_("Whether this discount is available."),
+    )
+
+    class Meta:
+        ordering = ["shop", "min_quantity"]
+        verbose_name = _("volume discount")
+        verbose_name_plural = _("volume discounts")
+
+    def __str__(self):
+        return f"{self.name} ({self.shop.name}): {self.discount_percent}% off @ {self.min_quantity}+"

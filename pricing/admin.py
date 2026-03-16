@@ -1,6 +1,6 @@
 from django.contrib import admin
 
-from .models import FinishingCategory, FinishingRate, Material, PrintingRate, ServiceRate, ServiceRateTier
+from .models import FinishingCategory, FinishingRate, Material, PrintingRate, ServiceRate, ServiceRateTier, VolumeDiscount
 
 
 @admin.register(FinishingCategory)
@@ -106,3 +106,10 @@ class ServiceRateAdmin(admin.ModelAdmin):
 class ServiceRateTierAdmin(admin.ModelAdmin):
     list_display = ["service_rate", "min_km", "max_km", "price"]
     list_filter = ["service_rate__code"]
+
+
+@admin.register(VolumeDiscount)
+class VolumeDiscountAdmin(admin.ModelAdmin):
+    list_display = ["name", "shop", "min_quantity", "discount_percent", "is_active"]
+    list_filter = ["is_active"]
+    search_fields = ["name"]

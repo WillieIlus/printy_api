@@ -15,15 +15,15 @@ from django_filters.rest_framework import DjangoFilterBackend
 
 from catalog.models import Product
 from inventory.models import Machine, Paper
-from pricing.models import FinishingCategory, FinishingRate, Material, PrintingRate
+from pricing.models import FinishingCategory, FinishingRate, Material, PrintingRate, VolumeDiscount
 from django.db.models import Avg, Count
 from quotes.choices import QuoteStatus
-from quotes.models import QuoteItem, QuoteRequest, QuoteShareLink
+from quotes.models import QuoteItem, QuoteItemFinishing, QuoteRequest, QuoteShareLink
 from quotes.services_match_shops import find_shops_for_spec
 from quotes.quote_engine import recalculate_and_lock_quote_request
 from quotes.services import build_preview_price_response, calculate_quote_item
 from quotes.whatsapp_formatter import format_quote_for_whatsapp
-from shops.models import FavoriteShop, Shop, ShopRating
+from shops.models import FavoriteShop, OpeningHours, Shop, ShopRating
 
 from .filters import QuoteFilterSet
 from .permissions import IsQuoteRequestBuyer, IsQuoteRequestSeller, IsShopOwner, IsStaffUser, PublicReadOnly
@@ -63,9 +63,12 @@ from .serializers import (
     QuoteRequestReadSerializer,
     ShopRatingSerializer,
     ShopRatingSummarySerializer,
+    OpeningHoursBulkSerializer,
+    OpeningHoursSerializer,
     ShopSerializer,
     TweakAndAddSerializer,
     TweakedItemReadSerializer,
+    VolumeDiscountSerializer,
 )
 
 
@@ -85,7 +88,7 @@ class PublicShopViewSet(viewsets.ReadOnlyModelViewSet):
     def get_queryset(self):
         return Shop.objects.filter(is_active=True).exclude(
             slug__isnull=True
-        ).exclude(slug="")
+        ).exclude(slug="").prefetch_related("opening_hours")
 
     def get_serializer_class(self):
         if self.action == "catalog":
@@ -1128,7 +1131,7 @@ class QuoteDraftItemViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         quote_pk = self.kwargs.get("quote_draft_pk")
-        return QuoteItem.objects.filter(quote_request_id=quote_pk)
+        return QuoteItem.objects.filter(quote_request_id=quote_pk).select_related("product")
 
     def get_quote_request(self):
         return get_object_or_404(QuoteRequest, pk=self.kwargs["quote_draft_pk"])
@@ -1298,6 +1301,52 @@ class ShopMachineViewSet(ShopScopedMixin, viewsets.ModelViewSet):
         return super().destroy(request, *args, **kwargs)
 
 
+class ShopOpeningHoursViewSet(ShopScopedMixin, viewsets.ReadOnlyModelViewSet):
+    """GET /api/shops/{slug}/hours/ — list opening hours. Owner only."""
+
+    serializer_class = OpeningHoursSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        shop = self._get_shop()
+        return OpeningHours.objects.filter(shop=shop).order_by("weekday")
+
+
+class ShopOpeningHoursBulkView(APIView):
+    """POST /api/shops/{slug}/hours/bulk/ — bulk update hours. Owner only."""
+
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, shop_slug=None, shop_id=None):
+        from rest_framework.exceptions import PermissionDenied, NotFound
+
+        shop = None
+        if shop_id is not None:
+            shop = Shop.objects.filter(pk=shop_id).first()
+        elif shop_slug:
+            shop = Shop.objects.filter(slug=shop_slug).first()
+        if not shop or shop.owner_id != request.user.id:
+            if not shop:
+                raise NotFound("Shop not found.")
+            raise PermissionDenied("Not your shop.")
+
+        ser = OpeningHoursBulkSerializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+        updated = []
+        for item in ser.validated_data["hours"]:
+            obj, _ = OpeningHours.objects.update_or_create(
+                shop=shop,
+                weekday=item["weekday"],
+                defaults={
+                    "from_hour": item.get("from_hour") or "08:00",
+                    "to_hour": item.get("to_hour") or "18:00",
+                    "is_closed": item.get("is_closed", False),
+                },
+            )
+            updated.append(OpeningHoursSerializer(obj).data)
+        return Response(updated)
+
+
 class ShopPaperViewSet(ShopScopedMixin, viewsets.ModelViewSet):
     """CRUD /api/shops/{shop_slug}/papers/"""
 
@@ -1327,6 +1376,29 @@ class ShopPaperViewSet(ShopScopedMixin, viewsets.ModelViewSet):
     def destroy(self, request, *args, **kwargs):
         self._get_shop()
         return super().destroy(request, *args, **kwargs)
+
+    @action(detail=True, methods=["post"], url_path="adjust")
+    def adjust(self, request, shop_slug=None, pk=None):
+        """POST papers/<pk>/adjust/ — adjust quantity_in_stock by delta."""
+        from rest_framework.exceptions import ValidationError
+        shop = self._get_shop()
+        paper = Paper.objects.filter(pk=pk, shop=shop).first()
+        if not paper:
+            from rest_framework.exceptions import NotFound
+            raise NotFound("Paper not found.")
+        delta = request.data.get("adjustment")
+        if delta is None:
+            raise ValidationError("adjustment is required")
+        try:
+            delta = int(delta)
+        except (TypeError, ValueError):
+            raise ValidationError("adjustment must be an integer")
+        current = paper.quantity_in_stock or 0
+        new_qty = max(0, current + delta)
+        paper.quantity_in_stock = new_qty
+        paper.save(update_fields=["quantity_in_stock"])
+        serializer = self.get_serializer(paper)
+        return Response(serializer.data)
 
 
 class MachinePrintingRateViewSet(viewsets.ModelViewSet):
@@ -1420,6 +1492,38 @@ class ShopMaterialViewSet(ShopScopedMixin, viewsets.ModelViewSet):
     def get_queryset(self):
         shop = self._get_shop()
         return Material.objects.filter(shop=shop)
+
+    def get_serializer_context(self):
+        ctx = super().get_serializer_context()
+        ctx["shop"] = self._get_shop()
+        return ctx
+
+    def perform_create(self, serializer):
+        serializer.save(shop=self._get_shop())
+
+    def update(self, request, *args, **kwargs):
+        self._get_shop()
+        return super().update(request, *args, **kwargs)
+
+    def partial_update(self, request, *args, **kwargs):
+        self._get_shop()
+        return super().partial_update(request, *args, **kwargs)
+
+    def destroy(self, request, *args, **kwargs):
+        self._get_shop()
+        return super().destroy(request, *args, **kwargs)
+
+
+class ShopVolumeDiscountViewSet(ShopScopedMixin, viewsets.ModelViewSet):
+    """CRUD /api/shops/{shop_slug}/pricing/discounts/"""
+
+    serializer_class = VolumeDiscountSerializer
+    permission_classes = [IsAuthenticated]
+    pagination_class = None
+
+    def get_queryset(self):
+        shop = self._get_shop()
+        return VolumeDiscount.objects.filter(shop=shop)
 
     def get_serializer_context(self):
         ctx = super().get_serializer_context()
@@ -1633,11 +1737,13 @@ class TweakedItemUpdateView(APIView):
                     item.finishings.all().delete()
                     for fin in request.data["finishings"]:
                         fr_id = fin.get("finishing_rate") if isinstance(fin, dict) else fin
-                        QuoteItemFinishing.objects.create(
-                            quote_item=item,
-                            finishing_rate_id=fr_id,
-                            price_override=fin.get("price_override") if isinstance(fin, dict) else None,
-                        )
+                        fd = {"quote_item": item, "finishing_rate_id": fr_id}
+                        if isinstance(fin, dict):
+                            if "price_override" in fin:
+                                fd["price_override"] = fin["price_override"]
+                            if "apply_to_sides" in fin and fin["apply_to_sides"]:
+                                fd["apply_to_sides"] = fin["apply_to_sides"]
+                        QuoteItemFinishing.objects.create(**fd)
 
                 compute_and_store_pricing(item)
 
