@@ -4,10 +4,22 @@ from django.db import models
 
 
 class QuoteStatus(models.TextChoices):
-    DRAFT = "DRAFT", "Draft"
-    SUBMITTED = "SUBMITTED", "Submitted"
-    PRICED = "PRICED", "Priced"
-    SENT = "SENT", "Sent"
-    ACCEPTED = "ACCEPTED", "Accepted"
-    REJECTED = "REJECTED", "Rejected"
-    EXPIRED = "EXPIRED", "Expired"
+    """QuoteRequest status (customer lifecycle)."""
+
+    DRAFT = "draft", "Draft"
+    SUBMITTED = "submitted", "Submitted"
+    VIEWED = "viewed", "Viewed"
+    QUOTED = "quoted", "Quoted"
+    ACCEPTED = "accepted", "Accepted"
+    CLOSED = "closed", "Closed"
+    CANCELLED = "cancelled", "Cancelled"
+
+
+class ShopQuoteStatus(models.TextChoices):
+    """ShopQuote status (shop offer lifecycle)."""
+
+    SENT = "sent", "Sent"
+    REVISED = "revised", "Revised"
+    ACCEPTED = "accepted", "Accepted"
+    DECLINED = "declined", "Declined"
+    EXPIRED = "expired", "Expired"

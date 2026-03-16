@@ -200,7 +200,7 @@ def format_quote_item_summary(summary: QuoteItemSummary) -> str:
 def summary_to_breakdown_lines(summary: QuoteItemSummary) -> List[dict]:
     """
     Convert QuoteItemSummary to {label, amount} format for preview/API.
-    Compatible with build_preview_price_response lines structure.
+    Paper + print combined as "Printing". Finishing items by name (Lamination, etc.).
     """
     result: List[dict] = []
     if summary.items_per_sheet is not None and summary.sheets_needed is not None:
@@ -208,15 +208,19 @@ def summary_to_breakdown_lines(summary: QuoteItemSummary) -> List[dict]:
             "label": f"Sheets: {summary.sheets_needed} (×{summary.items_per_sheet} up)",
             "amount": "",
         })
-    if summary.paper_cost > 0 and summary.stock_name:
-        result.append({"label": f"Paper: {summary.stock_name}", "amount": f"{summary.paper_cost:,.0f}"})
+    # Combine paper + print into one "Printing" line
+    printing_total = (summary.paper_cost or 0) + (summary.print_cost or 0)
+    if printing_total > 0:
+        label = "Printing"
+        if summary.stock_name:
+            label = f"Printing: {summary.stock_name}"
+        result.append({"label": label, "amount": f"{printing_total:,.0f}"})
     elif summary.material_cost > 0 and summary.stock_name:
         result.append({"label": f"Material: {summary.stock_name}", "amount": f"{summary.material_cost:,.0f}"})
-    result.append({"label": "Print", "amount": f"{summary.print_cost:,.0f}"})
+    # Finishing by name: Lamination, Cutting, etc.
     for fl in summary.finishing_lines:
         if fl.total > 0:
-            result.append({"label": f"Finishing: {fl.name}", "amount": f"{fl.total:,.0f}"})
+            result.append({"label": fl.name, "amount": f"{fl.total:,.0f}"})
     if summary.finishing_cost > 0 and not summary.finishing_lines:
         result.append({"label": "Finishing", "amount": f"{summary.finishing_cost:,.0f}"})
-    # Caller adds Total (e.g. build_preview_price_response)
     return result

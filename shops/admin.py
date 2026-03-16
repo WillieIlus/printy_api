@@ -13,7 +13,14 @@ from catalog.models import Product
 from inventory.models import Machine, Paper
 from pricing.models import FinishingRate, Material, ServiceRate
 
-from .models import Shop
+from .models import OpeningHours, Shop
+
+
+class OpeningHoursInline(admin.TabularInline):
+    model = OpeningHours
+    extra = 0
+    fields = ["weekday", "from_hour", "to_hour", "is_closed"]
+    verbose_name_plural = "Opening hours"
 
 
 class MachineInline(admin.TabularInline):
@@ -77,7 +84,7 @@ class ProductInline(admin.TabularInline):
 
 @admin.register(Shop)
 class ShopAdmin(admin.ModelAdmin):
-    list_display = ["name", "slug", "owner", "currency", "is_active", "latitude", "longitude", "created_at"]
+    list_display = ["name", "slug", "owner", "currency", "is_active", "opening_time", "closing_time", "created_at"]
     list_filter = ["is_active"]
     search_fields = ["name", "slug", "owner__email"]
-    inlines = [MachineInline, PaperInline, FinishingRateInline, MaterialInline, ServiceRateInline, ProductInline]
+    inlines = [OpeningHoursInline, MachineInline, PaperInline, FinishingRateInline, MaterialInline, ServiceRateInline, ProductInline]

@@ -24,20 +24,78 @@ class IsShopOwner(permissions.BasePermission):
 
 
 class IsQuoteRequestBuyer(permissions.BasePermission):
-    """Allow buyer (created_by) to access their quote request."""
+    """Allow buyer (created_by) to access their quote request. Staff can access for admin."""
 
     def has_object_permission(self, request, view, obj):
+        if request.user.is_staff:
+            return True
         return obj.created_by_id == request.user.id
 
     def has_permission(self, request, view):
         return request.user.is_authenticated
 
 
-class IsQuoteRequestSeller(permissions.BasePermission):
-    """Allow shop owner (seller) to access quote requests for their shop."""
+class IsQuoteRequestItemBuyer(permissions.BasePermission):
+    """Allow buyer to access quote items. For QuoteItem: checks quote_request.created_by."""
 
     def has_object_permission(self, request, view, obj):
+        if request.user.is_staff:
+            return True
+        qr = getattr(obj, "quote_request", None)
+        return qr and qr.created_by_id == request.user.id
+
+    def has_permission(self, request, view):
+        return request.user.is_authenticated
+
+
+class IsQuoteRequestSeller(permissions.BasePermission):
+    """Allow shop owner (seller) to access quote requests for their shop. Staff can access for admin."""
+
+    def has_object_permission(self, request, view, obj):
+        if request.user.is_staff:
+            return True
         return obj.shop.owner_id == request.user.id
+
+    def has_permission(self, request, view):
+        return request.user.is_authenticated
+
+
+class IsShopQuoteOwner(permissions.BasePermission):
+    """Allow shop owner to access their shop quote. Staff can access for admin."""
+
+    def has_object_permission(self, request, view, obj):
+        if request.user.is_staff:
+            return True
+        return obj.shop.owner_id == request.user.id
+
+    def has_permission(self, request, view):
+        return request.user.is_authenticated
+
+
+class IsJobShopOwner(permissions.BasePermission):
+    """Allow shop owner to access jobs for their shop. Staff can access for admin."""
+
+    def has_object_permission(self, request, view, obj):
+        if request.user.is_staff:
+            return True
+        return obj.shop.owner_id == request.user.id
+
+    def has_permission(self, request, view):
+        return request.user.is_authenticated
+
+
+class IsJobCustomerOrShopOwner(permissions.BasePermission):
+    """Allow shop owner OR customer (buyer from accepted quote) to access job."""
+
+    def has_object_permission(self, request, view, obj):
+        if request.user.is_staff:
+            return True
+        if obj.shop_id and obj.shop.owner_id == request.user.id:
+            return True
+        shop_quote = getattr(obj, "shop_quote", None)
+        if shop_quote and shop_quote.quote_request_id:
+            return shop_quote.quote_request.created_by_id == request.user.id
+        return False
 
     def has_permission(self, request, view):
         return request.user.is_authenticated

@@ -20,6 +20,21 @@ from quotes.choices import QuoteStatus
 from quotes.models import CustomerInquiry, QuoteItem, QuoteItemFinishing, QuoteRequest
 from shops.models import FavoriteShop, OpeningHours, Shop, ShopRating
 
+from .quote_serializers import (
+    QuoteRequestCustomerCreateSerializer,
+    QuoteRequestCustomerDetailSerializer,
+    QuoteRequestCustomerListSerializer,
+    QuoteRequestCustomerUpdateSerializer,
+    QuoteRequestShopDetailSerializer,
+    QuoteRequestShopListSerializer,
+    QuoteSharePublicSerializer,
+    ShopQuoteCreateSerializer,
+    ShopQuoteDetailSerializer,
+    ShopQuoteListSerializer,
+    ShopQuoteSummarySerializer,
+    ShopQuoteUpdateSerializer,
+)
+
 from .validators import validate_shop_consistency
 
 
@@ -580,56 +595,10 @@ class QuoteItemReadSerializer(serializers.ModelSerializer):
         return ""
 
 
-class QuoteRequestCreateSerializer(serializers.ModelSerializer):
-    """Create draft quote request (buyer)."""
-
-    class Meta:
-        model = QuoteRequest
-        fields = ["shop", "customer_name", "customer_email", "customer_phone", "notes"]
-
-    def validate_shop(self, value):
-        if not value or not value.is_active:
-            raise serializers.ValidationError("Shop must be active.")
-        return value
-
-    def create(self, validated_data):
-        validated_data["created_by"] = self.context["request"].user
-        validated_data["status"] = QuoteStatus.DRAFT
-        return super().create(validated_data)
-
-
-class QuoteRequestReadSerializer(serializers.ModelSerializer):
-    """Read quote request with items."""
-
-    items = QuoteItemReadSerializer(many=True, read_only=True)
-    shop_name = serializers.CharField(source="shop.name", read_only=True)
-    shop_currency = serializers.CharField(source="shop.currency", read_only=True)
-
-    class Meta:
-        model = QuoteRequest
-        fields = [
-            "id",
-            "shop",
-            "shop_name",
-            "shop_currency",
-            "customer_name",
-            "customer_email",
-            "customer_phone",
-            "status",
-            "notes",
-            "totals",
-            "created_at",
-            "updated_at",
-            "items",
-        ]
-
-
-class QuoteRequestPatchSerializer(serializers.ModelSerializer):
-    """Partial update for draft (auto-save)."""
-
-    class Meta:
-        model = QuoteRequest
-        fields = ["customer_name", "customer_email", "customer_phone", "notes"]
+# Quote request serializers — use quote_serializers for customer/shop separation
+QuoteRequestCreateSerializer = QuoteRequestCustomerCreateSerializer
+QuoteRequestPatchSerializer = QuoteRequestCustomerUpdateSerializer
+QuoteRequestReadSerializer = QuoteRequestCustomerDetailSerializer  # Default for detail; views may override for list
 
 
 # ---------------------------------------------------------------------------
@@ -694,84 +663,9 @@ class QuoteCreateSerializer(serializers.ModelSerializer):
         return super().create(validated_data)
 
 
-class QuoteShareItemPublicSerializer(serializers.Serializer):
-    """Public quote item summary — no internal shop settings."""
-
-    product_name = serializers.SerializerMethodField()
-    title = serializers.CharField(allow_blank=True)
-    quantity = serializers.IntegerField()
-    size_label = serializers.SerializerMethodField()
-    sides = serializers.CharField(allow_blank=True, required=False)
-    finishing_label = serializers.SerializerMethodField()
-    line_total = serializers.DecimalField(max_digits=12, decimal_places=2, allow_null=True)
-
-    def get_product_name(self, obj):
-        if obj.item_type == "PRODUCT" and obj.product_id:
-            return obj.product.name
-        return obj.title or ""
-
-    def get_size_label(self, obj):
-        if obj.pricing_mode == "LARGE_FORMAT" and obj.chosen_width_mm and obj.chosen_height_mm:
-            return f"{obj.chosen_width_mm}×{obj.chosen_height_mm}mm"
-        if obj.product_id and obj.product:
-            w = obj.product.default_finished_width_mm
-            h = obj.product.default_finished_height_mm
-            if w and h:
-                return f"{w}×{h}mm"
-        return ""
-
-    def get_finishing_label(self, obj):
-        names = [
-            qif.finishing_rate.name
-            for qif in obj.finishings.select_related("finishing_rate").all()
-            if qif.finishing_rate
-        ]
-        return ", ".join(names) if names else ""
-
-
-class QuoteSharePublicSerializer(serializers.Serializer):
-    """Public quote summary for share link — no private shop settings."""
-
-    id = serializers.IntegerField()
-    shop_name = serializers.CharField(source="shop.name")
-    customer_name = serializers.CharField()
-    status = serializers.CharField()
-    total = serializers.DecimalField(max_digits=12, decimal_places=2, allow_null=True)
-    items = QuoteShareItemPublicSerializer(many=True)
-
-    class Meta:
-        fields = ["id", "shop_name", "customer_name", "status", "total", "items"]
-
-
-class QuoteDetailSerializer(serializers.ModelSerializer):
-    """Staff: full quote detail with items and pricing breakdown."""
-
-    items = QuoteItemWithBreakdownSerializer(many=True, read_only=True)
-    shop_name = serializers.CharField(source="shop.name", read_only=True)
-    shop_slug = serializers.CharField(source="shop.slug", read_only=True)
-
-    class Meta:
-        model = QuoteRequest
-        fields = [
-            "id",
-            "shop",
-            "shop_name",
-            "shop_slug",
-            "created_by",
-            "customer_name",
-            "customer_email",
-            "customer_phone",
-            "customer_inquiry",
-            "status",
-            "notes",
-            "total",
-            "pricing_locked_at",
-            "whatsapp_message",
-            "sent_at",
-            "created_at",
-            "updated_at",
-            "items",
-        ]
+class QuoteDetailSerializer(QuoteRequestShopDetailSerializer):
+    """Staff: full quote detail — alias for QuoteRequestShopDetailSerializer."""
+    pass
 
 
 class QuoteItemAddSerializer(QuoteItemWriteSerializer):

@@ -217,6 +217,11 @@ def _apply_finishing_cost(
         total += finishing_rate.price * sheets
         if finishing_rate.setup_fee:
             total += finishing_rate.setup_fee
+    elif finishing_rate.charge_unit == ChargeUnit.PER_SIDE_PER_SHEET:
+        sheets = sheets_needed_val or max(1, quantity)
+        total += price_single * sheets * effective_sides
+        if finishing_rate.setup_fee:
+            total += finishing_rate.setup_fee
     elif finishing_rate.charge_unit == ChargeUnit.PER_SQM:
         total += finishing_rate.price * area_sqm
     elif finishing_rate.charge_unit == ChargeUnit.FLAT:

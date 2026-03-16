@@ -1,9 +1,19 @@
-from decimal import Decimal
-
 from django.contrib import admin
 from django.utils.html import format_html
 
-from .models import CustomerInquiry, QuoteItem, QuoteItemComponent, QuoteItemFinishing, QuoteRequest, QuoteItemService, QuoteRequestService, QuoteShareLink
+from .models import (
+    CustomerInquiry,
+    QuoteItem,
+    QuoteItemComponent,
+    QuoteItemFinishing,
+    QuoteRequest,
+    QuoteRequestAttachment,
+    QuoteItemService,
+    QuoteRequestService,
+    QuoteShareLink,
+    ShopQuote,
+    ShopQuoteAttachment,
+)
 @admin.register(CustomerInquiry)
 class CustomerInquiryAdmin(admin.ModelAdmin):
     list_display = ["id", "name", "email", "phone", "created_at"]
@@ -97,11 +107,21 @@ class QuoteRequestServiceInline(admin.TabularInline):
     fields = ["service_rate", "is_selected", "distance_km", "price_override"]
 
 
+class QuoteRequestAttachmentInline(admin.TabularInline):
+    model = QuoteRequestAttachment
+    extra = 0
+    fields = ["file", "name"]
+
+
 @admin.register(QuoteRequest)
 class QuoteRequestAdmin(admin.ModelAdmin):
-    list_display = ["id", "shop", "created_by", "customer_name", "status", "total", "created_at"]
-    list_filter = ["shop", "status"]
-    inlines = [QuoteRequestServiceInline, QuoteItemInline]
+    list_display = ["id", "shop", "created_by", "customer_name", "status", "delivery_preference", "created_at"]
+    list_filter = ["shop", "status", "delivery_preference"]
+    inlines = [QuoteRequestServiceInline, QuoteItemInline, QuoteRequestAttachmentInline]
+    fieldsets = (
+        (None, {"fields": ("shop", "created_by", "customer_name", "customer_email", "customer_phone", "customer", "customer_inquiry", "status", "notes")}),
+        ("Delivery", {"fields": ("delivery_preference", "delivery_address", "delivery_location")}),
+    )
 
     def save_formset(self, request, form, formset, change):
         """Save inline items, then recalculate unit_price/line_total for each."""
@@ -116,16 +136,6 @@ class QuoteRequestAdmin(admin.ModelAdmin):
                 QuoteItem.objects.filter(pk=item.pk).update(
                     unit_price=unit_price, line_total=line_total
                 )
-            # Update quote total (items + quote-level services)
-            from quotes.services import _get_service_price
-            total = sum(
-                (i.line_total or Decimal("0")) for i in form.instance.items.all()
-            )
-            for qrs in form.instance.services.select_related("service_rate").filter(is_selected=True):
-                price = _get_service_price(qrs.service_rate, qrs.price_override, qrs.distance_km)
-                if price is not None:
-                    total += price
-            QuoteRequest.objects.filter(pk=form.instance.pk).update(total=total)
 
 
 class QuoteItemServiceInline(admin.TabularInline):
@@ -196,9 +206,23 @@ class QuoteItemAdmin(admin.ModelAdmin):
         obj.save(update_fields=["unit_price", "line_total"])
 
 
+class ShopQuoteAttachmentInline(admin.TabularInline):
+    model = ShopQuoteAttachment
+    extra = 0
+    fields = ["file", "name"]
+
+
+@admin.register(ShopQuote)
+class ShopQuoteAdmin(admin.ModelAdmin):
+    list_display = ["id", "quote_request", "shop", "status", "total", "turnaround_days", "revision_number", "sent_at", "created_at"]
+    list_filter = ["shop", "status"]
+    readonly_fields = ["created_at", "updated_at"]
+    inlines = [ShopQuoteAttachmentInline]
+
+
 @admin.register(QuoteShareLink)
 class QuoteShareLinkAdmin(admin.ModelAdmin):
-    list_display = ["id", "quote", "token", "created_by", "created_at", "expires_at"]
+    list_display = ["id", "shop_quote", "token", "created_by", "created_at", "expires_at"]
     list_filter = ["created_at"]
     readonly_fields = ["token", "created_at"]
     search_fields = ["token"]

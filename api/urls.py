@@ -4,7 +4,7 @@ API URL configuration with DRF routers.
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 
-from . import views
+from . import quote_views, views
 from .seo_views import (
     SEOLocationDetailView,
     SEOLocationProductView,
@@ -20,20 +20,26 @@ from gallery.views import (
     ProductGalleryView,
 )
 from jobs.views import JobClaimViewSet, JobRequestViewSet, PublicJobView
+from notifications.views import NotificationViewSet
 from subscriptions import views as subscriptions_views
 
 # Public router (no auth required for read)
 public_router = DefaultRouter()
 public_router.register(r"public/shops", views.PublicShopViewSet, basename="public-shop")
 
-# Quote requests (buyer + seller actions)
+# Quote marketplace — customer vs shop separation
 quote_router = DefaultRouter()
-quote_router.register(r"quote-requests", views.QuoteRequestViewSet, basename="quote-request")
+quote_router.register(r"quote-requests", quote_views.CustomerQuoteRequestViewSet, basename="quote-request")
 quote_router.register(r"quote-drafts", views.QuoteDraftViewSet, basename="quote-draft")
+quote_router.register(r"sent-quotes", quote_views.ShopQuoteViewSet, basename="sent-quote")
 
 # Staff quoting API
 quotes_router = DefaultRouter()
 quotes_router.register(r"quotes", views.QuoteViewSet, basename="quote")
+
+# Shop incoming quote requests (nested under shop)
+incoming_router = DefaultRouter()
+incoming_router.register(r"", quote_views.IncomingRequestViewSet, basename="incoming-request")
 
 # Seller router (shop-scoped)
 # Shops are registered at root; nested resources use custom paths
@@ -47,6 +53,9 @@ job_requests_router = DefaultRouter()
 job_requests_router.register(r"job-requests", JobRequestViewSet, basename="job-request")
 job_claims_router = DefaultRouter()
 job_claims_router.register(r"job-claims", JobClaimViewSet, basename="job-claim")
+
+notifications_router = DefaultRouter()
+notifications_router.register(r"", NotificationViewSet, basename="notification")
 
 urlpatterns = [
     # Production tracking (jobs, processes, dashboard)
@@ -71,6 +80,7 @@ urlpatterns = [
     path("", include(job_requests_router.urls)),
     path("", include(job_claims_router.urls)),
     path("shops/nearby/", views.ShopsNearbyView.as_view(), name="shops-nearby"),
+    path("shops/<slug:shop_slug>/incoming-requests/", include(incoming_router.urls)),
     path("", include(seller_router.urls)),
     path("public/job/<str:token>/", PublicJobView.as_view(), name="public-job"),
     path("share/<str:token>/", views.QuoteSharePublicView.as_view(), name="quote-share-public"),
@@ -104,12 +114,9 @@ urlpatterns = [
         views.MeFavoritesViewSet.as_view({"get": "list", "post": "create"}),
         name="me-favorites",
     ),
-    path(
-        "me/favorites/<int:shop_id>/",
-        views.MeFavoritesViewSet.as_view({"delete": "destroy"}),
-        name="me-favorite-detail",
-    ),
+    
     # Shop rating (buyer) — requires eligible QuoteRequest
+    path("me/notifications/", include(notifications_router.urls)),
     path(
         "shops/<int:shop_id>/rate/",
         views.ShopRateView.as_view(),
@@ -127,6 +134,26 @@ urlpatterns = [
             {"get": "retrieve", "patch": "partial_update", "put": "update", "delete": "destroy"}
         ),
         name="quote-request-item-detail",
+    ),
+    path(
+        "quote-requests/<int:quote_request_pk>/attachments/",
+        quote_views.QuoteRequestAttachmentViewSet.as_view({"get": "list", "post": "create"}),
+        name="quote-request-attachments",
+    ),
+    path(
+        "quote-requests/<int:quote_request_pk>/attachments/<int:pk>/",
+        quote_views.QuoteRequestAttachmentViewSet.as_view({"get": "retrieve", "delete": "destroy"}),
+        name="quote-request-attachment-detail",
+    ),
+    path(
+        "sent-quotes/<int:shop_quote_pk>/attachments/",
+        quote_views.ShopQuoteAttachmentViewSet.as_view({"get": "list", "post": "create"}),
+        name="shop-quote-attachments",
+    ),
+    path(
+        "sent-quotes/<int:shop_quote_pk>/attachments/<int:pk>/",
+        quote_views.ShopQuoteAttachmentViewSet.as_view({"get": "retrieve", "delete": "destroy"}),
+        name="shop-quote-attachment-detail",
     ),
     # Nested: quote-draft items (same logic, under quote-drafts)
     path(

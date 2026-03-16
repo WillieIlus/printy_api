@@ -18,15 +18,21 @@ from inventory.models import Machine, Paper
 from pricing.models import FinishingCategory, FinishingRate, Material, PrintingRate, VolumeDiscount
 from django.db.models import Avg, Count
 from quotes.choices import QuoteStatus
-from quotes.models import QuoteItem, QuoteItemFinishing, QuoteRequest, QuoteShareLink
+from quotes.models import QuoteItem, QuoteItemFinishing, QuoteRequest, QuoteShareLink, ShopQuote
 from quotes.services_match_shops import find_shops_for_spec
-from quotes.quote_engine import recalculate_and_lock_quote_request
 from quotes.services import build_preview_price_response, calculate_quote_item
 from quotes.whatsapp_formatter import format_quote_for_whatsapp
 from shops.models import FavoriteShop, OpeningHours, Shop, ShopRating
 
 from .filters import QuoteFilterSet
-from .permissions import IsQuoteRequestBuyer, IsQuoteRequestSeller, IsShopOwner, IsStaffUser, PublicReadOnly
+from .permissions import (
+    IsQuoteRequestBuyer,
+    IsQuoteRequestItemBuyer,
+    IsQuoteRequestSeller,
+    IsShopOwner,
+    IsStaffUser,
+    PublicReadOnly,
+)
 from .serializers import QuoteCalculatorInputSerializer
 from catalog.models import ProductImage
 from .serializers import (
@@ -69,6 +75,12 @@ from .serializers import (
     TweakAndAddSerializer,
     TweakedItemReadSerializer,
     VolumeDiscountSerializer,
+)
+from .quote_serializers import (
+    QuoteRequestCustomerDetailSerializer,
+    QuoteRequestCustomerListSerializer,
+    QuoteRequestShopDetailSerializer,
+    QuoteRequestShopListSerializer,
 )
 
 
@@ -499,7 +511,19 @@ class QuoteRequestViewSet(viewsets.ModelViewSet):
             return QuoteRequestCreateSerializer
         if self.action in ("update", "partial_update"):
             return QuoteRequestPatchSerializer
-        return QuoteRequestReadSerializer
+        if self.action == "list":
+            return QuoteRequestCustomerListSerializer  # Works for both buyer and seller list
+        return QuoteRequestReadSerializer  # Detail; get_serializer overrides per-object
+
+    def get_serializer(self, *args, **kwargs):
+        if self.action == "retrieve" and args and hasattr(args[0], "created_by_id"):
+            obj = args[0]
+            if obj.created_by_id == self.request.user.id:
+                kwargs.setdefault("context", self.get_serializer_context())
+                return QuoteRequestCustomerDetailSerializer(*args, **kwargs)
+            kwargs.setdefault("context", self.get_serializer_context())
+            return QuoteRequestShopDetailSerializer(*args, **kwargs)
+        return super().get_serializer(*args, **kwargs)
 
     def create(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)
@@ -541,7 +565,11 @@ class QuoteRequestViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=["post"], url_path="price")
     def price(self, request, pk=None):
-        """Seller: calculate & lock prices (status -> PRICED)."""
+        """Seller: calculate & lock prices, create ShopQuote, set QuoteRequest -> quoted."""
+        from django.db import transaction
+        from django.utils import timezone
+        from quotes.pricing_service import compute_and_store_pricing
+
         qr = self.get_object()
         if qr.shop.owner_id != request.user.id:
             return Response({"detail": "Not your shop."}, status=status.HTTP_403_FORBIDDEN)
@@ -550,22 +578,40 @@ class QuoteRequestViewSet(viewsets.ModelViewSet):
                 {"detail": "Only submitted quote requests can be priced."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        recalculate_and_lock_quote_request(qr)
+        with transaction.atomic():
+            for item in qr.items.all():
+                compute_and_store_pricing(item)
+            total = sum((i.line_total or 0) for i in qr.items.all())
+            now = timezone.now()
+            rev = qr.shop_quotes.count() + 1
+            shop_quote = ShopQuote.objects.create(
+                quote_request=qr,
+                shop=qr.shop,
+                created_by=request.user,
+                status=ShopQuote.SENT,
+                total=total,
+                sent_at=now,
+                pricing_locked_at=now,
+                revision_number=rev,
+            )
+            qr.items.update(shop_quote=shop_quote)
+            qr.status = QuoteStatus.QUOTED
+            qr.save(update_fields=["status", "updated_at"])
         return Response(QuoteRequestReadSerializer(qr).data)
 
     @action(detail=True, methods=["post"], url_path="send")
     def send(self, request, pk=None):
-        """Seller: mark as sent (status -> SENT)."""
+        """Seller: ensure ShopQuote sent (no-op if already quoted)."""
         qr = self.get_object()
         if qr.shop.owner_id != request.user.id:
             return Response({"detail": "Not your shop."}, status=status.HTTP_403_FORBIDDEN)
-        if qr.status != QuoteStatus.PRICED:
+        if qr.status not in (QuoteStatus.SUBMITTED, QuoteStatus.QUOTED):
             return Response(
-                {"detail": "Only priced quote requests can be sent."},
+                {"detail": "Only submitted or quoted requests can be sent."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        qr.status = QuoteStatus.SENT
-        qr.save(update_fields=["status", "updated_at"])
+        if qr.status == QuoteStatus.SUBMITTED:
+            return self.price(request, pk)
         return Response(QuoteRequestReadSerializer(qr).data)
 
 
@@ -608,9 +654,9 @@ class QuoteDraftViewSet(viewsets.ViewSet):
             )
         else:
             draft = drafts[0]
-            # Mark older drafts REJECTED so only one active draft exists
+            # Mark older drafts closed so only one active draft exists
             for older in drafts[1:]:
-                older.status = QuoteStatus.REJECTED
+                older.status = QuoteStatus.CLOSED
                 older.save(update_fields=["status", "updated_at"])
         return Response(QuoteRequestReadSerializer(draft).data)
 
@@ -618,7 +664,7 @@ class QuoteDraftViewSet(viewsets.ViewSet):
         """GET /api/quote-drafts/{id}/ — buyer retrieves own draft."""
         draft = get_object_or_404(QuoteRequest.objects.select_related("shop"), pk=pk)
         if draft.created_by_id != request.user.id:
-            return Response({"detail": "Not your quote."}, status=status.HTTP_403_FORBIDDEN)
+            return Response({"detail": "Not your quote request."}, status=status.HTTP_403_FORBIDDEN)
         if draft.status != QuoteStatus.DRAFT:
             return Response(
                 {"detail": "Not a draft."},
@@ -631,7 +677,7 @@ class QuoteDraftViewSet(viewsets.ViewSet):
         """POST /api/quote-drafts/{id}/preview-price/ — preview price for typing reveal."""
         draft = get_object_or_404(QuoteRequest.objects.select_related("shop"), pk=pk)
         if draft.created_by_id != request.user.id:
-            return Response({"detail": "Not your quote."}, status=status.HTTP_403_FORBIDDEN)
+            return Response({"detail": "Not your quote request."}, status=status.HTTP_403_FORBIDDEN)
         if draft.status != QuoteStatus.DRAFT:
             return Response(
                 {"detail": "Only draft quotes can be previewed."},
@@ -645,7 +691,7 @@ class QuoteDraftViewSet(viewsets.ViewSet):
         """POST /api/quote-drafts/{id}/request-quote/ — submit draft (status -> SUBMITTED)."""
         draft = get_object_or_404(QuoteRequest.objects.select_related("shop"), pk=pk)
         if draft.created_by_id != request.user.id:
-            return Response({"detail": "Not your quote."}, status=status.HTTP_403_FORBIDDEN)
+            return Response({"detail": "Not your quote request."}, status=status.HTTP_403_FORBIDDEN)
         if draft.status != QuoteStatus.DRAFT:
             return Response(
                 {"detail": "Only draft quotes can be submitted."},
@@ -710,22 +756,25 @@ class QuoteSharePublicView(APIView):
     def get(self, request, token):
         from django.utils import timezone
 
-        link = get_object_or_404(QuoteShareLink, token=token)
+        link = get_object_or_404(
+            QuoteShareLink.objects.select_related("shop_quote__shop", "shop_quote__quote_request"),
+            token=token,
+        )
         if link.expires_at and timezone.now() > link.expires_at:
             return Response(
                 {"detail": "This share link has expired."},
                 status=status.HTTP_410_GONE,
             )
-        quote = link.quote
-        quote = QuoteRequest.objects.filter(pk=quote.pk).select_related(
-            "shop"
+        shop_quote = link.shop_quote
+        shop_quote = ShopQuote.objects.filter(pk=shop_quote.pk).select_related(
+            "shop", "quote_request"
         ).prefetch_related(
             "items__product",
             "items__paper",
             "items__material",
             "items__finishings__finishing_rate",
         ).first()
-        serializer = QuoteSharePublicSerializer(quote)
+        serializer = QuoteSharePublicSerializer(shop_quote)
         return Response(serializer.data)
 
 
@@ -791,12 +840,40 @@ class QuoteViewSet(viewsets.ModelViewSet):
     def share(self, request, pk=None):
         """
         POST /api/quotes/{id}/share/ — create share link, return { share_url, whatsapp_text }.
-        Optional body: { expires_at: "2025-12-31T23:59:59Z" }.
+        Uses or creates ShopQuote for the share link. Optional body: { expires_at: "2025-12-31T23:59:59Z" }.
         """
         import secrets
         from django.conf import settings
+        from django.utils import timezone
 
-        quote = self.get_object()
+        quote_request = self.get_object()
+        shop = quote_request.shop
+
+        # Get or create ShopQuote for sharing
+        shop_quote = quote_request.get_latest_shop_quote()
+        if not shop_quote:
+            from quotes.pricing_service import compute_and_store_pricing
+            from django.db import transaction
+
+            with transaction.atomic():
+                for item in quote_request.items.all():
+                    compute_and_store_pricing(item)
+                total = sum((i.line_total or 0) for i in quote_request.items.all())
+                now = timezone.now()
+                shop_quote = ShopQuote.objects.create(
+                    quote_request=quote_request,
+                    shop=shop,
+                    created_by=request.user,
+                    status=ShopQuote.SENT,
+                    total=total,
+                    sent_at=now,
+                    pricing_locked_at=now,
+                    revision_number=1,
+                )
+                quote_request.items.update(shop_quote=shop_quote)
+                quote_request.status = QuoteStatus.QUOTED
+                quote_request.save(update_fields=["status", "updated_at"])
+
         expires_at = None
         if isinstance(request.data, dict) and request.data.get("expires_at"):
             try:
@@ -810,15 +887,14 @@ class QuoteViewSet(viewsets.ModelViewSet):
         share_url = f"{frontend_url}/share/{token}"
 
         QuoteShareLink.objects.create(
-            quote=quote,
+            shop_quote=shop_quote,
             token=token,
             expires_at=expires_at,
             created_by=request.user,
         )
 
-        shop = quote.shop
         whatsapp_text = format_quote_for_whatsapp(
-            quote,
+            quote_request,
             company_name=shop.name or "",
             company_phone=shop.phone_number or "",
             turnaround="2-3 business days",
@@ -841,9 +917,9 @@ class QuoteViewSet(viewsets.ModelViewSet):
 
         quote = self.get_object()
 
-        if quote.status not in (QuoteStatus.DRAFT, QuoteStatus.PRICED):
+        if quote.status not in (QuoteStatus.DRAFT, QuoteStatus.QUOTED):
             return Response(
-                {"detail": "Only DRAFT or PRICED quotes can be sent."},
+                {"detail": "Only DRAFT or QUOTED quotes can be sent."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
@@ -854,21 +930,40 @@ class QuoteViewSet(viewsets.ModelViewSet):
                 compute_and_store_pricing(item)
                 item.pricing_locked_at = now
                 item.save(update_fields=["pricing_locked_at", "updated_at"])
-            total = sum(
-                (item.line_total or 0) for item in quote.items.all()
-            )
-            quote.total = total
-            quote.status = QuoteStatus.SENT
-            quote.whatsapp_message = format_quote_for_whatsapp(
-                quote,
-                company_name=shop.name or "",
-                company_phone=shop.phone_number or "",
-                turnaround="2-3 business days",
-                payment_terms=None,
-            )
-            quote.sent_at = now
-            quote.pricing_locked_at = now
-            quote.save(update_fields=["total", "status", "whatsapp_message", "sent_at", "pricing_locked_at", "updated_at"])
+            total = sum((item.line_total or 0) for item in quote.items.all())
+            shop_quote = quote.get_latest_shop_quote()
+            if not shop_quote:
+                rev = quote.shop_quotes.count() + 1
+                shop_quote = ShopQuote.objects.create(
+                    quote_request=quote,
+                    shop=shop,
+                    created_by=request.user,
+                    status=ShopQuote.SENT,
+                    total=total,
+                    sent_at=now,
+                    pricing_locked_at=now,
+                    whatsapp_message=format_quote_for_whatsapp(
+                        quote,
+                        company_name=shop.name or "",
+                        company_phone=shop.phone_number or "",
+                        turnaround="2-3 business days",
+                        payment_terms=None,
+                    ),
+                    revision_number=rev,
+                )
+                quote.items.update(shop_quote=shop_quote)
+            else:
+                shop_quote.whatsapp_message = format_quote_for_whatsapp(
+                    quote,
+                    company_name=shop.name or "",
+                    company_phone=shop.phone_number or "",
+                    turnaround="2-3 business days",
+                    payment_terms=None,
+                )
+                shop_quote.sent_at = now
+                shop_quote.save(update_fields=["whatsapp_message", "sent_at", "updated_at"])
+            quote.status = QuoteStatus.QUOTED
+            quote.save(update_fields=["status", "updated_at"])
 
         return Response(QuoteDetailSerializer(quote).data)
 
@@ -1007,12 +1102,12 @@ class ShopRateView(APIView):
         has_eligible_quote = QuoteRequest.objects.filter(
             shop=shop,
             created_by=user,
-            status__in=[QuoteStatus.SENT, QuoteStatus.ACCEPTED],
+            status__in=[QuoteStatus.QUOTED, QuoteStatus.ACCEPTED],
         ).exists()
         if not has_eligible_quote:
             return Response(
                 {
-                    "detail": "You can only rate a shop after receiving a quote (SENT or ACCEPTED)."
+                    "detail": "You can only rate a shop after receiving a quote (QUOTED or ACCEPTED)."
                 },
                 status=status.HTTP_403_FORBIDDEN,
             )
@@ -1035,12 +1130,12 @@ class ShopRateView(APIView):
 class QuoteRequestItemViewSet(viewsets.ModelViewSet):
     """
     POST /api/quote-requests/{id}/items/ — add item (DRAFT only)
-    GET /api/quote-requests/{id}/items/ — list items
+    GET /api/quote-requests/{id}/items/ — list items (customer only; shops use incoming-requests)
     PATCH /api/quote-requests/{id}/items/{item_id}/ — edit (DRAFT only)
     DELETE /api/quote-requests/{id}/items/{item_id}/ — remove (DRAFT only)
     """
 
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, IsQuoteRequestItemBuyer]
 
     def get_queryset(self):
         quote_request_pk = self.kwargs.get("quote_request_pk")
@@ -1107,14 +1202,14 @@ class QuoteRequestItemViewSet(viewsets.ModelViewSet):
 
     def list(self, request, *args, **kwargs):
         qr = self.get_quote_request()
-        # Owner (buyer) or shop owner (seller) can view
-        if qr.created_by_id != request.user.id and qr.shop.owner_id != request.user.id:
+        # Customer-only: shops use /shops/<slug>/incoming-requests/ for their view
+        if qr.created_by_id != request.user.id and not request.user.is_staff:
             return Response({"detail": "Not your quote request."}, status=status.HTTP_403_FORBIDDEN)
         return super().list(request, *args, **kwargs)
 
     def retrieve(self, request, *args, **kwargs):
         qr = self.get_quote_request()
-        if qr.created_by_id != request.user.id and qr.shop.owner_id != request.user.id:
+        if qr.created_by_id != request.user.id and not request.user.is_staff:
             return Response({"detail": "Not your quote request."}, status=status.HTTP_403_FORBIDDEN)
         return super().retrieve(request, *args, **kwargs)
 
@@ -1127,7 +1222,7 @@ class QuoteDraftItemViewSet(viewsets.ModelViewSet):
     DELETE /api/quote-drafts/{id}/items/{item_id}/ — remove (DRAFT only)
     """
 
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, IsQuoteRequestItemBuyer]
 
     def get_queryset(self):
         quote_pk = self.kwargs.get("quote_draft_pk")
@@ -1658,7 +1753,7 @@ class TweakAndAddView(APIView):
             pk=draft_id,
         )
         if draft.created_by_id != request.user.id:
-            return Response({"detail": "Not your quote."}, status=status.HTTP_403_FORBIDDEN)
+            return Response({"detail": "Not your quote request."}, status=status.HTTP_403_FORBIDDEN)
         if draft.status != QuoteStatus.DRAFT:
             return Response(
                 {"detail": "Items can only be added to DRAFT quotes."},
@@ -1707,7 +1802,7 @@ class TweakedItemUpdateView(APIView):
             pk=item_id,
         )
         if item.quote_request.created_by_id != request.user.id:
-            return Response({"detail": "Not your quote item."}, status=status.HTTP_403_FORBIDDEN)
+            return Response({"detail": "Not your quote request item."}, status=status.HTTP_403_FORBIDDEN)
         if item.quote_request.status != QuoteStatus.DRAFT:
             return Response({"detail": "Cannot modify locked items."}, status=status.HTTP_400_BAD_REQUEST)
 

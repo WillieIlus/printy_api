@@ -67,7 +67,7 @@ class Command(BaseCommand):
 
         # Finishing rates
         finishing = [
-            ("Lamination", "PER_SHEET", "25", None, None),
+            ("Lamination", "PER_SIDE_PER_SHEET", "12.50", None, None),
             ("Round Edges", "FLAT", "15", None, None),
             ("Cutting", "PER_PIECE", "1", None, None),
             ("Binding", "FLAT", "120", None, 10),

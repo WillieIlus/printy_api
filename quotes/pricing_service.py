@@ -151,12 +151,19 @@ def compute_single_finishing_cost(
 
     cost = Decimal("0")
     cu = finishing_rate.charge_unit
+    sheet_count = sheets_count or max(1, quantity)
     if cu == ChargeUnit.PER_PIECE:
         cost = (p_double if eff_sides == 2 else p_single) * quantity
     elif cu == ChargeUnit.PER_SIDE:
         cost = p_single * quantity * eff_sides
     elif cu == ChargeUnit.PER_SHEET:
-        cost = finishing_rate.price * (sheets_count or max(1, quantity))
+        # Flat per sheet (cutting, folding) — no single/double distinction
+        cost = finishing_rate.price * sheet_count
+        if finishing_rate.setup_fee:
+            cost += finishing_rate.setup_fee
+    elif cu == ChargeUnit.PER_SIDE_PER_SHEET:
+        # Per side per sheet: price × sheets × sides (e.g. lamination)
+        cost = p_single * sheet_count * eff_sides
         if finishing_rate.setup_fee:
             cost += finishing_rate.setup_fee
     elif cu == ChargeUnit.PER_SQM:
@@ -168,6 +175,13 @@ def compute_single_finishing_cost(
     return cost
 
 
+def _iter_finishings(finishings):
+    """Accept queryset or list of objects with finishing_rate, price_override, apply_to_sides."""
+    if hasattr(finishings, "select_related"):
+        return finishings.select_related("finishing_rate").all()
+    return finishings or []
+
+
 def compute_finishings_cost(
     finishings_qs,
     quantity: int,
@@ -176,12 +190,12 @@ def compute_finishings_cost(
     sheets_count: int,
 ) -> tuple[Decimal, list[FinishingLineItem]]:
     """
-    Compute total finishing cost from QuoteItemFinishing queryset.
+    Compute total finishing cost from QuoteItemFinishing queryset or list.
     Returns (total, line_items).
     """
     total = Decimal("0")
     lines = []
-    for qif in finishings_qs.select_related("finishing_rate").all():
+    for qif in _iter_finishings(finishings_qs):
         fr = qif.finishing_rate
         cost = compute_single_finishing_cost(
             fr, quantity, area_sqm, sides_count, sheets_count,
@@ -342,12 +356,83 @@ def _compute_large_format_pricing(item, product, quantity, sides_count, result: 
 
 def _compute_services_total(item) -> Decimal:
     total = Decimal("0")
-    for qis in item.services.select_related("service_rate").filter(is_selected=True):
+    services = getattr(item, "services", None)
+    if services is None:
+        return total
+    if hasattr(services, "select_related"):
+        iterable = services.select_related("service_rate").filter(is_selected=True)
+    else:
+        iterable = services if isinstance(services, (list, tuple)) else []
+    for qis in iterable:
         if qis.price_override is not None:
             total += qis.price_override
         elif qis.service_rate.price is not None:
             total += qis.service_rate.price
     return total
+
+
+# ---------------------------------------------------------------------------
+# Gallery calculate-price (no QuoteItem)
+# ---------------------------------------------------------------------------
+
+def compute_pricing_from_spec(
+    product,
+    quantity: int,
+    *,
+    paper_id=None,
+    material_id=None,
+    machine_id=None,
+    sides: str = "",
+    color_mode: str = "COLOR",
+    chosen_width_mm=None,
+    chosen_height_mm=None,
+    finishing_specs=None,
+    finishing_rate_ids=None,
+) -> PricingResult:
+    """
+    Compute pricing from a spec (IDs) without creating a QuoteItem.
+    Used by gallery calculate-price API.
+    """
+    from inventory.models import Paper, Machine
+    from pricing.models import Material, FinishingRate
+
+    class VirtualFinishing:
+        def __init__(self, finishing_rate, price_override=None, apply_to_sides="BOTH"):
+            self.finishing_rate = finishing_rate
+            self.price_override = price_override
+            self.apply_to_sides = apply_to_sides or "BOTH"
+
+    class VirtualItem:
+        def __init__(self):
+            self.item_type = "PRODUCT"
+            self.product_id = product.id if product else None
+            self.product = product
+            self.quantity = quantity
+            self.paper_id = paper_id
+            self.paper = Paper.objects.filter(pk=paper_id).first() if paper_id else None
+            self.material_id = material_id
+            self.material = Material.objects.filter(pk=material_id).first() if material_id else None
+            self.machine_id = machine_id
+            self.machine = Machine.objects.filter(pk=machine_id).first() if machine_id else None
+            self.sides = sides or ""
+            self.color_mode = color_mode or "COLOR"
+            self.chosen_width_mm = chosen_width_mm
+            self.chosen_height_mm = chosen_height_mm
+            self.pricing_mode = (product.pricing_mode or "SHEET") if product else "SHEET"
+            self.services = []
+
+            finishings = []
+            specs = finishing_specs if finishing_specs is not None else [{"finishing_rate": fid, "apply_to_sides": "BOTH"} for fid in (finishing_rate_ids or [])]
+            for spec in specs:
+                fid = spec.get("finishing_rate") if isinstance(spec, dict) else spec
+                apply_to_sides = spec.get("apply_to_sides", "BOTH") if isinstance(spec, dict) else "BOTH"
+                fr = FinishingRate.objects.filter(pk=fid, is_active=True).first()
+                if fr:
+                    finishings.append(VirtualFinishing(finishing_rate=fr, apply_to_sides=apply_to_sides))
+            self.finishings = finishings
+
+    item = VirtualItem()
+    return compute_quote_item_pricing(item)
 
 
 # ---------------------------------------------------------------------------

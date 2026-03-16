@@ -133,6 +133,7 @@ def _compute_finishing(
 ) -> float:
     """Compute finishing cost from product's finishing options."""
     total = Decimal("0")
+    sides_count = 2 if product.default_sides == "DUPLEX" else 1
     for opt in product.product_finishing_options.select_related("finishing_rate").all():
         rate = opt.finishing_rate
         if not rate.is_active:
@@ -140,6 +141,8 @@ def _compute_finishing(
         price = opt.price_adjustment if opt.price_adjustment is not None else rate.price
         if rate.charge_unit == "PER_SHEET":
             total += Decimal(str(sheets_needed)) * price
+        elif rate.charge_unit == "PER_SIDE_PER_SHEET":
+            total += Decimal(str(sheets_needed)) * Decimal(str(sides_count)) * price
         elif rate.charge_unit == "PER_PIECE":
             total += Decimal(str(pieces)) * price
         elif rate.charge_unit == "PER_SQM":

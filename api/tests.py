@@ -10,7 +10,7 @@ from catalog.models import Product, ProductCategory
 from inventory.models import Machine, Paper
 from locations.models import Location
 from pricing.choices import Sides
-from pricing.models import PrintingRate
+from pricing.models import Material, PrintingRate, VolumeDiscount
 from quotes.choices import QuoteStatus
 from quotes.models import QuoteItem, QuoteRequest
 from shops.models import Shop
@@ -702,3 +702,95 @@ class QuoteCalculatorAPITestCase(TestCase):
         self.assertTrue(data.get("can_calculate", True))
         self.assertIn("paper_cost", data["costs"])
         self.assertIn("suggested_price", data["costs"])
+
+
+class PricingAPITestCase(TestCase):
+    """Test shop pricing endpoints: papers, materials, volume discounts."""
+
+    def setUp(self):
+        self.client = APIClient()
+        self.user = User.objects.create_user(email="owner@shop.com", password="pass")
+        self.location = Location.objects.create(
+            name="Nairobi",
+            slug="nairobi",
+            location_type="city",
+            is_active=True,
+        )
+        self.shop = Shop.objects.create(
+            owner=self.user,
+            name="Test Print Shop",
+            slug="test-print-shop",
+            is_active=True,
+            location=self.location,
+            pricing_ready=False,
+        )
+
+    def test_papers_list_requires_auth(self):
+        """GET /api/shops/{slug}/papers/ requires authentication."""
+        r = self.client.get("/api/shops/test-print-shop/papers/")
+        self.assertEqual(r.status_code, 401)
+
+    def test_papers_list_owner_returns_empty(self):
+        """GET /api/shops/{slug}/papers/ returns list for shop owner."""
+        self.client.force_authenticate(user=self.user)
+        r = self.client.get("/api/shops/test-print-shop/papers/")
+        self.assertEqual(r.status_code, 200)
+        data = r.json()
+        self.assertIsInstance(data, (list, dict))
+        if isinstance(data, dict):
+            self.assertIn("results", data)
+
+
+    def test_papers_create_owner_creates_paper(self):
+        """POST /api/shops/{slug}/papers/ creates paper for owner."""
+        self.client.force_authenticate(user=self.user)
+        r = self.client.post(
+            "/api/shops/test-print-shop/papers/",
+            {"sheet_size": "A4", "gsm": 80, "paper_type": "GLOSS", "buying_price": "5", "selling_price": "10"},
+            format="json",
+        )
+        self.assertEqual(r.status_code, 201)
+        data = r.json()
+        self.assertEqual(data["sheet_size"], "A4")
+        self.assertEqual(data["gsm"], 80)
+        self.assertEqual(data["selling_price"], "10.00")
+
+    def test_materials_list_requires_auth(self):
+        """GET /api/shops/{slug}/materials/ requires authentication."""
+        r = self.client.get("/api/shops/test-print-shop/materials/")
+        self.assertEqual(r.status_code, 401)
+
+    def test_materials_list_owner_returns_list(self):
+        """GET /api/shops/{slug}/materials/ returns list for owner."""
+        self.client.force_authenticate(user=self.user)
+        r = self.client.get("/api/shops/test-print-shop/materials/")
+        self.assertEqual(r.status_code, 200)
+        data = r.json()
+        self.assertIsInstance(data, (list, dict))
+
+    def test_pricing_discounts_list_requires_auth(self):
+        """GET /api/shops/{slug}/pricing/discounts/ requires authentication."""
+        r = self.client.get("/api/shops/test-print-shop/pricing/discounts/")
+        self.assertEqual(r.status_code, 401)
+
+    def test_pricing_discounts_list_owner_returns_list(self):
+        """GET /api/shops/{slug}/pricing/discounts/ returns list for owner."""
+        self.client.force_authenticate(user=self.user)
+        r = self.client.get("/api/shops/test-print-shop/pricing/discounts/")
+        self.assertEqual(r.status_code, 200)
+        data = r.json()
+        self.assertIsInstance(data, list)
+
+    def test_pricing_discounts_create_owner_creates_discount(self):
+        """POST /api/shops/{slug}/pricing/discounts/ creates discount for owner."""
+        self.client.force_authenticate(user=self.user)
+        r = self.client.post(
+            "/api/shops/test-print-shop/pricing/discounts/",
+            {"name": "Bulk 500+", "min_quantity": 500, "discount_percent": "10"},
+            format="json",
+        )
+        self.assertEqual(r.status_code, 201)
+        data = r.json()
+        self.assertEqual(data["name"], "Bulk 500+")
+        self.assertEqual(data["min_quantity"], 500)
+        self.assertEqual(str(data["discount_percent"]), "10.00")

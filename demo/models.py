@@ -121,7 +121,9 @@ class DemoFinishingRate(models.Model):
 
     CHARGE_UNITS = [
         ("PER_PIECE", "Per Piece"),
+        ("PER_SIDE", "Per Side"),
         ("PER_SHEET", "Per Sheet"),
+        ("PER_SIDE_PER_SHEET", "Per Side Per Sheet"),
         ("PER_SQM", "Per Square Meter"),
         ("FLAT", "Flat"),
     ]

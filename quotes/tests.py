@@ -304,6 +304,69 @@ class QuoteEngineTests(TestCase):
             f"Breakdown should mention sheets_needed: {labels}",
         )
 
+    def test_per_side_per_sheet_lamination(self):
+        """PER_SIDE_PER_SHEET: lamination = price × sheets × sides (e.g. 100 bcards 10-up duplex)."""
+        product = Product.objects.create(
+            shop=self.shop,
+            name="Business Card 90×50",
+            pricing_mode=PricingMode.SHEET,
+            default_finished_width_mm=90,
+            default_finished_height_mm=50,
+            default_sides=Sides.DUPLEX,
+        )
+        paper_sra3 = Paper.objects.create(
+            shop=self.shop,
+            sheet_size=SheetSize.SRA3,
+            gsm=300,
+            paper_type="COATED",
+            buying_price=Decimal("0.20"),
+            selling_price=Decimal("0.50"),
+            width_mm=320,
+            height_mm=450,
+        )
+        Machine.objects.filter(shop=self.shop).update(max_width_mm=450, max_height_mm=640)
+        PrintingRate.objects.create(
+            machine=self.machine,
+            sheet_size=SheetSize.SRA3,
+            color_mode=ColorMode.COLOR,
+            single_price=Decimal("1.00"),
+            double_price=Decimal("1.50"),
+        )
+        lamination = FinishingRate.objects.create(
+            shop=self.shop,
+            name="Lamination",
+            charge_unit=ChargeUnit.PER_SIDE_PER_SHEET,
+            price=Decimal("12.50"),
+        )
+        qr = QuoteRequest.objects.create(
+            shop=self.shop,
+            created_by=self.user,
+            customer_name="Jane",
+            customer_email="jane@test.com",
+            status="DRAFT",
+        )
+        item = QuoteItem.objects.create(
+            quote_request=qr,
+            product=product,
+            quantity=100,
+            pricing_mode=PricingMode.SHEET,
+            paper=paper_sra3,
+            machine=self.machine,
+            sides=Sides.DUPLEX,
+            color_mode=ColorMode.COLOR,
+        )
+        QuoteItemFinishing.objects.create(
+            quote_item=item,
+            finishing_rate=lamination,
+        )
+        unit_price, line_total = calculate_quote_item(item)
+        # 100 qty, 24 up (90×50 on SRA3) → 5 sheets
+        # Paper: 0.50 × 5 = 2.50
+        # Print: 1.50 × 5 = 7.50
+        # Lamination PER_SIDE_PER_SHEET: 12.50 × 5 × 2 = 125.00
+        # Total = 135.00
+        self.assertEqual(line_total, Decimal("135.00"))
+
     def test_preview_price_standardized_response(self):
         """Preview-price always returns can_calculate, total, lines, needs_review_items, missing_fields, reason."""
         qr = QuoteRequest.objects.create(

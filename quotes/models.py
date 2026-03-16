@@ -1,8 +1,10 @@
 """
-Quote models: QuoteRequest (buyer's request), QuoteItem (line items), QuoteItemFinishing.
-Direct FK references to avoid attribute-based lookups (no MultipleObjectsReturned).
-No redundancy: QuoteRequest = header (shop, customer, status); QuoteItem = line items
-with chosen product/paper/material/machine at quote time (not looked up by attributes).
+Quote models: QuoteRequest (customer request), ShopQuote (shop response), QuoteItem (line items).
+
+Domain separation:
+- QuoteRequest: customer's request for a quote (draft → submitted → quoted → accepted/closed)
+- ShopQuote: shop's priced offer (sent → accepted/declined/expired; supports revisions)
+- QuoteItem: line items with specs; prices filled when linked to ShopQuote
 """
 from decimal import Decimal
 
@@ -47,23 +49,26 @@ class CustomerInquiry(TimeStampedModel):
 
 
 class QuoteRequest(TimeStampedModel):
-    """Quote request - buyer creates, seller prices."""
+    """
+    Customer's request for a quote. Created by buyer; visible to buyer and shop.
+    Lifecycle: draft → submitted → [viewed] → quoted → accepted | closed | cancelled.
+    """
 
-    DRAFT = "DRAFT"
-    SUBMITTED = "SUBMITTED"
-    PRICED = "PRICED"
-    SENT = "SENT"
-    ACCEPTED = "ACCEPTED"
-    REJECTED = "REJECTED"
-    EXPIRED = "EXPIRED"
+    DRAFT = "draft"
+    SUBMITTED = "submitted"
+    VIEWED = "viewed"
+    QUOTED = "quoted"
+    ACCEPTED = "accepted"
+    CLOSED = "closed"
+    CANCELLED = "cancelled"
     STATUS_CHOICES = [
         (DRAFT, "Draft"),
         (SUBMITTED, "Submitted"),
-        (PRICED, "Priced"),
-        (SENT, "Sent"),
+        (VIEWED, "Viewed"),
+        (QUOTED, "Quoted"),
         (ACCEPTED, "Accepted"),
-        (REJECTED, "Rejected"),
-        (EXPIRED, "Expired"),
+        (CLOSED, "Closed"),
+        (CANCELLED, "Cancelled"),
     ]
 
     objects = QuoteRequestQuerySet.as_manager()
@@ -106,13 +111,130 @@ class QuoteRequest(TimeStampedModel):
         choices=STATUS_CHOICES,
         default=DRAFT,
         verbose_name=_("status"),
-        help_text=_("Current status of the quote request."),
+        help_text=_("Customer request lifecycle: draft → submitted → quoted → accepted/closed."),
     )
     notes = models.TextField(
         blank=True,
         default="",
         verbose_name=_("notes"),
         help_text=_("Additional notes for the quote."),
+    )
+    customer_inquiry = models.ForeignKey(
+        CustomerInquiry,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="quote_requests",
+        verbose_name=_("customer inquiry"),
+        help_text=_("Optional linked customer inquiry."),
+    )
+    customer = models.ForeignKey(
+        "production.Customer",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="quote_requests",
+        verbose_name=_("customer"),
+        help_text=_("Optional link to unified customer record (for repeat customers)."),
+    )
+    delivery_address = models.TextField(
+        blank=True,
+        default="",
+        verbose_name=_("delivery address"),
+        help_text=_("Full address for delivery (street, building, etc.)."),
+    )
+    delivery_location = models.ForeignKey(
+        "locations.Location",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="quote_requests",
+        verbose_name=_("delivery location"),
+        help_text=_("Area/neighborhood for delivery (e.g. Westlands, Kilimani)."),
+    )
+    PICKUP = "pickup"
+    DELIVERY = "delivery"
+    DELIVERY_PREFERENCE_CHOICES = [
+        (PICKUP, _("Pickup")),
+        (DELIVERY, _("Delivery")),
+    ]
+    delivery_preference = models.CharField(
+        max_length=20,
+        choices=DELIVERY_PREFERENCE_CHOICES,
+        blank=True,
+        default="",
+        verbose_name=_("delivery preference"),
+        help_text=_("Customer preference: pickup at shop or delivery."),
+    )
+
+    class Meta:
+        ordering = ["-created_at"]
+        verbose_name = _("quote request")
+        verbose_name_plural = _("quote requests")
+        indexes = [
+            models.Index(fields=["shop", "status"], name="quotes_shop_status_idx"),
+            models.Index(fields=["shop", "-created_at"], name="quotes_shop_created_idx"),
+        ]
+
+    def __str__(self):
+        return f"Request #{self.id} - {self.customer_name} ({self.status})"
+
+    def get_latest_shop_quote(self):
+        """Return the most recent sent/accepted ShopQuote, or None."""
+        return self.shop_quotes.filter(
+            status__in=[ShopQuote.SENT, ShopQuote.ACCEPTED]
+        ).order_by("-sent_at", "-created_at").first()
+
+
+class ShopQuote(TimeStampedModel):
+    """
+    Shop's priced offer in response to a QuoteRequest. Created by shop; visible to shop and customer.
+    Supports revisions: one QuoteRequest can have multiple ShopQuotes (latest is active).
+    Lifecycle: sent → accepted | declined | expired | revised.
+    """
+
+    SENT = "sent"
+    REVISED = "revised"
+    ACCEPTED = "accepted"
+    DECLINED = "declined"
+    EXPIRED = "expired"
+    STATUS_CHOICES = [
+        (SENT, "Sent"),
+        (REVISED, "Revised"),
+        (ACCEPTED, "Accepted"),
+        (DECLINED, "Declined"),
+        (EXPIRED, "Expired"),
+    ]
+
+    quote_request = models.ForeignKey(
+        QuoteRequest,
+        on_delete=models.CASCADE,
+        related_name="shop_quotes",
+        verbose_name=_("quote request"),
+        help_text=_("Quote request this offer responds to."),
+    )
+    shop = models.ForeignKey(
+        Shop,
+        on_delete=models.CASCADE,
+        related_name="shop_quotes",
+        verbose_name=_("shop"),
+        help_text=_("Shop that sent this quote."),
+    )
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="shop_quotes",
+        verbose_name=_("created by"),
+        help_text=_("Shop user who created/sent this quote."),
+    )
+    status = models.CharField(
+        max_length=20,
+        choices=STATUS_CHOICES,
+        default=SENT,
+        verbose_name=_("status"),
+        help_text=_("Shop offer lifecycle: sent → accepted/declined/expired/revised."),
     )
     total = models.DecimalField(
         max_digits=12,
@@ -128,14 +250,11 @@ class QuoteRequest(TimeStampedModel):
         verbose_name=_("pricing locked at"),
         help_text=_("When pricing was locked."),
     )
-    customer_inquiry = models.ForeignKey(
-        CustomerInquiry,
-        on_delete=models.SET_NULL,
+    sent_at = models.DateTimeField(
         null=True,
         blank=True,
-        related_name="quote_requests",
-        verbose_name=_("customer inquiry"),
-        help_text=_("Optional linked customer inquiry."),
+        verbose_name=_("sent at"),
+        help_text=_("When the quote was sent to the customer."),
     )
     whatsapp_message = models.TextField(
         blank=True,
@@ -143,25 +262,35 @@ class QuoteRequest(TimeStampedModel):
         verbose_name=_("whatsapp message"),
         help_text=_("Message sent via WhatsApp when quote was sent."),
     )
-    sent_at = models.DateTimeField(
+    note = models.TextField(
+        blank=True,
+        default="",
+        verbose_name=_("note"),
+        help_text=_("Shop's note to customer (e.g. conditions, clarifications)."),
+    )
+    turnaround_days = models.PositiveIntegerField(
         null=True,
         blank=True,
-        verbose_name=_("sent at"),
-        help_text=_("When the quote was sent to the customer."),
+        verbose_name=_("turnaround (days)"),
+        help_text=_("Expected turnaround in days (e.g. ready in 3 days)."),
+    )
+    revision_number = models.PositiveIntegerField(
+        default=1,
+        verbose_name=_("revision number"),
+        help_text=_("Revision count for this quote request (1 = first, 2 = first revision, etc.)."),
     )
 
     class Meta:
-        ordering = ["-created_at"]
-        verbose_name = _("quote request")
-        verbose_name_plural = _("quote requests")
+        ordering = ["-sent_at", "-created_at"]
+        verbose_name = _("shop quote")
+        verbose_name_plural = _("shop quotes")
+        indexes = [
+            models.Index(fields=["shop", "status"], name="shopquote_shop_status_idx"),
+            models.Index(fields=["quote_request", "-created_at"], name="shopquote_req_created_idx"),
+        ]
 
     def __str__(self):
-        return f"Quote #{self.id} - {self.customer_name} ({self.status})"
-
-    @property
-    def totals(self):
-        """Alias for total for API compatibility."""
-        return self.total
+        return f"Quote #{self.id} for Request #{self.quote_request_id} ({self.status})"
 
 
 class QuoteItem(TimeStampedModel):
@@ -191,6 +320,15 @@ class QuoteItem(TimeStampedModel):
         related_name="items",
         verbose_name=_("quote request"),
         help_text=_("Quote request this item belongs to."),
+    )
+    shop_quote = models.ForeignKey(
+        "ShopQuote",
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="items",
+        verbose_name=_("shop quote"),
+        help_text=_("Shop quote this item is priced in (set when shop prices)."),
     )
     item_type = models.CharField(
         max_length=20,
@@ -573,14 +711,14 @@ class QuoteRequestService(TimeStampedModel):
 
 
 class QuoteShareLink(TimeStampedModel):
-    """Shareable link for a quote. Token is unguessable; optional expiry."""
+    """Shareable link for a shop quote. Token is unguessable; optional expiry."""
 
-    quote = models.ForeignKey(
-        QuoteRequest,
+    shop_quote = models.ForeignKey(
+        ShopQuote,
         on_delete=models.CASCADE,
         related_name="share_links",
-        verbose_name=_("quote"),
-        help_text=_("Quote this share link points to."),
+        verbose_name=_("shop quote"),
+        help_text=_("Shop quote this share link points to."),
     )
     token = models.CharField(
         max_length=64,
@@ -610,7 +748,67 @@ class QuoteShareLink(TimeStampedModel):
         verbose_name_plural = _("quote share links")
 
     def __str__(self):
-        return f"Share #{self.id} → Quote #{self.quote_id}"
+        return f"Share #{self.id} → Quote #{self.shop_quote_id}"
+
+
+class QuoteRequestAttachment(TimeStampedModel):
+    """File attachment on a quote request (e.g. artwork, spec document)."""
+
+    quote_request = models.ForeignKey(
+        QuoteRequest,
+        on_delete=models.CASCADE,
+        related_name="attachments",
+        verbose_name=_("quote request"),
+    )
+    file = models.FileField(
+        upload_to="quote_requests/%Y/%m/",
+        verbose_name=_("file"),
+        help_text=_("Uploaded file (artwork, spec, etc.)."),
+    )
+    name = models.CharField(
+        max_length=255,
+        blank=True,
+        default="",
+        verbose_name=_("name"),
+        help_text=_("Optional display name for the file."),
+    )
+
+    class Meta:
+        verbose_name = _("quote request attachment")
+        verbose_name_plural = _("quote request attachments")
+
+    def __str__(self):
+        return self.name or self.file.name
+
+
+class ShopQuoteAttachment(TimeStampedModel):
+    """File attachment on a shop quote (e.g. revised spec, proof)."""
+
+    shop_quote = models.ForeignKey(
+        ShopQuote,
+        on_delete=models.CASCADE,
+        related_name="attachments",
+        verbose_name=_("shop quote"),
+    )
+    file = models.FileField(
+        upload_to="shop_quotes/%Y/%m/",
+        verbose_name=_("file"),
+        help_text=_("Uploaded file (proof, revised spec, etc.)."),
+    )
+    name = models.CharField(
+        max_length=255,
+        blank=True,
+        default="",
+        verbose_name=_("name"),
+        help_text=_("Optional display name for the file."),
+    )
+
+    class Meta:
+        verbose_name = _("shop quote attachment")
+        verbose_name_plural = _("shop quote attachments")
+
+    def __str__(self):
+        return self.name or self.file.name
 
 
 class QuoteItemService(TimeStampedModel):

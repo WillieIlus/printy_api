@@ -51,12 +51,14 @@ INSTALLED_APPS = [
     "catalog",
     "gallery",
     "quotes",
+    "notifications",
     "api",
     "feedback",
     "setup",
     "jobs",
     "subscriptions",
     "demo",
+    "production",
 ]
 
 AUTH_USER_MODEL = "accounts.User"
