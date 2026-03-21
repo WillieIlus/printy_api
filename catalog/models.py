@@ -282,6 +282,12 @@ class Product(TimeStampedModel, AutoSlugMixin):
         verbose_name=_("default machine"),
         help_text=_("Default printing machine for this product. Clients can override when adding to quote."),
     )
+    turnaround_days = models.PositiveIntegerField(
+        null=True,
+        blank=True,
+        verbose_name=_("delivery time (days)"),
+        help_text=_("Typical delivery or turnaround time for this product in business days."),
+    )
     is_popular = models.BooleanField(default=False, verbose_name=_("is popular"))
     is_best_value = models.BooleanField(default=False, verbose_name=_("is best value"))
     is_new = models.BooleanField(default=False, verbose_name=_("is new"))

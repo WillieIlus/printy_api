@@ -1809,6 +1809,7 @@ class TweakedItemUpdateView(APIView):
 
         from django.db import transaction
         from quotes.pricing_service import compute_and_store_pricing
+        from .validators import validate_shop_consistency
 
         updatable_fields = ["quantity", "sides", "color_mode", "special_instructions", "has_artwork"]
         fk_fields = {"paper": Paper, "material": Material, "machine": Machine}
@@ -1821,11 +1822,23 @@ class TweakedItemUpdateView(APIView):
                 for field, model in fk_fields.items():
                     if field in request.data:
                         val = request.data[field]
-                        setattr(item, f"{field}_id", val)
+                        if val in ("", None):
+                            setattr(item, f"{field}_id", None)
+                        else:
+                            related_obj = get_object_or_404(model, pk=val, is_active=True)
+                            setattr(item, field, related_obj)
                 if "chosen_width_mm" in request.data:
                     item.chosen_width_mm = request.data["chosen_width_mm"]
                 if "chosen_height_mm" in request.data:
                     item.chosen_height_mm = request.data["chosen_height_mm"]
+
+                validate_shop_consistency(
+                    item.quote_request.shop,
+                    product=item.product,
+                    paper=item.paper,
+                    material=item.material,
+                    machine=item.machine,
+                )
 
                 item.save()
 
@@ -1833,6 +1846,11 @@ class TweakedItemUpdateView(APIView):
                     item.finishings.all().delete()
                     for fin in request.data["finishings"]:
                         fr_id = fin.get("finishing_rate") if isinstance(fin, dict) else fin
+                        finishing_rate = get_object_or_404(FinishingRate, pk=fr_id, is_active=True)
+                        validate_shop_consistency(
+                            item.quote_request.shop,
+                            finishing_rate=finishing_rate,
+                        )
                         fd = {"quote_item": item, "finishing_rate_id": fr_id}
                         if isinstance(fin, dict):
                             if "price_override" in fin:
