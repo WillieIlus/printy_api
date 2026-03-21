@@ -11,6 +11,7 @@ from inventory.choices import SheetSize
 from inventory.models import Machine, Paper
 from pricing.choices import ChargeUnit, ColorMode, Sides
 from pricing.models import FinishingRate, Material, PrintingRate
+from quotes.choices import QuoteStatus
 from quotes.models import QuoteItem, QuoteItemFinishing, QuoteRequest
 from catalog.services import product_price_hint
 from quotes.services import (
@@ -509,10 +510,10 @@ class QuoteEngineTests(TestCase):
             sides=Sides.SIMPLEX,
             color_mode=ColorMode.COLOR,
         )
-        calculate_quote_request(qr, lock=True)
+        total = calculate_quote_request(qr, lock=True)
         qr.refresh_from_db()
-        self.assertEqual(qr.status, "PRICED")
-        self.assertEqual(qr.totals, Decimal("25.00"))
+        self.assertEqual(qr.status, QuoteStatus.QUOTED)
+        self.assertEqual(total, Decimal("25.00"))
         item = qr.items.first()
         self.assertIsNotNone(item.pricing_locked_at)
         self.assertEqual(item.unit_price, Decimal("0.25"))

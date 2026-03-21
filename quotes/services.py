@@ -506,7 +506,7 @@ def build_preview_price_response(quote_request: QuoteRequest) -> dict:
     }
 
 
-def calculate_quote_request(quote_request: QuoteRequest, lock: bool = False) -> None:
+def calculate_quote_request(quote_request: QuoteRequest, lock: bool = False) -> Decimal:
     """
     Calculate all quote items and optionally lock prices.
     - lock=False: recalculate unit_price/line_total in memory only (no persist).
@@ -539,7 +539,7 @@ def calculate_quote_request(quote_request: QuoteRequest, lock: bool = False) -> 
         if price is not None:
             grand_total += price
 
-    quote_request.total = grand_total
     if lock:
-        quote_request.status = QuoteStatus.PRICED
-        quote_request.save(update_fields=["total", "status"])
+        quote_request.status = QuoteStatus.QUOTED
+        quote_request.save(update_fields=["status", "updated_at"])
+    return grand_total

@@ -81,6 +81,7 @@ from .quote_serializers import (
     QuoteRequestCustomerListSerializer,
     QuoteRequestShopDetailSerializer,
     QuoteRequestShopListSerializer,
+    ShopQuoteDetailSerializer,
 )
 
 
@@ -965,7 +966,7 @@ class QuoteViewSet(viewsets.ModelViewSet):
             quote.status = QuoteStatus.QUOTED
             quote.save(update_fields=["status", "updated_at"])
 
-        return Response(QuoteDetailSerializer(quote).data)
+        return Response(ShopQuoteDetailSerializer(shop_quote).data)
 
 
 class QuoteItemViewSet(viewsets.ModelViewSet):

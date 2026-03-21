@@ -58,6 +58,7 @@ notifications_router = DefaultRouter()
 notifications_router.register(r"", NotificationViewSet, basename="notification")
 
 urlpatterns = [
+    path("products/gallery/", ProductGalleryView.as_view(), name="products-gallery"),
     # Production tracking (jobs, processes, dashboard)
     path("", include("production.urls")),
     # Demo calculator (public, no auth)
@@ -74,7 +75,6 @@ urlpatterns = [
     path("seo/products/<slug:slug>/", SEOProductDetailView.as_view(), name="seo-product-detail"),
     path("seo/locations/<slug:location_slug>/products/<slug:product_slug>/", SEOLocationProductView.as_view(), name="seo-location-product"),
     path("seo/routes/", SEORoutesView.as_view(), name="seo-routes"),
-    path("products/gallery/", ProductGalleryView.as_view(), name="products-gallery"),
     path("", include(quote_router.urls)),
     path("", include(quotes_router.urls)),
     path("", include(job_requests_router.urls)),

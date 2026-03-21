@@ -34,6 +34,7 @@ class ProductCategoryListSerializer(serializers.ModelSerializer):
 class ProductSerializer(serializers.ModelSerializer):
     """CRUD for gallery product (catalog.Product with gallery fields)."""
 
+    title = serializers.CharField(source="name", read_only=True)
     preview_image = serializers.SerializerMethodField()
 
     class Meta:
@@ -42,6 +43,7 @@ class ProductSerializer(serializers.ModelSerializer):
             "id",
             "category",
             "shop",
+            "title",
             "name",
             "slug",
             "description",
@@ -53,7 +55,7 @@ class ProductSerializer(serializers.ModelSerializer):
             "is_new",
             "is_active",
         ]
-        read_only_fields = ["slug"]
+        read_only_fields = ["shop", "slug"]
 
     def get_preview_image(self, obj):
         img = obj.get_primary_image()

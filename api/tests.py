@@ -11,7 +11,7 @@ from inventory.models import Machine, Paper
 from locations.models import Location
 from pricing.choices import Sides
 from pricing.models import Material, PrintingRate, VolumeDiscount
-from quotes.choices import QuoteStatus
+from quotes.choices import QuoteStatus, ShopQuoteStatus
 from quotes.models import QuoteItem, QuoteRequest
 from shops.models import Shop
 
@@ -395,7 +395,7 @@ class QuoteRequestAPITestCase(TestCase):
         # Submit
         r3 = self.client.post(f"/api/quote-requests/{qr_id}/submit/")
         self.assertEqual(r3.status_code, 200)
-        self.assertEqual(r3.json()["status"], "SUBMITTED")
+        self.assertEqual(r3.json()["status"], QuoteStatus.SUBMITTED)
 
 
 class QuoteStaffAPITestCase(TestCase):
@@ -550,7 +550,7 @@ class QuoteStaffAPITestCase(TestCase):
         )
         self.assertEqual(r_send.status_code, 200)
         data = r_send.json()
-        self.assertEqual(data["status"], QuoteStatus.SENT)
+        self.assertEqual(data["status"], ShopQuoteStatus.SENT)
         self.assertIn("Business Card", data["whatsapp_message"])
         self.assertIn("100 pcs", data["whatsapp_message"])
         self.assertIsNotNone(data["sent_at"])

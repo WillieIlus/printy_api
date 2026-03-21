@@ -74,7 +74,7 @@ def calculate_quote_item(item: QuoteItem) -> tuple[Decimal, Decimal]:
 
 
 def recalculate_and_lock_quote_request(quote_request: QuoteRequest) -> None:
-    """Calculate all items, lock prices, set status to PRICED."""
+    """Calculate all items, lock prices, set status to QUOTED."""
     from quotes.services import calculate_quote_item as calc_item
 
     now = timezone.now()
@@ -87,5 +87,5 @@ def recalculate_and_lock_quote_request(quote_request: QuoteRequest) -> None:
         item.save()
         total += line_total
     quote_request.total = total
-    quote_request.status = QuoteStatus.PRICED
+    quote_request.status = QuoteStatus.QUOTED
     quote_request.save(update_fields=["total", "status", "updated_at"])

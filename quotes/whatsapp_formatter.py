@@ -117,8 +117,12 @@ def format_quote_for_whatsapp(
         parts.append(f"= KES {_format_price(line_total)}")
         lines.append(" ".join(parts))
 
-    # Total (use quote.total or sum of item line_totals)
-    total = quote.total
+    # Total lives on ShopQuote in the current model, but callers still pass QuoteRequest.
+    total = getattr(quote, "total", None)
+    if total is None and hasattr(quote, "get_latest_shop_quote"):
+        latest_shop_quote = quote.get_latest_shop_quote()
+        if latest_shop_quote is not None:
+            total = latest_shop_quote.total
     if total is None and items:
         total = sum((item.line_total or 0) for item in items)
     if total is not None:
