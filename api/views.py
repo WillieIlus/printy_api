@@ -6,13 +6,15 @@ import math
 from django.shortcuts import get_object_or_404
 
 from common.geo import haversine_km
-from rest_framework import status, viewsets
+from rest_framework import generics, status, viewsets
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.views import APIView
 from django_filters.rest_framework import DjangoFilterBackend
 
+from accounts.models import UserProfile, UserSocialLink
+from accounts.serializers import UserSerializer, UserSocialLinkSerializer
 from catalog.models import Product
 from inventory.models import Machine, Paper
 from pricing.models import FinishingCategory, FinishingRate, Material, PrintingRate, VolumeDiscount
@@ -462,15 +464,20 @@ class ProfileMeView(APIView):
 
     permission_classes = [IsAuthenticated]
 
+    def _get_profile(self, user):
+        profile, _ = UserProfile.objects.get_or_create(user=user)
+        return profile
+
     def get(self, request):
-        serializer = ProfileSerializer(request.user)
+        serializer = ProfileSerializer(self._get_profile(request.user))
         return Response(serializer.data)
 
     def patch(self, request):
-        serializer = ProfileSerializer(request.user, data=request.data, partial=True)
+        profile = self._get_profile(request.user)
+        serializer = ProfileSerializer(profile, data=request.data, partial=True)
         serializer.is_valid(raise_exception=True)
         serializer.save()
-        return Response(ProfileSerializer(request.user).data)
+        return Response(ProfileSerializer(profile).data)
 
 
 class ProfileCreateView(APIView):
@@ -479,8 +486,61 @@ class ProfileCreateView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
-        serializer = ProfileSerializer(request.user)
-        return Response(serializer.data, status=status.HTTP_201_CREATED)
+        profile, created = UserProfile.objects.get_or_create(user=request.user)
+        serializer = ProfileSerializer(profile)
+        return Response(
+            serializer.data,
+            status=status.HTTP_201_CREATED if created else status.HTTP_200_OK,
+        )
+
+
+class ProfileDetailView(generics.RetrieveAPIView):
+    """GET /api/profiles/{id}/ â€” fetch your own profile."""
+
+    permission_classes = [IsAuthenticated]
+    serializer_class = ProfileSerializer
+
+    def get_queryset(self):
+        return UserProfile.objects.filter(user=self.request.user).prefetch_related("social_links")
+
+
+class ProfileSocialLinkListCreateView(generics.ListCreateAPIView):
+    """GET/POST /api/profiles/{id}/social-links/ â€” manage your profile links."""
+
+    permission_classes = [IsAuthenticated]
+    serializer_class = UserSocialLinkSerializer
+
+    def get_profile(self):
+        return get_object_or_404(
+            UserProfile.objects.filter(user=self.request.user),
+            pk=self.kwargs["profile_id"],
+        )
+
+    def get_queryset(self):
+        return self.get_profile().social_links.all()
+
+    def perform_create(self, serializer):
+        serializer.save(profile=self.get_profile())
+
+
+class SocialLinkDetailView(generics.DestroyAPIView):
+    """DELETE /api/social-links/{id}/ â€” remove a social link from your profile."""
+
+    permission_classes = [IsAuthenticated]
+    serializer_class = UserSocialLinkSerializer
+
+    def get_queryset(self):
+        return UserSocialLink.objects.filter(profile__user=self.request.user)
+
+
+class UserMeCompatView(generics.RetrieveUpdateAPIView):
+    """GET/PATCH /api/users/me/ â€” frontend-compatible alias for current user."""
+
+    permission_classes = [IsAuthenticated]
+    serializer_class = UserSerializer
+
+    def get_object(self):
+        return self.request.user
 
 
 # ---------------------------------------------------------------------------

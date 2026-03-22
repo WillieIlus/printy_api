@@ -2,16 +2,119 @@ from rest_framework import serializers
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 from rest_framework_simplejwt.settings import api_settings
 
-from .models import User
+from .models import User, UserProfile, UserSocialLink
+
+PROFILE_FIELDS = (
+    "bio",
+    "avatar",
+    "phone",
+    "address",
+    "city",
+    "state",
+    "country",
+    "postal_code",
+)
+
+
+def get_or_create_profile(user: User) -> UserProfile:
+    profile, _ = UserProfile.objects.get_or_create(user=user)
+    return profile
+
+
+class UserSocialLinkSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = UserSocialLink
+        fields = ["id", "platform", "url", "profile"]
+        read_only_fields = ["id", "profile"]
 
 
 class UserSerializer(serializers.ModelSerializer):
-    """User profile with editable preferred_language."""
+    """User profile plus persisted dashboard fields."""
+
+    bio = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+    avatar = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+    phone = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+    address = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+    city = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+    state = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+    country = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+    postal_code = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+    social_links = UserSocialLinkSerializer(many=True, required=False)
 
     class Meta:
         model = User
-        fields = ["id", "email", "name", "preferred_language", "is_active", "is_staff"]
-        read_only_fields = ["id", "email", "is_active", "is_staff"]
+        fields = [
+            "id",
+            "email",
+            "name",
+            "first_name",
+            "last_name",
+            "role",
+            "preferred_language",
+            "is_active",
+            "is_staff",
+            "date_joined",
+            "last_login",
+            "bio",
+            "avatar",
+            "phone",
+            "address",
+            "city",
+            "state",
+            "country",
+            "postal_code",
+            "social_links",
+        ]
+        read_only_fields = ["id", "email", "is_active", "is_staff", "date_joined", "last_login"]
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        profile = get_or_create_profile(instance)
+        for field in PROFILE_FIELDS:
+            data[field] = getattr(profile, field) or None
+        data["social_links"] = UserSocialLinkSerializer(profile.social_links.all(), many=True).data
+        return data
+
+    def update(self, instance, validated_data):
+        social_links_data = validated_data.pop("social_links", None)
+        profile_data = {
+            field: validated_data.pop(field)
+            for field in PROFILE_FIELDS
+            if field in validated_data
+        }
+
+        for attr, value in validated_data.items():
+            setattr(instance, attr, value)
+
+        if "name" not in validated_data and (
+            "first_name" in validated_data or "last_name" in validated_data
+        ):
+            instance.name = " ".join(
+                part for part in [instance.first_name.strip(), instance.last_name.strip()] if part
+            )
+        instance.save()
+
+        if profile_data or social_links_data is not None:
+            profile = get_or_create_profile(instance)
+            for field, value in profile_data.items():
+                setattr(profile, field, value or "")
+            profile.save()
+
+            if social_links_data is not None:
+                profile.social_links.all().delete()
+                UserSocialLink.objects.bulk_create(
+                    [
+                        UserSocialLink(
+                            profile=profile,
+                            platform=link.get("platform", "").strip(),
+                            url=link.get("url", "").strip(),
+                        )
+                        for link in social_links_data
+                        if link.get("platform") and link.get("url")
+                    ]
+                )
+
+        return instance
 
 
 class UserCreateSerializer(serializers.ModelSerializer):
@@ -21,7 +124,7 @@ class UserCreateSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = User
-        fields = ["id", "email", "password", "name"]
+        fields = ["id", "email", "password", "name", "first_name", "last_name", "role"]
         read_only_fields = ["id"]
 
     def create(self, validated_data):

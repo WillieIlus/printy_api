@@ -36,9 +36,19 @@ class User(AbstractUser, TimeStampedModel):
     Alias: AUTH_USER_MODEL = "accounts.User" (same as CustomUser for compatibility).
     """
 
+    class Role(models.TextChoices):
+        CUSTOMER = "CUSTOMER", "Customer"
+        PRINTER = "PRINTER", "Printer"
+
     username = models.CharField(max_length=150, blank=True, null=True)
     email = models.EmailField(unique=True)
     name = models.CharField(max_length=255, blank=True, default="")
+    role = models.CharField(
+        max_length=20,
+        choices=Role.choices,
+        default=Role.CUSTOMER,
+        help_text="Primary account role used by the dashboard UI.",
+    )
     preferred_language = models.CharField(
         max_length=10,
         blank=True,
@@ -57,3 +67,48 @@ class User(AbstractUser, TimeStampedModel):
 
     def __str__(self):
         return self.email
+
+
+class UserProfile(TimeStampedModel):
+    """Extended profile fields for dashboard account management."""
+
+    user = models.OneToOneField(
+        User,
+        on_delete=models.CASCADE,
+        related_name="profile",
+    )
+    bio = models.TextField(blank=True, default="")
+    avatar = models.CharField(max_length=500, blank=True, default="")
+    phone = models.CharField(max_length=32, blank=True, default="")
+    address = models.CharField(max_length=255, blank=True, default="")
+    city = models.CharField(max_length=100, blank=True, default="")
+    state = models.CharField(max_length=100, blank=True, default="")
+    country = models.CharField(max_length=100, blank=True, default="")
+    postal_code = models.CharField(max_length=20, blank=True, default="")
+
+    class Meta:
+        verbose_name = "User profile"
+        verbose_name_plural = "User profiles"
+
+    def __str__(self):
+        return f"Profile for {self.user.email}"
+
+
+class UserSocialLink(TimeStampedModel):
+    """Social links attached to a user's profile."""
+
+    profile = models.ForeignKey(
+        UserProfile,
+        on_delete=models.CASCADE,
+        related_name="social_links",
+    )
+    platform = models.CharField(max_length=50)
+    url = models.URLField(max_length=500)
+
+    class Meta:
+        verbose_name = "User social link"
+        verbose_name_plural = "User social links"
+        ordering = ["id"]
+
+    def __str__(self):
+        return f"{self.platform}: {self.url}"

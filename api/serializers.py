@@ -10,7 +10,8 @@ from rest_framework import serializers
 
 logger = logging.getLogger(__name__)
 
-from accounts.models import User
+from accounts.models import User, UserProfile, UserSocialLink
+from accounts.serializers import UserSocialLinkSerializer
 from catalog.choices import PricingMode
 from catalog.models import Product, ProductFinishingOption, ProductImage
 from inventory.models import Machine, Paper, ProductionPaperSize
@@ -1198,51 +1199,52 @@ class ProductSerializer(serializers.ModelSerializer):
 # ---------------------------------------------------------------------------
 
 
-class ProfileSerializer(serializers.Serializer):
-    """Profile-like representation of User. Frontend expects id, user, bio, social_links, etc."""
+class ProfileSerializer(serializers.ModelSerializer):
+    """Persisted dashboard profile representation."""
 
-    id = serializers.IntegerField(read_only=True)
-    user = serializers.IntegerField(read_only=True)
-    bio = serializers.CharField(allow_null=True, required=False, allow_blank=True)
-    avatar = serializers.CharField(allow_null=True, required=False, allow_blank=True)
-    phone = serializers.CharField(allow_null=True, required=False, allow_blank=True)
-    address = serializers.CharField(allow_null=True, required=False, allow_blank=True)
-    city = serializers.CharField(allow_null=True, required=False, allow_blank=True)
-    state = serializers.CharField(allow_null=True, required=False, allow_blank=True)
-    country = serializers.CharField(allow_null=True, required=False, allow_blank=True)
-    postal_code = serializers.CharField(allow_null=True, required=False, allow_blank=True)
-    social_links = serializers.ListField(read_only=True)
-    created_at = serializers.DateTimeField(read_only=True)
-    updated_at = serializers.DateTimeField(read_only=True)
+    user = serializers.IntegerField(source="user_id", read_only=True)
+    social_links = UserSocialLinkSerializer(many=True, required=False)
 
-    def to_representation(self, instance):
-        """Map User to Profile-like output."""
-        if isinstance(instance, User):
-            return {
-                "id": instance.id,
-                "user": instance.id,
-                "bio": None,
-                "avatar": None,
-                "phone": None,
-                "address": None,
-                "city": None,
-                "state": None,
-                "country": None,
-                "postal_code": None,
-                "social_links": [],
-                "created_at": instance.created_at,
-                "updated_at": instance.updated_at,
-            }
-        return super().to_representation(instance)
+    class Meta:
+        model = UserProfile
+        fields = [
+            "id",
+            "user",
+            "bio",
+            "avatar",
+            "phone",
+            "address",
+            "city",
+            "state",
+            "country",
+            "postal_code",
+            "social_links",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = ["id", "user", "created_at", "updated_at"]
 
     def update(self, instance, validated_data):
-        """Update User fields (name, preferred_language). Other profile fields ignored for now."""
-        if isinstance(instance, User):
-            if "name" in validated_data:
-                instance.name = validated_data["name"]
-            if "preferred_language" in validated_data:
-                instance.preferred_language = validated_data["preferred_language"]
-            instance.save()
+        social_links_data = validated_data.pop("social_links", None)
+
+        for attr, value in validated_data.items():
+            setattr(instance, attr, value or "")
+        instance.save()
+
+        if social_links_data is not None:
+            instance.social_links.all().delete()
+            UserSocialLink.objects.bulk_create(
+                [
+                    UserSocialLink(
+                        profile=instance,
+                        platform=link.get("platform", "").strip(),
+                        url=link.get("url", "").strip(),
+                    )
+                    for link in social_links_data
+                    if link.get("platform") and link.get("url")
+                ]
+            )
+
         return instance
 
 
