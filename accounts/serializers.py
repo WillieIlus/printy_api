@@ -53,6 +53,7 @@ class UserSerializer(serializers.ModelSerializer):
             "preferred_language",
             "is_active",
             "is_staff",
+            "is_superuser",
             "date_joined",
             "last_login",
             "bio",
@@ -65,7 +66,7 @@ class UserSerializer(serializers.ModelSerializer):
             "postal_code",
             "social_links",
         ]
-        read_only_fields = ["id", "email", "is_active", "is_staff", "date_joined", "last_login"]
+        read_only_fields = ["id", "email", "is_active", "is_staff", "is_superuser", "date_joined", "last_login"]
 
     def to_representation(self, instance):
         data = super().to_representation(instance)

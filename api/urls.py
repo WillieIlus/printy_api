@@ -5,6 +5,15 @@ from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 
 from . import quote_views, views
+from .analytics_views import AnalyticsEventIngestView
+from .admin_views import (
+    AnalyticsDashboardSummaryView,
+    AnalyticsErrorAnalyticsView,
+    AnalyticsFunnelView,
+    AnalyticsLocationBreakdownView,
+    AnalyticsTimeSeriesView,
+    AnalyticsTopMetricsView,
+)
 from .seo_views import (
     SEOLocationDetailView,
     SEOLocationProductView,
@@ -58,6 +67,13 @@ notifications_router = DefaultRouter()
 notifications_router.register(r"", NotificationViewSet, basename="notification")
 
 urlpatterns = [
+    path("analytics/events/", AnalyticsEventIngestView.as_view(), name="analytics-events"),
+    path("admin/analytics/summary/", AnalyticsDashboardSummaryView.as_view(), name="admin-analytics-summary"),
+    path("admin/analytics/timeseries/", AnalyticsTimeSeriesView.as_view(), name="admin-analytics-timeseries"),
+    path("admin/analytics/top-metrics/", AnalyticsTopMetricsView.as_view(), name="admin-analytics-top-metrics"),
+    path("admin/analytics/funnel/", AnalyticsFunnelView.as_view(), name="admin-analytics-funnel"),
+    path("admin/analytics/locations/", AnalyticsLocationBreakdownView.as_view(), name="admin-analytics-locations"),
+    path("admin/analytics/errors/", AnalyticsErrorAnalyticsView.as_view(), name="admin-analytics-errors"),
     path("products/gallery/", ProductGalleryView.as_view(), name="products-gallery"),
     # Production tracking (jobs, processes, dashboard)
     path("", include("production.urls")),

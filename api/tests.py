@@ -1,10 +1,13 @@
 """API endpoint tests."""
 from decimal import Decimal
+from datetime import timedelta
 
 from django.test import TestCase
+from django.utils import timezone
 from rest_framework.test import APIClient
 
 from accounts.models import User
+from common.models import AnalyticsEvent
 from catalog.choices import PricingMode, ProductStatus
 from catalog.models import Product, ProductCategory
 from inventory.models import Machine, Paper
@@ -14,6 +17,500 @@ from pricing.models import Material, PrintingRate, VolumeDiscount
 from quotes.choices import QuoteStatus, ShopQuoteStatus
 from quotes.models import QuoteItem, QuoteRequest
 from shops.models import Shop
+
+
+class AnalyticsEventIngestionAPITestCase(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.user = User.objects.create_user(email="analytics@test.com", password="pass12345")
+
+    def test_ingestion_accepts_supported_event_type(self):
+        response = self.client.post(
+            "/api/analytics/events/",
+            {
+                "event_type": "search",
+                "path": "/search",
+                "metadata": {"search_term": "flyers"},
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 202)
+        event = AnalyticsEvent.objects.get()
+        self.assertEqual(event.event_type, AnalyticsEvent.EventType.SEARCH)
+        self.assertEqual(event.path, "/search")
+
+    def test_guest_can_submit_analytics_event(self):
+        response = self.client.post(
+            "/api/analytics/events/?source=frontend",
+            {
+                "event_type": "page_view",
+                "path": "/products/business-cards",
+                "metadata": {"source": "nuxt"},
+                "status_code": 200,
+            },
+            format="json",
+            HTTP_USER_AGENT="PrintyTestAgent/1.0",
+            HTTP_REFERER="https://printy.ke/",
+            REMOTE_ADDR="127.0.0.1",
+        )
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.json(), {"ok": True})
+
+        event = AnalyticsEvent.objects.get()
+        self.assertEqual(event.event_type, AnalyticsEvent.EventType.PAGE_VIEW)
+        self.assertIsNone(event.user)
+        self.assertEqual(event.path, "/products/business-cards")
+        self.assertEqual(event.method, "POST")
+        self.assertEqual(event.status_code, 200)
+        self.assertEqual(event.user_agent, "PrintyTestAgent/1.0")
+        self.assertEqual(event.referer, "https://printy.ke/")
+        self.assertEqual(event.ip_address, "127.0.0.1")
+        self.assertEqual(event.query_params, {"source": "frontend"})
+        self.assertEqual(event.metadata["source"], "nuxt")
+        self.assertEqual(event.metadata["ingestion_path"], "/api/analytics/events/?source=frontend")
+
+    def test_authenticated_event_attaches_user_and_error_payload(self):
+        self.client.force_authenticate(user=self.user)
+
+        response = self.client.post(
+            "/api/analytics/events/",
+            {
+                "event_type": "frontend_error",
+                "path": "/dashboard",
+                "metadata": {"component": "DashboardPage"},
+                "error": {"message": "Render failed"},
+                "status_code": 500,
+            },
+            format="json",
+            HTTP_USER_AGENT="PrintyTestAgent/2.0",
+            REMOTE_ADDR="127.0.0.2",
+        )
+
+        self.assertEqual(response.status_code, 202)
+
+        event = AnalyticsEvent.objects.get(path="/dashboard")
+        self.assertEqual(event.user, self.user)
+        self.assertEqual(event.event_type, AnalyticsEvent.EventType.FRONTEND_ERROR)
+        self.assertEqual(event.metadata["component"], "DashboardPage")
+        self.assertEqual(event.metadata["error"], {"message": "Render failed"})
+
+    def test_invalid_event_type_returns_validation_error(self):
+        response = self.client.post(
+            "/api/analytics/events/",
+            {
+                "event_type": "unknown_event",
+                "path": "/",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(AnalyticsEvent.objects.count(), 0)
+
+
+class AnalyticsDashboardSummaryAPITestCase(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.superuser = User.objects.create_superuser(email="super@test.com", password="pass12345")
+        self.user = User.objects.create_user(email="user@test.com", password="pass12345")
+        self.staff_user = User.objects.create_user(
+            email="staff@test.com",
+            password="pass12345",
+            is_staff=True,
+            is_superuser=False,
+        )
+        self.shop_owner = User.objects.create_user(email="owner@test.com", password="pass12345")
+        self.shop = Shop.objects.create(owner=self.shop_owner, name="Summary Shop", slug="summary-shop", is_active=True)
+
+        now = timezone.now()
+
+        AnalyticsEvent.objects.bulk_create([
+            AnalyticsEvent(
+                event_type=AnalyticsEvent.EventType.PAGE_VIEW,
+                visitor_id="visitor-a",
+                path="/",
+                city="Nairobi",
+                created_at=now,
+            ),
+            AnalyticsEvent(
+                event_type=AnalyticsEvent.EventType.PAGE_VIEW,
+                visitor_id="visitor-b",
+                path="/shops/summary-shop",
+                city="Nairobi",
+                created_at=now,
+            ),
+            AnalyticsEvent(
+                event_type=AnalyticsEvent.EventType.PAGE_VIEW,
+                visitor_id="visitor-a",
+                path="/shops/summary-shop",
+                city="Mombasa",
+                created_at=now,
+            ),
+            AnalyticsEvent(
+                event_type=AnalyticsEvent.EventType.SEARCH,
+                visitor_id="visitor-a",
+                metadata={"search_term": "business cards"},
+                created_at=now,
+            ),
+            AnalyticsEvent(
+                event_type=AnalyticsEvent.EventType.SEARCH,
+                visitor_id="visitor-b",
+                metadata={"query": "flyers"},
+                created_at=now,
+            ),
+            AnalyticsEvent(
+                event_type=AnalyticsEvent.EventType.SEARCH,
+                visitor_id="visitor-c",
+                metadata={"search_term": "business cards"},
+                created_at=now,
+            ),
+            AnalyticsEvent(
+                event_type=AnalyticsEvent.EventType.QUOTE_START,
+                visitor_id="visitor-a",
+                created_at=now,
+            ),
+            AnalyticsEvent(
+                event_type=AnalyticsEvent.EventType.QUOTE_START,
+                visitor_id="visitor-b",
+                created_at=now,
+            ),
+            AnalyticsEvent(
+                event_type=AnalyticsEvent.EventType.QUOTE_SUBMIT,
+                visitor_id="visitor-a",
+                created_at=now,
+            ),
+            AnalyticsEvent(
+                event_type=AnalyticsEvent.EventType.FRONTEND_ERROR,
+                visitor_id="visitor-a",
+                created_at=now,
+            ),
+            AnalyticsEvent(
+                event_type=AnalyticsEvent.EventType.PAGE_VIEW,
+                visitor_id="visitor-old-week",
+                path="/old-week",
+                city="Kisumu",
+            ),
+            AnalyticsEvent(
+                event_type=AnalyticsEvent.EventType.PAGE_VIEW,
+                visitor_id="visitor-old-month",
+                path="/old-month",
+                city="Eldoret",
+            ),
+        ])
+
+        AnalyticsEvent.objects.filter(visitor_id="visitor-old-week").update(created_at=now - timedelta(days=3))
+        AnalyticsEvent.objects.filter(visitor_id="visitor-old-month").update(created_at=now - timedelta(days=20))
+
+        QuoteRequest.objects.create(
+            shop=self.shop,
+            created_by=self.user,
+            customer_name="Today Quote",
+            status=QuoteRequest.DRAFT,
+        )
+        QuoteRequest.objects.create(
+            shop=self.shop,
+            created_by=self.user,
+            customer_name="Week Quote",
+            status=QuoteRequest.DRAFT,
+        )
+
+    def test_anonymous_user_cannot_access_summary(self):
+        response = self.client.get("/api/admin/analytics/summary/")
+        self.assertEqual(response.status_code, 401)
+
+    def test_authenticated_normal_user_cannot_access_summary(self):
+        self.client.force_authenticate(user=self.user)
+        response = self.client.get("/api/admin/analytics/summary/")
+        self.assertEqual(response.status_code, 403)
+
+    def test_staff_but_non_superuser_cannot_access_summary(self):
+        self.client.force_authenticate(user=self.staff_user)
+        response = self.client.get("/api/admin/analytics/summary/")
+        self.assertEqual(response.status_code, 403)
+
+    def test_summary_returns_dashboard_metrics(self):
+        self.client.force_authenticate(user=self.superuser)
+        response = self.client.get("/api/admin/analytics/summary/")
+
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(data["total_visits_today"], 3)
+        self.assertEqual(data["total_visits_this_week"], 3)
+        self.assertEqual(data["total_visits_this_month"], 5)
+        self.assertEqual(data["unique_visitors_today"], 2)
+        self.assertEqual(data["quote_requests_today"], 2)
+        self.assertEqual(data["quote_requests_this_week"], 2)
+        self.assertEqual(data["quote_conversion_rate_today"], 50.0)
+        self.assertEqual(data["recent_errors_count"], 1)
+        self.assertEqual(data["top_cities"][0], {"label": "Nairobi", "count": 2})
+        self.assertEqual(data["top_paths"][0], {"label": "/shops/summary-shop", "count": 2})
+        self.assertEqual(data["top_searches"][0], {"label": "business cards", "count": 2})
+
+
+class AnalyticsTimeSeriesAPITestCase(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.superuser = User.objects.create_superuser(email="timeseries-super@test.com", password="pass12345")
+        self.user = User.objects.create_user(email="timeseries-user@test.com", password="pass12345")
+
+        now = timezone.now()
+        current_hour = now.replace(minute=0, second=0, microsecond=0)
+
+        visit_one = AnalyticsEvent.objects.create(
+            event_type=AnalyticsEvent.EventType.PAGE_VIEW,
+            visitor_id="visitor-1",
+            path="/",
+        )
+        visit_two = AnalyticsEvent.objects.create(
+            event_type=AnalyticsEvent.EventType.PAGE_VIEW,
+            visitor_id="visitor-2",
+            path="/products",
+        )
+        quote_start = AnalyticsEvent.objects.create(
+            event_type=AnalyticsEvent.EventType.QUOTE_START,
+            visitor_id="visitor-1",
+        )
+        quote_submit = AnalyticsEvent.objects.create(
+            event_type=AnalyticsEvent.EventType.QUOTE_SUBMIT,
+            visitor_id="visitor-1",
+        )
+        frontend_error = AnalyticsEvent.objects.create(
+            event_type=AnalyticsEvent.EventType.FRONTEND_ERROR,
+            visitor_id="visitor-3",
+        )
+        old_day_visit = AnalyticsEvent.objects.create(
+            event_type=AnalyticsEvent.EventType.PAGE_VIEW,
+            visitor_id="visitor-old",
+            path="/old",
+        )
+
+        AnalyticsEvent.objects.filter(pk__in=[visit_one.pk, visit_two.pk, quote_start.pk, quote_submit.pk, frontend_error.pk]).update(
+            created_at=current_hour
+        )
+        AnalyticsEvent.objects.filter(pk=old_day_visit.pk).update(
+            created_at=current_hour - timedelta(days=8)
+        )
+
+    def test_superuser_can_access_timeseries_endpoint(self):
+        self.client.force_authenticate(user=self.superuser)
+        response = self.client.get("/api/admin/analytics/timeseries/")
+        self.assertEqual(response.status_code, 200)
+
+    def test_timeseries_requires_superuser(self):
+        self.client.force_authenticate(user=self.user)
+        response = self.client.get("/api/admin/analytics/timeseries/")
+        self.assertEqual(response.status_code, 403)
+
+    def test_timeseries_handles_7d_range(self):
+        self.client.force_authenticate(user=self.superuser)
+        response = self.client.get("/api/admin/analytics/timeseries/?range=7d&interval=day")
+
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(data["range"], "7d")
+        self.assertEqual(data["interval"], "day")
+        self.assertEqual(len(data["series"]), 1)
+        point = data["series"][0]
+        self.assertEqual(point["visits"], 2)
+        self.assertEqual(point["unique_visitors"], 3)
+        self.assertEqual(point["quote_starts"], 1)
+        self.assertEqual(point["quote_submits"], 1)
+        self.assertEqual(point["errors"], 1)
+        self.assertIn("bucket", point)
+
+    def test_timeseries_handles_today_range(self):
+        self.client.force_authenticate(user=self.superuser)
+        response = self.client.get("/api/admin/analytics/timeseries/?range=today&interval=hour")
+
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(data["range"], "today")
+        self.assertEqual(data["interval"], "hour")
+        self.assertEqual(len(data["series"]), 1)
+        self.assertEqual(data["series"][0]["visits"], 2)
+
+    def test_timeseries_handles_30d_range(self):
+        self.client.force_authenticate(user=self.superuser)
+        response = self.client.get("/api/admin/analytics/timeseries/?range=30d&interval=day")
+
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(data["range"], "30d")
+        self.assertEqual(data["interval"], "day")
+        self.assertEqual(len(data["series"]), 2)
+
+    def test_timeseries_normalizes_invalid_interval_for_today(self):
+        self.client.force_authenticate(user=self.superuser)
+        response = self.client.get("/api/admin/analytics/timeseries/?range=today&interval=day")
+
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(data["range"], "today")
+        self.assertEqual(data["interval"], "hour")
+        self.assertEqual(len(data["series"]), 1)
+
+    def test_timeseries_rejects_invalid_range(self):
+        self.client.force_authenticate(user=self.superuser)
+        response = self.client.get("/api/admin/analytics/timeseries/?range=365d")
+        self.assertEqual(response.status_code, 400)
+
+
+class AnalyticsAdditionalEndpointsAPITestCase(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.superuser = User.objects.create_superuser(email="extra-super@test.com", password="pass12345")
+        self.user = User.objects.create_user(email="extra-user@test.com", password="pass12345")
+        now = timezone.now()
+
+        product_view_1 = AnalyticsEvent.objects.create(
+            event_type=AnalyticsEvent.EventType.PRODUCT_VIEW,
+            path="/products/business-cards",
+            metadata={"product_name": "Business Cards", "product_slug": "business-cards"},
+            city="Nairobi",
+            country="Kenya",
+            region="Nairobi",
+            ip_address="10.0.0.1",
+            referer="https://google.com/",
+        )
+        product_view_2 = AnalyticsEvent.objects.create(
+            event_type=AnalyticsEvent.EventType.PRODUCT_VIEW,
+            path="/products/business-cards",
+            metadata={"product_name": "Business Cards", "product_slug": "business-cards"},
+            city="Nairobi",
+            country="Kenya",
+            region="Nairobi",
+            ip_address="10.0.0.1",
+            referer="",
+        )
+        shop_view = AnalyticsEvent.objects.create(
+            event_type=AnalyticsEvent.EventType.SHOP_VIEW,
+            path="/shops/print-hub",
+            metadata={"shop_name": "Print Hub", "shop_slug": "print-hub"},
+            city="Mombasa",
+            country="Kenya",
+            region="Coast",
+            ip_address="10.0.0.2",
+            referer="https://facebook.com/",
+        )
+        search_a = AnalyticsEvent.objects.create(
+            event_type=AnalyticsEvent.EventType.SEARCH,
+            metadata={"search_term": "flyers"},
+            city="Nairobi",
+            country="Kenya",
+            region="Nairobi",
+            ip_address="10.0.0.3",
+        )
+        search_b = AnalyticsEvent.objects.create(
+            event_type=AnalyticsEvent.EventType.SEARCH,
+            metadata={"query": "flyers"},
+            city="Nakuru",
+            country="Kenya",
+            region="Nakuru",
+            ip_address="10.0.0.4",
+        )
+        landing_page = AnalyticsEvent.objects.create(
+            event_type=AnalyticsEvent.EventType.PAGE_VIEW,
+            path="/landing",
+            city="Nairobi",
+            country="Kenya",
+            region="Nairobi",
+            ip_address="10.0.0.5",
+            referer="https://bing.com/",
+        )
+        api_error = AnalyticsEvent.objects.create(
+            event_type=AnalyticsEvent.EventType.API_ERROR,
+            path="/api/quotes/",
+            status_code=500,
+            metadata={"message": "Server exploded"},
+            city="Kisumu",
+            country="Kenya",
+            region="Kisumu",
+            ip_address="10.0.0.6",
+        )
+        frontend_error = AnalyticsEvent.objects.create(
+            event_type=AnalyticsEvent.EventType.FRONTEND_ERROR,
+            path="/dashboard",
+            status_code=400,
+            metadata={"message": "Render failed"},
+            city="Kampala",
+            country="Uganda",
+            region="Central",
+            ip_address="10.0.0.7",
+        )
+
+        AnalyticsEvent.objects.filter(
+            pk__in=[
+                product_view_1.pk,
+                product_view_2.pk,
+                shop_view.pk,
+                search_a.pk,
+                search_b.pk,
+                landing_page.pk,
+                api_error.pk,
+                frontend_error.pk,
+            ]
+        ).update(created_at=now)
+
+    def test_top_metrics_requires_superuser(self):
+        self.client.force_authenticate(user=self.user)
+        response = self.client.get("/api/admin/analytics/top-metrics/")
+        self.assertEqual(response.status_code, 403)
+
+    def test_superuser_can_access_all_analytics_read_endpoints(self):
+        self.client.force_authenticate(user=self.superuser)
+
+        summary = self.client.get("/api/admin/analytics/summary/")
+        timeseries = self.client.get("/api/admin/analytics/timeseries/")
+        top_metrics = self.client.get("/api/admin/analytics/top-metrics/")
+        locations = self.client.get("/api/admin/analytics/locations/")
+        errors = self.client.get("/api/admin/analytics/errors/")
+
+        self.assertEqual(summary.status_code, 200)
+        self.assertEqual(timeseries.status_code, 200)
+        self.assertEqual(top_metrics.status_code, 200)
+        self.assertEqual(locations.status_code, 200)
+        self.assertEqual(errors.status_code, 200)
+
+    def test_top_metrics_returns_expected_shape(self):
+        self.client.force_authenticate(user=self.superuser)
+        response = self.client.get("/api/admin/analytics/top-metrics/")
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertIn("top_viewed_products", data)
+        self.assertIn("top_viewed_shops", data)
+        self.assertIn("top_searched_keywords", data)
+        self.assertIn("top_landing_pages", data)
+        self.assertEqual(data["top_viewed_products"][0]["label"], "Business Cards")
+        self.assertEqual(data["top_viewed_products"][0]["count"], 2)
+        self.assertEqual(data["top_viewed_shops"][0]["label"], "Print Hub")
+        self.assertEqual(data["top_searched_keywords"][0]["label"], "flyers")
+        self.assertEqual(data["top_landing_pages"][0]["label"], "/landing")
+        self.assertNotIn("top_exit_pages", data)
+
+    def test_location_breakdown_returns_grouped_and_paginated_data(self):
+        self.client.force_authenticate(user=self.superuser)
+        response = self.client.get("/api/admin/analytics/locations/?page=1&page_size=2")
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(data["countries"][0]["label"], "Kenya")
+        self.assertIn("results", data["ip_addresses"])
+        self.assertEqual(data["ip_addresses"]["count"], 7)
+        self.assertLessEqual(len(data["ip_addresses"]["results"]), 2)
+        self.assertIn("count", data["ip_addresses"])
+        self.assertIsNotNone(data["ip_addresses"]["next"])
+
+    def test_error_analytics_returns_latest_and_groupings(self):
+        self.client.force_authenticate(user=self.superuser)
+        response = self.client.get("/api/admin/analytics/errors/")
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(data["latest_errors"]["count"], 2)
+        self.assertEqual(data["latest_errors"]["results"][0]["event_type"], "frontend_error")
+        self.assertEqual(data["counts_by_path"][0]["label"], "/api/quotes/")
+        labels = {item["label"] for item in data["counts_by_event_type"]}
+        self.assertEqual(labels, {"api_error", "frontend_error"})
 
 
 class SEOAPITestCase(TestCase):

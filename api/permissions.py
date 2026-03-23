@@ -9,6 +9,13 @@ class IsStaffUser(permissions.BasePermission):
         return request.user.is_authenticated and request.user.is_staff
 
 
+class IsSuperUser(permissions.BasePermission):
+    """Allow only authenticated superusers."""
+
+    def has_permission(self, request, view):
+        return request.user.is_authenticated and request.user.is_superuser
+
+
 class IsShopOwner(permissions.BasePermission):
     """Allow only the shop owner."""
 
