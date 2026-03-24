@@ -513,6 +513,50 @@ class AnalyticsAdditionalEndpointsAPITestCase(TestCase):
         self.assertEqual(labels, {"api_error", "frontend_error"})
 
 
+class QuoteDraftItemTimestampAPITestCase(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.user = User.objects.create_user(email="buyer@test.com", password="pass12345")
+        self.owner = User.objects.create_user(email="owner@test.com", password="pass12345")
+        self.shop = Shop.objects.create(owner=self.owner, name="Draft Shop", slug="draft-shop", is_active=True)
+        self.product = Product.objects.create(
+            shop=self.shop,
+            name="Business Card",
+            pricing_mode=PricingMode.SHEET,
+            default_finished_width_mm=90,
+            default_finished_height_mm=55,
+            default_bleed_mm=3,
+            default_sides=Sides.SIMPLEX,
+            min_quantity=100,
+            is_active=True,
+        )
+        self.draft = QuoteRequest.objects.create(
+            shop=self.shop,
+            created_by=self.user,
+            status=QuoteStatus.DRAFT,
+            customer_name="Buyer",
+        )
+        self.item = QuoteItem.objects.create(
+            quote_request=self.draft,
+            item_type="PRODUCT",
+            product=self.product,
+            quantity=100,
+            pricing_mode=PricingMode.SHEET,
+            sides=Sides.SIMPLEX,
+            color_mode="COLOR",
+        )
+
+    def test_active_draft_includes_item_created_at(self):
+        self.client.force_authenticate(user=self.user)
+        response = self.client.get(f"/api/quote-drafts/active/?shop={self.shop.slug}")
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertIn("items", data)
+        self.assertEqual(len(data["items"]), 1)
+        self.assertIn("created_at", data["items"][0])
+        self.assertTrue(data["items"][0]["created_at"])
+
+
 class SEOAPITestCase(TestCase):
     """Test public SEO endpoints — no auth required."""
 

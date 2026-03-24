@@ -60,6 +60,7 @@ class QuoteItemCustomerSerializer(serializers.ModelSerializer):
             "unit_price",
             "line_total",
             "finishings",
+            "created_at",
         ]
 
     def get_product_name(self, obj):
