@@ -190,9 +190,18 @@ def _build_quote_draft_file_payload(draft_file: QuoteDraftFile, *, statuses: lis
     shop_groups = [build_quote_draft_group_payload(draft) for draft in drafts]
     customer_label = (draft_file.contact_name or "").strip() or (draft_file.company_name or "").strip() or "Untitled Company"
     total_value = sum(Decimal(group["total"]) for group in shop_groups if group.get("total") is not None)
+    customer = {
+        "label": customer_label,
+        "company_name": draft_file.company_name,
+        "contact_name": draft_file.contact_name,
+        "contact_email": draft_file.contact_email,
+        "contact_phone": draft_file.contact_phone,
+    }
 
     return {
         "id": draft_file.id,
+        "file_kind": "grouped_quote_file",
+        "customer": customer,
         "customer_name": customer_label,
         "company_name": draft_file.company_name,
         "contact_name": draft_file.contact_name,

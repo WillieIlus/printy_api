@@ -34,7 +34,7 @@ from quotes.draft_files import (
 )
 from quotes.draft_pdf import render_dashboard_quote_file_pdf, render_quote_draft_file_pdf, render_quote_draft_pdf
 from quotes.whatsapp_formatter import format_quote_for_whatsapp
-from quotes.summary_service import get_quote_draft_file_summary_text
+from quotes.summary_service import get_quote_draft_file_summary_payload
 from shops.models import FavoriteShop, OpeningHours, Shop, ShopRating
 
 from .filters import QuoteFilterSet
@@ -857,7 +857,7 @@ class QuoteDraftFileViewSet(viewsets.ViewSet):
     @action(detail=True, methods=["get"], url_path="whatsapp-preview")
     def whatsapp_preview(self, request, pk=None):
         draft_file = get_object_or_404(QuoteDraftFile, pk=pk, created_by=request.user)
-        return Response({"message": get_quote_draft_file_summary_text(draft_file)})
+        return Response(get_quote_draft_file_summary_payload(draft_file))
 
 
 # ---------------------------------------------------------------------------

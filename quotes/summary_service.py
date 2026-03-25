@@ -303,3 +303,15 @@ def get_quote_draft_file_summary_text(draft_file: QuoteDraftFile) -> str:
             lines.append(f"Shop subtotal: {group['shop_currency']} {group['subtotal']}")
 
     return "\n".join(lines).strip()
+
+
+def get_quote_draft_file_summary_payload(draft_file: QuoteDraftFile) -> dict:
+    """Structured WhatsApp preview payload for grouped quote files."""
+    payload = build_dashboard_quote_file_payload(draft_file)
+    return {
+        "message": get_quote_draft_file_summary_text(draft_file),
+        "customer": payload.get("customer", {}),
+        "shop_count": payload.get("shop_count", 0),
+        "item_count": payload.get("item_count", 0),
+        "status": payload.get("status"),
+    }
