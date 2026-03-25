@@ -6,7 +6,8 @@ Reusable by frontend, API, and future integrations (e.g. WhatsApp Business API).
 from decimal import Decimal
 from typing import List, Optional
 
-from .models import QuoteItem, QuoteRequest, ShopQuote
+from .draft_files import build_dashboard_quote_file_payload
+from .models import QuoteDraftFile, QuoteItem, QuoteRequest, ShopQuote
 
 
 def _format_price(value) -> str:
@@ -266,3 +267,39 @@ def get_shop_quote_summary_text(shop_quote: ShopQuote, share_url: Optional[str] 
         company_phone=shop_quote.shop.phone_number or "" if shop_quote.shop_id else "",
         share_url=share_url,
     )
+
+
+def get_quote_draft_file_summary_text(draft_file: QuoteDraftFile) -> str:
+    """Grouped WhatsApp-ready summary for a quote file across one or more shops."""
+    payload = build_dashboard_quote_file_payload(draft_file)
+    lines: list[str] = []
+
+    customer_name = payload.get("customer_name") or payload.get("company_name") or "Customer"
+    lines.append(f"Quote File - {customer_name}")
+
+    if payload.get("contact_email"):
+        lines.append(f"Email: {payload['contact_email']}")
+    if payload.get("contact_phone"):
+        lines.append(f"Phone: {payload['contact_phone']}")
+
+    for index, group in enumerate(payload["shop_groups"], start=1):
+        lines.append("")
+        lines.append(f"{index}. {group['shop_name']}")
+        lines.append(f"Status: {str(group['status']).title()}")
+
+        for item in group["items"]:
+            title = item.get("product_name") or item.get("title") or "Item"
+            qty = item.get("quantity") or 0
+            mode = item.get("pricing_mode") or "Custom"
+            line_total = item.get("line_total") or "Pending"
+            lines.append(f"• {title} × {qty} ({mode}) = {group['shop_currency']} {line_total}")
+
+        latest_sent_quote = group.get("latest_sent_quote")
+        if latest_sent_quote and latest_sent_quote.get("total"):
+            lines.append(f"Shop total: {group['shop_currency']} {latest_sent_quote['total']}")
+            if latest_sent_quote.get("turnaround_days"):
+                lines.append(f"Turnaround: {latest_sent_quote['turnaround_days']} business day(s)")
+        else:
+            lines.append(f"Shop subtotal: {group['shop_currency']} {group['subtotal']}")
+
+    return "\n".join(lines).strip()

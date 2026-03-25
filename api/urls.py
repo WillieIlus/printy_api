@@ -40,6 +40,7 @@ public_router.register(r"public/shops", views.PublicShopViewSet, basename="publi
 quote_router = DefaultRouter()
 quote_router.register(r"quote-requests", quote_views.CustomerQuoteRequestViewSet, basename="quote-request")
 quote_router.register(r"quote-drafts", views.QuoteDraftViewSet, basename="quote-draft")
+quote_router.register(r"quote-draft-files", views.QuoteDraftFileViewSet, basename="quote-draft-file")
 quote_router.register(r"sent-quotes", quote_views.ShopQuoteViewSet, basename="sent-quote")
 
 # Staff quoting API

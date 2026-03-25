@@ -15,7 +15,7 @@ from locations.models import Location
 from pricing.choices import Sides
 from pricing.models import Material, PrintingRate, VolumeDiscount
 from quotes.choices import QuoteStatus, ShopQuoteStatus
-from quotes.models import QuoteItem, QuoteRequest
+from quotes.models import QuoteDraftFile, QuoteItem, QuoteRequest, ShopQuote
 from shops.models import Shop
 
 
@@ -1335,3 +1335,111 @@ class PricingAPITestCase(TestCase):
         self.assertEqual(data["name"], "Bulk 500+")
         self.assertEqual(data["min_quantity"], 500)
         self.assertEqual(str(data["discount_percent"]), "10.00")
+
+
+class DashboardQuoteFileAPITestCase(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.user = User.objects.create_user(email="grouped@test.com", password="pass12345", is_staff=True)
+        self.other_user = User.objects.create_user(email="other@test.com", password="pass12345", is_staff=True)
+        self.shop_one = Shop.objects.create(owner=self.user, name="Alpha Print", slug="alpha-print", is_active=True)
+        self.shop_two = Shop.objects.create(owner=self.user, name="Beta Print", slug="beta-print", is_active=True)
+        self.file = QuoteDraftFile.objects.create(
+            created_by=self.user,
+            company_name="Acme Ltd",
+            contact_name="Jane Buyer",
+            contact_email="jane@acme.test",
+            contact_phone="+254700000001",
+        )
+        self.draft_request = QuoteRequest.objects.create(
+            shop=self.shop_one,
+            created_by=self.user,
+            quote_draft_file=self.file,
+            customer_name="Jane Buyer",
+            customer_email="jane@acme.test",
+            customer_phone="+254700000001",
+            status=QuoteStatus.DRAFT,
+        )
+        self.quoted_request = QuoteRequest.objects.create(
+            shop=self.shop_two,
+            created_by=self.user,
+            quote_draft_file=self.file,
+            customer_name="Jane Buyer",
+            customer_email="jane@acme.test",
+            customer_phone="+254700000001",
+            status=QuoteStatus.QUOTED,
+        )
+        QuoteItem.objects.create(
+            quote_request=self.draft_request,
+            item_type="CUSTOM",
+            title="Business Cards",
+            quantity=100,
+            pricing_mode="SHEET",
+            line_total=Decimal("1200.00"),
+        )
+        QuoteItem.objects.create(
+            quote_request=self.quoted_request,
+            item_type="CUSTOM",
+            title="Flyers",
+            quantity=500,
+            pricing_mode="SHEET",
+            line_total=Decimal("3400.00"),
+        )
+        self.shop_quote = ShopQuote.objects.create(
+            quote_request=self.quoted_request,
+            shop=self.shop_two,
+            created_by=self.user,
+            status=ShopQuoteStatus.SENT,
+            total=Decimal("3400.00"),
+            turnaround_days=3,
+            whatsapp_message="Grouped quote message",
+        )
+        QuoteItem.objects.filter(quote_request=self.quoted_request).update(shop_quote=self.shop_quote)
+
+    def test_dashboard_scope_returns_grouped_file_with_shop_sections(self):
+        self.client.force_authenticate(user=self.user)
+        response = self.client.get("/api/quote-draft-files/?scope=dashboard")
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(len(data), 1)
+        self.assertEqual(data[0]["company_name"], "Acme Ltd")
+        self.assertEqual(data[0]["shop_count"], 2)
+        self.assertEqual(len(data[0]["shop_groups"]), 2)
+        self.assertIn("latest_sent_quote", data[0]["shop_groups"][1])
+
+    def test_dashboard_whatsapp_preview_returns_grouped_message(self):
+        self.client.force_authenticate(user=self.user)
+        response = self.client.get(f"/api/quote-draft-files/{self.file.id}/whatsapp-preview/")
+        self.assertEqual(response.status_code, 200)
+        message = response.json()["message"]
+        self.assertIn("Quote File - Jane Buyer", message)
+        self.assertIn("Alpha Print", message)
+        self.assertIn("Beta Print", message)
+
+    def test_dashboard_download_pdf_scope_returns_pdf(self):
+        self.client.force_authenticate(user=self.user)
+        response = self.client.get(f"/api/quote-draft-files/{self.file.id}/download-pdf/?scope=dashboard")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response["Content-Type"], "application/pdf")
+
+    def test_staff_quote_create_auto_attaches_quote_file(self):
+        self.client.force_authenticate(user=self.user)
+        response = self.client.post(
+            "/api/quotes/",
+            {
+                "shop": self.shop_one.id,
+                "customer_name": "Legacy Customer",
+                "customer_email": "legacy@test.com",
+                "customer_phone": "+254700000999",
+            },
+            format="json",
+        )
+        self.assertEqual(response.status_code, 201)
+        created = QuoteRequest.objects.get(pk=response.json()["id"])
+        self.assertIsNotNone(created.quote_draft_file_id)
+        self.assertEqual(created.quote_draft_file.company_name, "Legacy Customer")
+
+    def test_quote_file_requires_owner(self):
+        self.client.force_authenticate(user=self.other_user)
+        response = self.client.get(f"/api/quote-draft-files/{self.file.id}/?scope=dashboard")
+        self.assertEqual(response.status_code, 404)

@@ -48,6 +48,74 @@ class CustomerInquiry(TimeStampedModel):
         return self.name or self.email or self.phone or f"Inquiry #{self.id}"
 
 
+class QuoteDraftFile(TimeStampedModel):
+    """Company/customer-level grouping for one or more shop-specific quote drafts."""
+
+    OPEN = "open"
+    CLOSED = "closed"
+    STATUS_CHOICES = [
+        (OPEN, "Open"),
+        (CLOSED, "Closed"),
+    ]
+
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="quote_draft_files",
+        verbose_name=_("created by"),
+        help_text=_("User who owns this quote draft file."),
+    )
+    company_name = models.CharField(
+        max_length=255,
+        default="Untitled Company",
+        verbose_name=_("company name"),
+        help_text=_("Top-level customer or company name used to group quote drafts."),
+    )
+    contact_name = models.CharField(
+        max_length=255,
+        blank=True,
+        default="",
+        verbose_name=_("contact name"),
+        help_text=_("Optional contact person for this quote draft file."),
+    )
+    contact_email = models.EmailField(
+        blank=True,
+        verbose_name=_("contact email"),
+        help_text=_("Optional contact email for this quote draft file."),
+    )
+    contact_phone = models.CharField(
+        max_length=50,
+        blank=True,
+        default="",
+        verbose_name=_("contact phone"),
+        help_text=_("Optional contact phone for this quote draft file."),
+    )
+    notes = models.TextField(
+        blank=True,
+        default="",
+        verbose_name=_("notes"),
+        help_text=_("Shared notes for the grouped quote draft file."),
+    )
+    status = models.CharField(
+        max_length=20,
+        choices=STATUS_CHOICES,
+        default=OPEN,
+        verbose_name=_("status"),
+        help_text=_("Open files can receive drafts from multiple shops. Closed files are read-only groupings."),
+    )
+
+    class Meta:
+        ordering = ["-updated_at", "-created_at"]
+        verbose_name = _("quote draft file")
+        verbose_name_plural = _("quote draft files")
+        indexes = [
+            models.Index(fields=["created_by", "status"], name="draft_file_user_status_idx"),
+        ]
+
+    def __str__(self):
+        return self.company_name or f"Draft file #{self.id}"
+
+
 class QuoteRequest(TimeStampedModel):
     """
     Customer's request for a quote. Created by buyer; visible to buyer and shop.
@@ -165,6 +233,15 @@ class QuoteRequest(TimeStampedModel):
         default="",
         verbose_name=_("delivery preference"),
         help_text=_("Customer preference: pickup at shop or delivery."),
+    )
+    quote_draft_file = models.ForeignKey(
+        QuoteDraftFile,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="drafts",
+        verbose_name=_("quote draft file"),
+        help_text=_("Optional company-level grouping for active quote drafts."),
     )
 
     class Meta:

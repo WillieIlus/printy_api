@@ -652,11 +652,17 @@ class QuoteCreateSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = QuoteRequest
-        fields = ["shop", "customer_name", "customer_email", "customer_phone", "notes", "customer_inquiry"]
+        fields = ["shop", "customer_name", "customer_email", "customer_phone", "notes", "customer_inquiry", "quote_draft_file"]
+        extra_kwargs = {"quote_draft_file": {"required": False, "allow_null": True}}
 
     def validate_shop(self, value):
         if not value or not value.is_active:
             raise serializers.ValidationError("Shop must be active.")
+        return value
+
+    def validate_quote_draft_file(self, value):
+        if value and value.created_by_id != self.context["request"].user.id:
+            raise serializers.ValidationError("You do not own this quote file.")
         return value
 
     def create(self, validated_data):

@@ -250,6 +250,7 @@ class QuoteRequestCustomerListSerializer(serializers.ModelSerializer):
     shop_name = serializers.CharField(source="shop.name", read_only=True)
     shop_slug = serializers.CharField(source="shop.slug", read_only=True)
     shop_currency = serializers.CharField(source="shop.currency", read_only=True)
+    quote_draft_file_id = serializers.IntegerField(source="quote_draft_file_id", read_only=True)
     items_count = serializers.SerializerMethodField()
     latest_sent_quote = serializers.SerializerMethodField()
 
@@ -261,6 +262,7 @@ class QuoteRequestCustomerListSerializer(serializers.ModelSerializer):
             "shop_name",
             "shop_slug",
             "shop_currency",
+            "quote_draft_file_id",
             "status",
             "items_count",
             "latest_sent_quote",
@@ -284,6 +286,7 @@ class QuoteRequestCustomerDetailSerializer(serializers.ModelSerializer):
     shop_name = serializers.CharField(source="shop.name", read_only=True)
     shop_slug = serializers.CharField(source="shop.slug", read_only=True)
     shop_currency = serializers.CharField(source="shop.currency", read_only=True)
+    quote_draft_file_id = serializers.IntegerField(source="quote_draft_file_id", read_only=True)
     delivery_location_name = serializers.CharField(source="delivery_location.name", read_only=True)
     items = QuoteItemCustomerSerializer(many=True, read_only=True)
     services = QuoteRequestServiceReadSerializer(many=True, read_only=True)
@@ -299,6 +302,7 @@ class QuoteRequestCustomerDetailSerializer(serializers.ModelSerializer):
             "shop_name",
             "shop_slug",
             "shop_currency",
+            "quote_draft_file_id",
             "customer_name",
             "customer_email",
             "customer_phone",

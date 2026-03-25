@@ -4,6 +4,7 @@ DRF viewsets and API views.
 import math
 
 from django.shortcuts import get_object_or_404
+from django.http import HttpResponse
 
 from common.geo import haversine_km
 from rest_framework import generics, status, viewsets
@@ -12,6 +13,7 @@ from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.views import APIView
 from django_filters.rest_framework import DjangoFilterBackend
+from rest_framework.serializers import ModelSerializer
 
 from accounts.models import UserProfile, UserSocialLink
 from accounts.serializers import UserSerializer, UserSocialLinkSerializer
@@ -20,10 +22,19 @@ from inventory.models import Machine, Paper
 from pricing.models import FinishingCategory, FinishingRate, Material, PrintingRate, VolumeDiscount
 from django.db.models import Avg, Count
 from quotes.choices import QuoteStatus
-from quotes.models import QuoteItem, QuoteItemFinishing, QuoteRequest, QuoteShareLink, ShopQuote
+from quotes.models import QuoteDraftFile, QuoteItem, QuoteItemFinishing, QuoteRequest, QuoteShareLink, ShopQuote
 from quotes.services_match_shops import find_shops_for_spec
 from quotes.services import build_preview_price_response, calculate_quote_item
+from quotes.draft_files import (
+    build_dashboard_quote_file_payload,
+    build_quote_draft_file_payload,
+    ensure_quote_draft_file,
+    ensure_quote_draft_file_for_request,
+    sync_quote_request_from_file,
+)
+from quotes.draft_pdf import render_dashboard_quote_file_pdf, render_quote_draft_file_pdf, render_quote_draft_pdf
 from quotes.whatsapp_formatter import format_quote_for_whatsapp
+from quotes.summary_service import get_quote_draft_file_summary_text
 from shops.models import FavoriteShop, OpeningHours, Shop, ShopRating
 
 from .filters import QuoteFilterSet
@@ -696,6 +707,8 @@ class QuoteDraftViewSet(viewsets.ViewSet):
     @action(detail=False, methods=["get"], url_path="active")
     def active(self, request):
         shop_slug = request.query_params.get("shop")
+        file_id = request.query_params.get("file")
+        company_name = request.query_params.get("company_name", "")
         if not shop_slug:
             return Response(
                 {"detail": "Query parameter 'shop' (shop slug) is required."},
@@ -703,15 +716,28 @@ class QuoteDraftViewSet(viewsets.ViewSet):
             )
         shop = get_object_or_404(Shop, slug=shop_slug, is_active=True)
         user = request.user
-        # Get or create ONE active draft per (user, shop). Mark any legacy duplicates REJECTED.
+        draft_file = None
+        if file_id:
+            draft_file = get_object_or_404(QuoteDraftFile, pk=file_id, created_by=user)
+        draft_file = ensure_quote_draft_file(user=user, draft_file=draft_file, company_name=company_name)
+        # Get or create ONE active draft per (user, file, shop). Mark older duplicates closed.
         drafts = list(
             QuoteRequest.objects.filter(
-                shop=shop, created_by=user, status=QuoteStatus.DRAFT
+                shop=shop,
+                created_by=user,
+                status=QuoteStatus.DRAFT,
+                quote_draft_file=draft_file,
             ).order_by("-created_at")
         )
         if not drafts:
             draft = QuoteRequest.objects.create(
-                shop=shop, created_by=user, status=QuoteStatus.DRAFT
+                shop=shop,
+                created_by=user,
+                status=QuoteStatus.DRAFT,
+                quote_draft_file=draft_file,
+                customer_name=draft_file.contact_name or draft_file.company_name,
+                customer_email=draft_file.contact_email,
+                customer_phone=draft_file.contact_phone,
             )
         else:
             draft = drafts[0]
@@ -719,6 +745,7 @@ class QuoteDraftViewSet(viewsets.ViewSet):
             for older in drafts[1:]:
                 older.status = QuoteStatus.CLOSED
                 older.save(update_fields=["status", "updated_at"])
+        sync_quote_request_from_file(draft_file, draft)
         return Response(QuoteRequestReadSerializer(draft).data)
 
     def retrieve(self, request, pk=None):
@@ -761,6 +788,76 @@ class QuoteDraftViewSet(viewsets.ViewSet):
         draft.status = QuoteStatus.SUBMITTED
         draft.save(update_fields=["status", "updated_at"])
         return Response(QuoteRequestReadSerializer(draft).data)
+
+    @action(detail=True, methods=["get"], url_path="download-pdf")
+    def download_pdf(self, request, pk=None):
+        draft = get_object_or_404(QuoteRequest.objects.select_related("shop"), pk=pk)
+        if draft.created_by_id != request.user.id:
+            return Response({"detail": "Not your quote request."}, status=status.HTTP_403_FORBIDDEN)
+        try:
+            pdf_bytes = render_quote_draft_pdf(draft)
+        except ImportError:
+            return Response({"detail": "PDF export dependency is not installed."}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+        response = HttpResponse(pdf_bytes, content_type="application/pdf")
+        response["Content-Disposition"] = f'attachment; filename="quote-draft-shop-{draft.shop.slug}-{draft.id}.pdf"'
+        return response
+
+
+class QuoteDraftFileWriteSerializer(ModelSerializer):
+    class Meta:
+        model = QuoteDraftFile
+        fields = ["id", "company_name", "contact_name", "contact_email", "contact_phone", "notes", "status"]
+        read_only_fields = ["id"]
+
+
+class QuoteDraftFileViewSet(viewsets.ViewSet):
+    permission_classes = [IsAuthenticated]
+
+    def list(self, request):
+        files = QuoteDraftFile.objects.filter(created_by=request.user).order_by("-updated_at", "-created_at")
+        scope = request.query_params.get("scope")
+        payload_builder = build_dashboard_quote_file_payload if scope == "dashboard" else build_quote_draft_file_payload
+        return Response([payload_builder(draft_file) for draft_file in files])
+
+    def retrieve(self, request, pk=None):
+        draft_file = get_object_or_404(QuoteDraftFile, pk=pk, created_by=request.user)
+        scope = request.query_params.get("scope")
+        payload_builder = build_dashboard_quote_file_payload if scope == "dashboard" else build_quote_draft_file_payload
+        return Response(payload_builder(draft_file))
+
+    def create(self, request):
+        serializer = QuoteDraftFileWriteSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        draft_file = serializer.save(created_by=request.user)
+        return Response(build_quote_draft_file_payload(draft_file), status=status.HTTP_201_CREATED)
+
+    def partial_update(self, request, pk=None):
+        draft_file = get_object_or_404(QuoteDraftFile, pk=pk, created_by=request.user)
+        serializer = QuoteDraftFileWriteSerializer(draft_file, data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        draft_file = serializer.save()
+        for draft in draft_file.drafts.filter(status=QuoteStatus.DRAFT):
+            sync_quote_request_from_file(draft_file, draft)
+        return Response(build_quote_draft_file_payload(draft_file))
+
+    @action(detail=True, methods=["get"], url_path="download-pdf")
+    def download_pdf(self, request, pk=None):
+        draft_file = get_object_or_404(QuoteDraftFile, pk=pk, created_by=request.user)
+        try:
+            if request.query_params.get("scope") == "dashboard":
+                pdf_bytes = render_dashboard_quote_file_pdf(draft_file)
+            else:
+                pdf_bytes = render_quote_draft_file_pdf(draft_file)
+        except ImportError:
+            return Response({"detail": "PDF export dependency is not installed."}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+        response = HttpResponse(pdf_bytes, content_type="application/pdf")
+        response["Content-Disposition"] = f'attachment; filename="quote-draft-file-{draft_file.id}.pdf"'
+        return response
+
+    @action(detail=True, methods=["get"], url_path="whatsapp-preview")
+    def whatsapp_preview(self, request, pk=None):
+        draft_file = get_object_or_404(QuoteDraftFile, pk=pk, created_by=request.user)
+        return Response({"message": get_quote_draft_file_summary_text(draft_file)})
 
 
 # ---------------------------------------------------------------------------
@@ -881,7 +978,9 @@ class QuoteViewSet(viewsets.ModelViewSet):
         )
 
     def perform_create(self, serializer):
-        serializer.save()
+        quote_request = serializer.save()
+        draft_file = ensure_quote_draft_file_for_request(user=self.request.user, draft=quote_request)
+        sync_quote_request_from_file(draft_file, quote_request)
 
     @action(detail=True, methods=["post"], url_path="whatsapp-preview")
     def whatsapp_preview(self, request, pk=None):
