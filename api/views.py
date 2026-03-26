@@ -17,6 +17,7 @@ from rest_framework.serializers import ModelSerializer
 
 from accounts.models import UserProfile, UserSocialLink
 from accounts.serializers import UserSerializer, UserSocialLinkSerializer
+from accounts.services.roles import promote_to_shop_owner
 from catalog.models import Product
 from inventory.models import Machine, Paper
 from pricing.models import FinishingCategory, FinishingRate, Material, PrintingRate, VolumeDiscount
@@ -36,6 +37,7 @@ from quotes.draft_pdf import render_dashboard_quote_file_pdf, render_quote_draft
 from quotes.whatsapp_formatter import format_quote_for_whatsapp
 from quotes.summary_service import get_quote_draft_file_summary_payload
 from shops.models import FavoriteShop, OpeningHours, Shop, ShopRating
+from shops.services import can_manage_shop
 
 from .filters import QuoteFilterSet
 from .permissions import (
@@ -726,7 +728,6 @@ class QuoteDraftViewSet(viewsets.ViewSet):
                 shop=shop,
                 created_by=user,
                 status=QuoteStatus.DRAFT,
-                quote_draft_file=draft_file,
             ).order_by("-created_at")
         )
         if not drafts:
@@ -741,6 +742,9 @@ class QuoteDraftViewSet(viewsets.ViewSet):
             )
         else:
             draft = drafts[0]
+            if draft.quote_draft_file_id is None:
+                draft.quote_draft_file = draft_file
+                draft.save(update_fields=["quote_draft_file", "updated_at"])
             # Mark older drafts closed so only one active draft exists
             for older in drafts[1:]:
                 older.status = QuoteStatus.CLOSED
@@ -1488,9 +1492,13 @@ class ShopViewSet(viewsets.ModelViewSet):
     lookup_url_kwarg = "slug"
 
     def get_queryset(self):
-        return Shop.objects.filter(owner=self.request.user)
+        return (
+            Shop.objects.filter(owner=self.request.user)
+            | Shop.objects.filter(memberships__user=self.request.user, memberships__is_active=True)
+        ).distinct()
 
     def perform_create(self, serializer):
+        promote_to_shop_owner(self.request.user)
         serializer.save(owner=self.request.user)
 
 
@@ -1509,7 +1517,7 @@ class ShopScopedMixin:
         elif shop_slug:
             shop = Shop.objects.filter(slug=shop_slug).first()
 
-        if not shop or shop.owner_id != self.request.user.id:
+        if not shop or not can_manage_shop(shop, self.request.user):
             if not shop:
                 raise NotFound("Shop not found.")
             raise PermissionDenied("Not your shop.")

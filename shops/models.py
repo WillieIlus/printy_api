@@ -182,6 +182,50 @@ class Shop(AutoSlugMixin, models.Model):
         return user.is_authenticated and self.owner_id == user.pk
 
 
+class ShopMembership(models.Model):
+    """Optional shop membership for staff and delegated operations."""
+
+    class Role(models.TextChoices):
+        STAFF = "staff", "Staff"
+        MANAGER = "manager", "Manager"
+
+    shop = models.ForeignKey(
+        Shop,
+        on_delete=models.CASCADE,
+        related_name="memberships",
+    )
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="shop_memberships",
+    )
+    role = models.CharField(
+        max_length=20,
+        choices=Role.choices,
+        default=Role.STAFF,
+    )
+    can_manage_setup = models.BooleanField(default=False)
+    can_manage_products = models.BooleanField(default=False)
+    can_manage_pricing = models.BooleanField(default=False)
+    can_manage_quotes = models.BooleanField(default=True)
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = _("shop membership")
+        verbose_name_plural = _("shop memberships")
+        constraints = [
+            models.UniqueConstraint(
+                fields=["shop", "user"],
+                name="unique_shop_membership",
+            )
+        ]
+
+    def __str__(self):
+        return f"{self.user_id} @ {self.shop_id} ({self.role})"
+
+
 class OpeningHours(models.Model):
     """
     Per-weekday opening hours. 1=Monday .. 7=Sunday (ISO).

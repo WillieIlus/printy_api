@@ -22,6 +22,19 @@ class ChargeUnit(models.TextChoices):
     FLAT = "FLAT", "Flat"
 
 
+class FinishingBillingBasis(models.TextChoices):
+    PER_SHEET = "per_sheet", "Per Sheet"
+    PER_PIECE = "per_piece", "Per Piece"
+    FLAT_PER_JOB = "flat_per_job", "Flat Per Job"
+    FLAT_PER_GROUP = "flat_per_group", "Flat Per Group"
+    FLAT_PER_LINE = "flat_per_line", "Flat Per Line"
+
+
+class FinishingSideMode(models.TextChoices):
+    IGNORE_SIDES = "ignore_sides", "Ignore Sides"
+    PER_SELECTED_SIDE = "per_selected_side", "Per Selected Side"
+
+
 class FinishingSides(models.TextChoices):
     """Whether finishing applies to one side or both sides."""
 

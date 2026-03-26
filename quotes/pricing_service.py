@@ -23,6 +23,7 @@ from catalog.imposition import (
 )
 from pricing.choices import ChargeUnit, Sides
 from pricing.models import PrintingRate
+from services.pricing.engine import build_sheet_pricing
 
 
 # ---------------------------------------------------------------------------
@@ -273,47 +274,43 @@ def _compute_sheet_pricing(item, product, quantity, sides_count, result: Pricing
     paper = item.paper
     result.paper_label = f"{paper.sheet_size} {paper.gsm}gsm {paper.get_paper_type_display()}"
 
-    imp = compute_imposition(product, paper)
-    result.copies_per_sheet = imp["copies_per_sheet"]
-    result.sheets_needed = compute_sheets_needed(quantity, result.copies_per_sheet)
-
-    paper_cost = paper.selling_price * result.sheets_needed
-    result.paper_cost = str(paper_cost)
-
-    print_cost = Decimal("0")
-    if item.machine_id and item.sides and item.color_mode:
-        print_cost = compute_print_cost(item.machine, paper, result.sheets_needed, item.sides, item.color_mode)
-        result.machine_label = item.machine.name if item.machine else ""
-    else:
+    if not item.machine_id or not item.sides or not item.color_mode:
         if not item.machine_id:
             result.missing_fields.append("machine")
         if not item.sides:
             result.missing_fields.append("sides")
         if not item.color_mode:
             result.missing_fields.append("color_mode")
-    result.print_cost = str(print_cost)
+            result.reason = f"Missing: {', '.join(result.missing_fields)}"
+        return result
 
-    sheet_area = Decimal("0")
-    if paper.width_mm and paper.height_mm:
-        sheet_area = (Decimal(paper.width_mm) / 1000) * (Decimal(paper.height_mm) / 1000)
-    area_sqm = sheet_area * result.sheets_needed
-
-    finishing_total, finishing_lines = compute_finishings_cost(
-        item.finishings, quantity, area_sqm, sides_count, result.sheets_needed
+    pricing = build_sheet_pricing(
+        product=product,
+        quantity=quantity,
+        paper=paper,
+        machine=item.machine,
+        color_mode=item.color_mode,
+        sides=item.sides,
+        finishings=[
+            {
+                "rule": qif.finishing_rate,
+                "selected_side": getattr(qif, "selected_side", "both"),
+            }
+            for qif in item.finishings.select_related("finishing_rate").all()
+        ],
     )
-    result.finishing_total = str(finishing_total)
-    result.finishing_lines = [asdict(fl) for fl in finishing_lines]
 
-    services_total = _compute_services_total(item)
-    result.services_total = str(services_total)
-
-    line_total = paper_cost + print_cost + finishing_total + services_total
-    result.line_total = str(line_total)
-    result.unit_price = str(line_total / quantity) if quantity > 0 else "0"
-    result.can_calculate = len(result.missing_fields) == 0
-    if result.missing_fields:
-        result.reason = f"Missing: {', '.join(result.missing_fields)}"
-    result.area_m2 = str(area_sqm)
+    result.copies_per_sheet = pricing["copies_per_sheet"]
+    result.sheets_needed = pricing["good_sheets"]
+    result.paper_cost = pricing["totals"]["paper_cost"]
+    result.print_cost = pricing["totals"]["print_cost"]
+    result.finishing_total = pricing["totals"]["finishing_total"]
+    result.line_total = pricing["totals"]["grand_total"]
+    result.unit_price = pricing["totals"]["unit_price"]
+    result.paper_label = pricing["paper"]["label"]
+    result.machine_label = pricing["printing"]["machine_name"]
+    result.finishing_lines = pricing["finishings"]
+    result.can_calculate = True
     return result
 
 

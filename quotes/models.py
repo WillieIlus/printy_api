@@ -243,6 +243,28 @@ class QuoteRequest(TimeStampedModel):
         verbose_name=_("quote draft file"),
         help_text=_("Optional company-level grouping for active quote drafts."),
     )
+    request_reference = models.CharField(
+        max_length=50,
+        blank=True,
+        default="",
+        verbose_name=_("request reference"),
+        help_text=_("Stable reference for customer-facing quote requests."),
+    )
+    source_draft = models.ForeignKey(
+        "QuoteDraft",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="generated_requests",
+        verbose_name=_("source draft"),
+        help_text=_("Draft that generated this request, if any."),
+    )
+    request_snapshot = models.JSONField(
+        null=True,
+        blank=True,
+        verbose_name=_("request snapshot"),
+        help_text=_("Frozen request payload used when the customer submitted the request."),
+    )
 
     class Meta:
         ordering = ["-created_at"]
@@ -270,15 +292,21 @@ class ShopQuote(TimeStampedModel):
     Lifecycle: sent → accepted | declined | expired | revised.
     """
 
+    PENDING = "pending"
+    MODIFIED = "modified"
     SENT = "sent"
     REVISED = "revised"
     ACCEPTED = "accepted"
+    REJECTED = "rejected"
     DECLINED = "declined"
     EXPIRED = "expired"
     STATUS_CHOICES = [
+        (PENDING, "Pending"),
+        (MODIFIED, "Modified"),
         (SENT, "Sent"),
         (REVISED, "Revised"),
         (ACCEPTED, "Accepted"),
+        (REJECTED, "Rejected"),
         (DECLINED, "Declined"),
         (EXPIRED, "Expired"),
     ]
@@ -309,7 +337,7 @@ class ShopQuote(TimeStampedModel):
     status = models.CharField(
         max_length=20,
         choices=STATUS_CHOICES,
-        default=SENT,
+        default=PENDING,
         verbose_name=_("status"),
         help_text=_("Shop offer lifecycle: sent → accepted/declined/expired/revised."),
     )
@@ -355,6 +383,25 @@ class ShopQuote(TimeStampedModel):
         default=1,
         verbose_name=_("revision number"),
         help_text=_("Revision count for this quote request (1 = first, 2 = first revision, etc.)."),
+    )
+    quote_reference = models.CharField(
+        max_length=50,
+        blank=True,
+        default="",
+        verbose_name=_("quote reference"),
+        help_text=_("Stable shop response reference."),
+    )
+    response_snapshot = models.JSONField(
+        null=True,
+        blank=True,
+        verbose_name=_("response snapshot"),
+        help_text=_("Frozen response payload for PDF/share rendering."),
+    )
+    revised_pricing_snapshot = models.JSONField(
+        null=True,
+        blank=True,
+        verbose_name=_("revised pricing snapshot"),
+        help_text=_("Frozen revised pricing payload for this response."),
     )
 
     class Meta:
@@ -635,6 +682,17 @@ class QuoteItemFinishing(TimeStampedModel):
         verbose_name=_("apply to sides"),
         help_text=_("Single-sided, double-sided, or both (uses print sides)."),
     )
+    selected_side = models.CharField(
+        max_length=10,
+        choices=[
+            ("front", "Front"),
+            ("back", "Back"),
+            ("both", "Both"),
+        ],
+        default="both",
+        verbose_name=_("selected side"),
+        help_text=_("Explicit selected finishing side for preview and pricing."),
+    )
 
     class Meta:
         verbose_name = _("quote item finishing")
@@ -648,6 +706,50 @@ class QuoteItemFinishing(TimeStampedModel):
 
     def __str__(self):
         return f"{self.quote_item} - {self.finishing_rate.name}"
+
+
+class QuoteDraft(TimeStampedModel):
+    """Saved calculator draft owned by a client before shop requests are sent."""
+
+    class Status(models.TextChoices):
+        DRAFT = "draft", "Draft"
+        SENT = "sent", "Sent"
+        ARCHIVED = "archived", "Archived"
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="quote_drafts_v2",
+    )
+    shop = models.ForeignKey(
+        Shop,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="quote_drafts_v2",
+    )
+    selected_product = models.ForeignKey(
+        "catalog.Product",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="saved_quote_drafts",
+    )
+    title = models.CharField(max_length=255, blank=True, default="")
+    status = models.CharField(max_length=20, choices=Status.choices, default=Status.DRAFT)
+    draft_reference = models.CharField(max_length=50, blank=True, default="")
+    custom_product_snapshot = models.JSONField(null=True, blank=True)
+    calculator_inputs_snapshot = models.JSONField()
+    pricing_snapshot = models.JSONField(null=True, blank=True)
+    request_details_snapshot = models.JSONField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["-updated_at", "-created_at"]
+        verbose_name = _("quote draft")
+        verbose_name_plural = _("quote drafts")
+
+    def __str__(self):
+        return self.title or self.draft_reference or f"Draft #{self.pk}"
 
 
 class QuoteItemComponent(TimeStampedModel):

@@ -4,7 +4,7 @@ API URL configuration with DRF routers.
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 
-from . import quote_views, views
+from . import quote_views, views, workflow_views
 from .analytics_views import AnalyticsEventIngestView
 from .admin_views import (
     AnalyticsDashboardSummaryView,
@@ -68,6 +68,14 @@ notifications_router = DefaultRouter()
 notifications_router.register(r"", NotificationViewSet, basename="notification")
 
 urlpatterns = [
+    path("setup-status/", workflow_views.SetupStatusCompatView.as_view(), name="setup-status-compat"),
+    path("shops/<slug:shop_slug>/setup-status/", workflow_views.ShopSetupStatusCompatView.as_view(), name="shop-setup-status-compat"),
+    path("calculator/preview/", workflow_views.CalculatorPreviewView.as_view(), name="calculator-preview"),
+    path("calculator/drafts/", workflow_views.QuoteDraftListCreateView.as_view(), name="calculator-drafts"),
+    path("calculator/drafts/<int:pk>/", workflow_views.QuoteDraftDetailView.as_view(), name="calculator-draft-detail"),
+    path("calculator/drafts/<int:pk>/send/", workflow_views.QuoteDraftSendView.as_view(), name="calculator-draft-send"),
+    path("quote-requests/<int:request_id>/responses/", workflow_views.QuoteResponseCreateView.as_view(), name="quote-request-response-create"),
+    path("dashboard/shop-home/", workflow_views.ShopHomeDashboardView.as_view(), name="dashboard-shop-home"),
     path("analytics/events/", AnalyticsEventIngestView.as_view(), name="analytics-events"),
     path("admin/analytics/summary/", AnalyticsDashboardSummaryView.as_view(), name="admin-analytics-summary"),
     path("admin/analytics/timeseries/", AnalyticsTimeSeriesView.as_view(), name="admin-analytics-timeseries"),

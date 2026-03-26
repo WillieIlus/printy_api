@@ -12,10 +12,10 @@ logger = logging.getLogger(__name__)
 
 from accounts.models import User, UserProfile, UserSocialLink
 from accounts.serializers import UserSocialLinkSerializer
-from catalog.choices import PricingMode
-from catalog.models import Product, ProductFinishingOption, ProductImage
+from catalog.choices import PricingMode, ProductStatus
+from catalog.models import Product, ProductCategory, ProductFinishingOption, ProductImage
 from inventory.models import Machine, Paper, ProductionPaperSize
-from pricing.choices import ColorMode, Sides
+from pricing.choices import ChargeUnit, ColorMode, FinishingBillingBasis, FinishingSideMode, FinishingSides, Sides
 from pricing.models import FinishingCategory, FinishingRate, Material, PrintingRate, VolumeDiscount
 from quotes.choices import QuoteStatus
 from quotes.models import CustomerInquiry, QuoteItem, QuoteItemFinishing, QuoteRequest
@@ -37,6 +37,26 @@ from .quote_serializers import (
 )
 
 from .validators import validate_shop_consistency
+
+
+def _malformed_select_message(field_name: str) -> str:
+    return f"{field_name} must be sent as a primitive value, not an object or array."
+
+
+class StrictChoiceField(serializers.ChoiceField):
+    def to_internal_value(self, data):
+        if isinstance(data, (dict, list)):
+            raise serializers.ValidationError(_malformed_select_message(self.field_name))
+        return super().to_internal_value(data)
+
+
+class StrictPrimaryKeyRelatedField(serializers.PrimaryKeyRelatedField):
+    def to_internal_value(self, data):
+        if isinstance(data, (dict, list)):
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug("Malformed select payload for %s: %r", self.field_name, data)
+            raise serializers.ValidationError(_malformed_select_message(self.field_name))
+        return super().to_internal_value(data)
 
 
 def get_shop_status(shop):
@@ -404,9 +424,12 @@ class CatalogProductWithShopSerializer(CatalogProductSerializer):
 class QuoteItemFinishingWriteSerializer(serializers.ModelSerializer):
     """Write serializer for quote item finishing (validates shop consistency)."""
 
+    finishing_rate = StrictPrimaryKeyRelatedField(queryset=FinishingRate.objects.all())
+    selected_side = StrictChoiceField(choices=["front", "back", "both"], required=False)
+
     class Meta:
         model = QuoteItemFinishing
-        fields = ["finishing_rate", "coverage_qty", "price_override", "apply_to_sides"]
+        fields = ["finishing_rate", "coverage_qty", "price_override", "apply_to_sides", "selected_side"]
 
     def validate_finishing_rate(self, value):
         quote_item = self.context.get("quote_item")
@@ -880,19 +903,30 @@ class FinishingRateSerializer(serializers.ModelSerializer):
     """CRUD for shop finishing rates."""
 
     category_detail = FinishingCategorySerializer(source="category", read_only=True)
+    category = StrictPrimaryKeyRelatedField(queryset=FinishingCategory.objects.all(), required=False, allow_null=True)
+    charge_unit = StrictChoiceField(choices=ChargeUnit.choices, required=False)
+    billing_basis = StrictChoiceField(choices=FinishingBillingBasis.choices, required=False)
+    side_mode = StrictChoiceField(choices=FinishingSideMode.choices, required=False)
 
     class Meta:
         model = FinishingRate
         fields = [
             "id",
             "name",
+            "slug",
             "category",
             "category_detail",
             "charge_unit",
+            "billing_basis",
+            "side_mode",
             "price",
             "double_side_price",
             "setup_fee",
             "min_qty",
+            "minimum_charge",
+            "applies_to_product_types",
+            "display_unit_label",
+            "help_text",
             "is_active",
         ]
 
@@ -944,9 +978,12 @@ class ProductImageUploadSerializer(serializers.ModelSerializer):
 class ProductFinishingOptionWriteSerializer(serializers.ModelSerializer):
     """Write serializer for product finishing options."""
 
+    finishing_rate = StrictPrimaryKeyRelatedField(queryset=FinishingRate.objects.all())
+    apply_to_sides = StrictChoiceField(choices=FinishingSides.choices, required=False)
+
     class Meta:
         model = ProductFinishingOption
-        fields = ["finishing_rate", "is_default", "price_adjustment"]
+        fields = ["finishing_rate", "is_default", "price_adjustment", "apply_to_sides"]
 
     def validate(self, attrs):
         product = self.context.get("product")
@@ -966,6 +1003,19 @@ class ProductWriteSerializer(serializers.ModelSerializer):
     """
 
     finishing_options = ProductFinishingOptionWriteSerializer(many=True, required=False)
+    category = StrictPrimaryKeyRelatedField(
+        queryset=ProductCategory.objects.all(),
+        required=False,
+        allow_null=True,
+    )
+    default_machine = StrictPrimaryKeyRelatedField(
+        queryset=Machine.objects.all(),
+        required=False,
+        allow_null=True,
+    )
+    pricing_mode = StrictChoiceField(choices=PricingMode.choices)
+    default_sides = StrictChoiceField(choices=Sides.choices, required=False)
+    status = StrictChoiceField(choices=ProductStatus.choices, required=False)
 
     class Meta:
         model = Product
@@ -1017,19 +1067,27 @@ class ProductWriteSerializer(serializers.ModelSerializer):
         }
 
     def validate_status(self, value):
-        from setup.services import get_product_publish_check
-        if value == "PUBLISHED":
-            shop = self.context.get("shop")
-            instance = self.instance
-            product_for_check = instance or Product(shop=shop)
-            if shop:
-                product_for_check.shop = shop
-            check = get_product_publish_check(product_for_check)
-            if not check["can_publish"]:
-                raise serializers.ValidationError(
-                    "Cannot publish: " + " ".join(check["block_reasons"])
-                )
         return value
+
+    def validate_allowed_sheet_sizes(self, value):
+        if value is None:
+            return value
+        if not isinstance(value, list):
+            raise serializers.ValidationError("allowed_sheet_sizes must be an array of sheet size codes.")
+        invalid = [item for item in value if not isinstance(item, str) or not item.strip()]
+        if invalid:
+            raise serializers.ValidationError("Each allowed_sheet_sizes entry must be a non-empty string sheet size code.")
+        return value
+
+    def validate(self, attrs):
+        shop = self.context.get("shop")
+        default_machine = attrs.get("default_machine") or getattr(self.instance, "default_machine", None)
+        if default_machine and shop and default_machine.shop_id != shop.id:
+            raise serializers.ValidationError({"default_machine": "default_machine must belong to the same shop."})
+        category = attrs.get("category") or getattr(self.instance, "category", None)
+        if category and category.shop_id and shop and category.shop_id != shop.id:
+            raise serializers.ValidationError({"category": "category must be global or belong to the same shop."})
+        return super().validate(attrs)
 
     def create(self, validated_data):
         finishings_data = validated_data.pop("finishing_options", [])
@@ -1043,12 +1101,7 @@ class ProductWriteSerializer(serializers.ModelSerializer):
         validated_data.setdefault("default_finished_height_mm", 54)
         if validated_data.get("min_quantity", 1) < 1:
             validated_data["min_quantity"] = 1
-        # Force DRAFT when shop pricing not ready
-        from setup.services import pricing_exists
-        if not pricing_exists(shop):
-            validated_data["status"] = "DRAFT"
-        else:
-            validated_data.setdefault("status", "DRAFT")
+        validated_data.setdefault("status", "DRAFT")
         product = Product.objects.create(shop=shop, **validated_data)
         for fd in finishings_data:
             ProductFinishingOption.objects.create(product=product, **fd)

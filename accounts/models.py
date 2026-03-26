@@ -37,8 +37,11 @@ class User(AbstractUser, TimeStampedModel):
     """
 
     class Role(models.TextChoices):
-        CUSTOMER = "CUSTOMER", "Customer"
-        PRINTER = "PRINTER", "Printer"
+        CLIENT = "client", "Client"
+        SHOP_OWNER = "shop_owner", "Shop Owner"
+        STAFF = "staff", "Staff"
+        CUSTOMER_LEGACY = "CUSTOMER", "Customer (Legacy)"
+        PRINTER_LEGACY = "PRINTER", "Printer (Legacy)"
 
     username = models.CharField(max_length=150, blank=True, null=True)
     email = models.EmailField(unique=True)
@@ -46,7 +49,7 @@ class User(AbstractUser, TimeStampedModel):
     role = models.CharField(
         max_length=20,
         choices=Role.choices,
-        default=Role.CUSTOMER,
+        default=Role.CLIENT,
         help_text="Primary account role used by the dashboard UI.",
     )
     preferred_language = models.CharField(
@@ -67,6 +70,18 @@ class User(AbstractUser, TimeStampedModel):
 
     def __str__(self):
         return self.email
+
+    @property
+    def is_client_role(self) -> bool:
+        return self.role in {self.Role.CLIENT, self.Role.CUSTOMER_LEGACY}
+
+    @property
+    def is_shop_owner_role(self) -> bool:
+        return self.role in {self.Role.SHOP_OWNER, self.Role.PRINTER_LEGACY}
+
+    @property
+    def is_staff_role(self) -> bool:
+        return self.role == self.Role.STAFF
 
 
 class UserProfile(TimeStampedModel):

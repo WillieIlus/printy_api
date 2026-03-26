@@ -18,8 +18,11 @@ class QuoteStatus(models.TextChoices):
 class ShopQuoteStatus(models.TextChoices):
     """ShopQuote status (shop offer lifecycle)."""
 
+    PENDING = "pending", "Pending"
+    MODIFIED = "modified", "Modified"
     SENT = "sent", "Sent"
     REVISED = "revised", "Revised"
     ACCEPTED = "accepted", "Accepted"
+    REJECTED = "rejected", "Rejected"
     DECLINED = "declined", "Declined"
     EXPIRED = "expired", "Expired"

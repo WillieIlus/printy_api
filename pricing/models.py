@@ -7,7 +7,15 @@ from inventory.choices import SheetSize
 from inventory.models import Machine, ProductionPaperSize
 from shops.models import Shop
 
-from .choices import ChargeUnit, ColorMode, ServiceCode, ServicePricingType, Sides
+from .choices import (
+    ChargeUnit,
+    ColorMode,
+    FinishingBillingBasis,
+    FinishingSideMode,
+    ServiceCode,
+    ServicePricingType,
+    Sides,
+)
 
 
 class FinishingCategory(TimeStampedModel):
@@ -180,6 +188,13 @@ class FinishingRate(TimeStampedModel):
         verbose_name=_("name"),
         help_text=_("Display name of the finishing service."),
     )
+    slug = models.SlugField(
+        max_length=255,
+        blank=True,
+        default="",
+        verbose_name=_("slug"),
+        help_text=_("Stable frontend/backend key for this finishing rule."),
+    )
     thickness_microns = models.PositiveIntegerField(
         null=True,
         blank=True,
@@ -197,6 +212,20 @@ class FinishingRate(TimeStampedModel):
         default=ChargeUnit.PER_PIECE,
         verbose_name=_("charge unit"),
         help_text=_("How this finishing is charged (per piece, per side, per sqm, flat)."),
+    )
+    billing_basis = models.CharField(
+        max_length=30,
+        choices=FinishingBillingBasis.choices,
+        default=FinishingBillingBasis.PER_PIECE,
+        verbose_name=_("billing basis"),
+        help_text=_("Canonical billing basis used by the pricing engine."),
+    )
+    side_mode = models.CharField(
+        max_length=30,
+        choices=FinishingSideMode.choices,
+        default=FinishingSideMode.IGNORE_SIDES,
+        verbose_name=_("side mode"),
+        help_text=_("Whether rate multiplies by selected finishing sides."),
     )
     price = models.DecimalField(
         max_digits=12,
@@ -226,6 +255,33 @@ class FinishingRate(TimeStampedModel):
         verbose_name=_("min quantity"),
         help_text=_("Minimum quantity for this rate."),
     )
+    minimum_charge = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        null=True,
+        blank=True,
+        verbose_name=_("minimum charge"),
+        help_text=_("Optional minimum charge after rule calculation."),
+    )
+    applies_to_product_types = models.JSONField(
+        null=True,
+        blank=True,
+        verbose_name=_("applies to product types"),
+        help_text=_("Optional list of product/category/pricing mode keys."),
+    )
+    display_unit_label = models.CharField(
+        max_length=100,
+        blank=True,
+        default="",
+        verbose_name=_("display unit label"),
+        help_text=_("Optional UI label like 'per sheet per side'."),
+    )
+    help_text = models.TextField(
+        blank=True,
+        default="",
+        verbose_name=_("help text"),
+        help_text=_("Optional frontend-facing pricing explanation."),
+    )
     is_active = models.BooleanField(
         default=True,
         verbose_name=_("is active"),
@@ -239,6 +295,31 @@ class FinishingRate(TimeStampedModel):
 
     def __str__(self):
         return f"{self.name} ({self.shop.name})"
+
+    def save(self, *args, **kwargs):
+        if not self.slug:
+            self.slug = slugify(self.name)
+        if not self.billing_basis:
+            self.billing_basis = {
+                ChargeUnit.PER_PIECE: FinishingBillingBasis.PER_PIECE,
+                ChargeUnit.PER_SHEET: FinishingBillingBasis.PER_SHEET,
+                ChargeUnit.PER_SIDE_PER_SHEET: FinishingBillingBasis.PER_SHEET,
+                ChargeUnit.FLAT: FinishingBillingBasis.FLAT_PER_JOB,
+            }.get(self.charge_unit, FinishingBillingBasis.PER_PIECE)
+        if not self.side_mode:
+            self.side_mode = (
+                FinishingSideMode.PER_SELECTED_SIDE
+                if self.charge_unit == ChargeUnit.PER_SIDE_PER_SHEET
+                else FinishingSideMode.IGNORE_SIDES
+            )
+        if not self.display_unit_label:
+            if self.billing_basis == FinishingBillingBasis.PER_SHEET and self.side_mode == FinishingSideMode.PER_SELECTED_SIDE:
+                self.display_unit_label = "per sheet per side"
+            elif self.billing_basis == FinishingBillingBasis.PER_SHEET:
+                self.display_unit_label = "per sheet"
+            elif self.billing_basis == FinishingBillingBasis.PER_PIECE:
+                self.display_unit_label = "per piece"
+        super().save(*args, **kwargs)
 
 
 class Material(TimeStampedModel):
