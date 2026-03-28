@@ -9,10 +9,12 @@ from accounts.models import User
 from catalog.models import Product
 from inventory.choices import SheetSize
 from inventory.models import Machine, Paper
+from pricing.choices import ChargeUnit, FinishingBillingBasis, FinishingSideMode
 from pricing.models import FinishingRate, PrintingRate
 from shops.models import Shop
 
 from .quote_calculator import calculate_quote_item
+from .pricing.finishings import compute_finishing_line
 
 
 class QuoteCalculatorTestCase(TestCase):
@@ -165,6 +167,96 @@ class QuoteCalculatorTestCase(TestCase):
         self.assertTrue(result.can_calculate)
         fc = Decimal(result.costs["finishing_cost"])
         self.assertGreater(fc, 0)
+
+    def test_lamination_per_sheet_per_side_uses_good_sheets_rate_side_count_formula(self):
+        finishing = FinishingRate.objects.create(
+            shop=self.shop,
+            name="Lamination",
+            charge_unit=ChargeUnit.PER_SIDE_PER_SHEET,
+            billing_basis=FinishingBillingBasis.PER_SHEET,
+            side_mode=FinishingSideMode.PER_SELECTED_SIDE,
+            price=Decimal("12.00"),
+            double_side_price=Decimal("20.00"),
+            is_active=True,
+        )
+
+        line = compute_finishing_line(
+            finishing,
+            quantity=100,
+            good_sheets=10,
+            selected_side="both",
+        )
+
+        self.assertEqual(Decimal(line.total), Decimal("240.00"))
+        self.assertEqual(line.rate, "12.00")
+        self.assertEqual(line.good_sheets, 10)
+        self.assertEqual(line.side_count, 2)
+        self.assertEqual(line.formula, "good_sheets x rate x side_count")
+        self.assertEqual(line.calculation_basis, "10 x 12.00 x 2")
+        self.assertIn("lamination total = 10 good_sheets x 12.00 rate x 2 side_count", line.explanation)
+
+    def test_round_corner_per_piece_ignores_side_selection(self):
+        finishing = FinishingRate.objects.create(
+            shop=self.shop,
+            name="Round Corner",
+            charge_unit=ChargeUnit.PER_PIECE,
+            billing_basis=FinishingBillingBasis.PER_PIECE,
+            side_mode=FinishingSideMode.IGNORE_SIDES,
+            price=Decimal("2.50"),
+            is_active=True,
+        )
+
+        line = compute_finishing_line(
+            finishing,
+            quantity=100,
+            good_sheets=10,
+            selected_side="both",
+        )
+
+        self.assertEqual(Decimal(line.total), Decimal("250.00"))
+        self.assertEqual(line.units, "100")
+
+    def test_lamination_front_only_counts_as_one_side(self):
+        finishing = FinishingRate.objects.create(
+            shop=self.shop,
+            name="Gloss Lamination",
+            charge_unit=ChargeUnit.PER_SIDE_PER_SHEET,
+            billing_basis=FinishingBillingBasis.PER_SHEET,
+            side_mode=FinishingSideMode.PER_SELECTED_SIDE,
+            price=Decimal("12.00"),
+            is_active=True,
+        )
+
+        line = compute_finishing_line(
+            finishing,
+            quantity=100,
+            good_sheets=10,
+            selected_side="front",
+        )
+
+        self.assertEqual(Decimal(line.total), Decimal("120.00"))
+        self.assertEqual(line.side_count, 1)
+
+    def test_cutting_flat_per_line_uses_line_quantity(self):
+        finishing = FinishingRate.objects.create(
+            shop=self.shop,
+            name="Cutting",
+            charge_unit=ChargeUnit.FLAT,
+            billing_basis=FinishingBillingBasis.FLAT_PER_LINE,
+            side_mode=FinishingSideMode.IGNORE_SIDES,
+            price=Decimal("50.00"),
+            is_active=True,
+        )
+
+        line = compute_finishing_line(
+            finishing,
+            quantity=100,
+            good_sheets=10,
+            line_quantity=3,
+        )
+
+        self.assertEqual(Decimal(line.total), Decimal("150.00"))
+        self.assertEqual(line.units, "3")
 
     def test_product_not_found(self):
         """Returns can_calculate=False when product not found."""

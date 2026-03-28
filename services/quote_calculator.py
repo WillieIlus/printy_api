@@ -18,6 +18,7 @@ from inventory.choices import SHEET_SIZE_DIMENSIONS, SheetSize
 from inventory.models import Machine, Paper
 from pricing.choices import ChargeUnit, Sides
 from pricing.models import FinishingRate, PrintingRate
+from services.pricing.engine import calculate_sheet_pricing
 
 
 # ---------------------------------------------------------------------------
@@ -232,6 +233,27 @@ def calculate_quote_item(
     copies_per_sheet, orientation = _compute_copies_per_sheet(w, h, sheet_size_used, bleed)
     sheets_required = max(1, ceil(quantity / copies_per_sheet))
 
+    machine = None
+    if machine_id and sides and color_mode:
+        machine = Machine.objects.filter(pk=machine_id, shop_id=shop_id, is_active=True).first()
+
+    finishing_ids = finishing_ids or []
+    finishings = []
+    if finishing_ids:
+        for rule in FinishingRate.objects.filter(shop_id=shop_id, pk__in=finishing_ids, is_active=True):
+            finishings.append({"rule": rule, "selected_side": "both"})
+
+    pricing = calculate_sheet_pricing(
+        product=product,
+        quantity=quantity,
+        paper=paper,
+        machine=machine,
+        color_mode=color_mode,
+        sides=sides,
+        finishing_selections=finishings,
+        use_cost_price=True,
+    ).to_dict()
+
     result.sheets_required = sheets_required
     result.imposition = asdict(ImpositionResult(
         per_sheet=copies_per_sheet,
@@ -239,26 +261,9 @@ def calculate_quote_item(
         sheet_size_used=sheet_size_used,
     ))
 
-    # Costs (use buying_price for internal cost)
-    paper_cost = paper.buying_price * sheets_required
-    print_cost = Decimal("0")
-    if machine_id and sides and color_mode:
-        machine = Machine.objects.filter(pk=machine_id, shop_id=shop_id, is_active=True).first()
-        if machine:
-            _, price = PrintingRate.resolve(machine, paper.sheet_size, color_mode, sides)
-            if price is not None:
-                print_cost = price * sheets_required
-
-    sides_count = 2 if sides == Sides.DUPLEX else 1
-    sheet_area = Decimal("0")
-    if paper.width_mm and paper.height_mm:
-        sheet_area = (Decimal(paper.width_mm) / 1000) * (Decimal(paper.height_mm) / 1000)
-    area_sqm = sheet_area * sheets_required
-
-    finishing_ids = finishing_ids or []
-    finishing_cost, _ = _compute_finishing_cost(
-        finishing_ids, shop_id, quantity, area_sqm, sides_count, sheets_required
-    )
+    paper_cost = Decimal(pricing["totals"]["paper_cost"])
+    print_cost = Decimal(pricing["totals"]["print_cost"])
+    finishing_cost = Decimal(pricing["totals"]["finishing_total"])
 
     base_cost = paper_cost + print_cost + finishing_cost
     overhead_pct = overhead_percent if overhead_percent is not None else DEFAULT_OVERHEAD_PERCENT

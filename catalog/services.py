@@ -17,6 +17,11 @@ from inventory.models import Machine, Paper
 from pricing.choices import ColorMode, Sides
 from pricing.models import Material, PrintingRate
 from quotes.diagnostics import build_product_diagnostics
+from services.pricing.engine import (
+    calculate_large_format_pricing,
+    calculate_sheet_pricing,
+    select_paper_for_pricing,
+)
 
 
 # Lay-person friendly pricing mode labels and explanations
@@ -92,53 +97,15 @@ def select_paper_for_imposition(
     Most economical = lowest total cost for min_quantity (paper + printing per sheet × sheets_needed).
     """
     valid_papers = _get_valid_sheet_papers(product, shop)
-    if not valid_papers:
-        return None
-    if len(valid_papers) == 1:
-        return valid_papers[0]
-
-    # 1) Default paper
-    default = Paper.objects.filter(shop=shop, is_default=True, is_active=True).first()
-    if default and default in valid_papers:
-        return default
-
-    # 2) Most economical (lowest total cost for min_quantity). Prefer papers matching default rate's sheet_size.
-    if not machine:
-        machine = (
-            Machine.objects.filter(shop=shop, is_active=True)
-            .filter(printing_rates__is_default=True, printing_rates__is_active=True)
-            .distinct()
-            .first()
-        ) or Machine.objects.filter(shop=shop, is_active=True).first()
-    sides = sides or (product.default_sides if product else Sides.SIMPLEX) or Sides.SIMPLEX
-    color_mode = color_mode or ColorMode.COLOR
-    min_qty = (product.min_quantity or 1) if product else 1
-
-    default_rate = (
-        PrintingRate.objects.filter(machine=machine, is_default=True, is_active=True).first()
-        if machine else None
+    return select_paper_for_pricing(
+        product=product,
+        shop=shop,
+        valid_papers=valid_papers,
+        machine=machine,
+        sides=sides,
+        color_mode=color_mode,
+        quantity=(product.min_quantity or 1) if product else 1,
     )
-    default_sheet_size = default_rate.sheet_size if default_rate else None
-
-    def total_cost_for_paper(p: Paper) -> tuple:
-        w_mm, h_mm = p.get_dimensions_mm()
-        if not w_mm or not h_mm:
-            return (Decimal("999999"), 1, p.id)
-        cps = product.get_copies_per_sheet(p.sheet_size, w_mm, h_mm)
-        if cps <= 0:
-            return (Decimal("999999"), 1, p.id)
-        rate, print_price = PrintingRate.resolve(machine, p.sheet_size, color_mode, sides)
-        if not rate or print_price is None:
-            return (Decimal("999999"), 1, p.id)
-        sheets = ceil(min_qty / cps)
-        cost_per_sheet = p.selling_price + print_price
-        total = cost_per_sheet * sheets
-        # Tie-breaker: prefer paper matching default rate's sheet_size (0 = match, 1 = no match)
-        matches_default = 0 if (default_sheet_size and p.sheet_size == default_sheet_size) else 1
-        return (total, matches_default, p.id)
-
-    valid_papers.sort(key=total_cost_for_paper)
-    return valid_papers[0]
 
 
 def get_product_starting_price(product: Product) -> dict:
@@ -202,17 +169,6 @@ def get_product_starting_price(product: Product) -> dict:
             return {"price": None, "is_valid": False, "errors": errors, "warnings": warnings, "assumptions": {}}
 
         paper = select_paper_for_imposition(product, shop, machine=machine)
-        w_mm, h_mm = paper.get_dimensions_mm()
-        if not w_mm or not h_mm:
-            errors.append(f"Paper {paper} has no dimensions. Set sheet_size or production_size.")
-            return {"price": None, "is_valid": False, "errors": errors, "warnings": warnings, "assumptions": {}}
-
-        cps = product.get_copies_per_sheet(paper.sheet_size, w_mm, h_mm)
-        if cps <= 0:
-            errors.append("Product dimensions do not fit on sheet.")
-            return {"price": None, "is_valid": False, "errors": errors, "warnings": warnings, "assumptions": {}}
-
-        sheets = ceil(min_qty / cps)
         sides = product.default_sides or Sides.SIMPLEX
         if sides == Sides.DUPLEX and not product.allow_duplex:
             sides = Sides.SIMPLEX
@@ -224,9 +180,15 @@ def get_product_starting_price(product: Product) -> dict:
             errors.append(f"No printing rate for {machine.name} / {paper.sheet_size} / color.")
             return {"price": None, "is_valid": False, "errors": errors, "warnings": warnings, "assumptions": {}}
 
-        paper_cost = paper.selling_price * sheets
-        print_cost = print_price * sheets
-        total = paper_cost + print_cost
+        pricing = calculate_sheet_pricing(
+            product=product,
+            quantity=min_qty,
+            paper=paper,
+            machine=machine,
+            color_mode=ColorMode.COLOR,
+            sides=sides,
+        ).to_dict()
+        total = Decimal(pricing["totals"]["grand_total"])
 
         assumptions = {
             "quantity": min_qty,
@@ -235,8 +197,8 @@ def get_product_starting_price(product: Product) -> dict:
             "paper_id": paper.id,
             "machine_id": machine.id,
             "sides": sides,
-            "sheets_used": sheets,
-            "copies_per_sheet": cps,
+            "sheets_used": pricing["breakdown"]["imposition"]["good_sheets"],
+            "copies_per_sheet": pricing["breakdown"]["imposition"]["copies_per_sheet"],
         }
         return {
             "price": total,
@@ -263,15 +225,21 @@ def get_product_starting_price(product: Product) -> dict:
         errors.append("No active material with selling_price for LARGE_FORMAT.")
         return {"price": None, "is_valid": False, "errors": errors, "warnings": warnings, "assumptions": {}}
 
-    area_sqm = (Decimal(w_mm) / 1000) * (Decimal(h_mm) / 1000) * min_qty
     mat = materials[0]
-    total = mat.selling_price * area_sqm
+    pricing = calculate_large_format_pricing(
+        product=product,
+        quantity=min_qty,
+        material=mat,
+        width_mm=w_mm,
+        height_mm=h_mm,
+    ).to_dict()
+    total = Decimal(pricing["totals"]["grand_total"])
 
     assumptions = {
         "quantity": min_qty,
         "width_mm": w_mm,
         "height_mm": h_mm,
-        "area_sqm": float(area_sqm),
+        "area_sqm": float(Decimal(pricing["breakdown"]["dimensions"]["area_sqm"])),
         "material_id": mat.id,
         "material_type": mat.material_type,
     }
@@ -459,24 +427,25 @@ def compute_product_price_range_est(product: Product) -> dict:
             "suggestions": suggestions,
         }
 
-    # Compute total for min_qty per paper (sheets = ceil(min_qty / copies_per_sheet))
+    # Compute total per paper through the central pricing engine.
     paper_costs = []
     for paper in eligible_papers:
-        w_mm, h_mm = paper.get_dimensions_mm()
-        if not w_mm or not h_mm:
-            continue
-        cps = product.get_copies_per_sheet(paper.sheet_size, w_mm, h_mm)
-        if cps <= 0:
-            continue
-        sheets = ceil(min_qty / cps)
-        unit_price_est = float(paper.selling_price) + float(print_price)
-        total_est = unit_price_est * sheets
+        pricing = calculate_sheet_pricing(
+            product=product,
+            quantity=min_qty,
+            paper=paper,
+            machine=machine,
+            color_mode=color_mode,
+            sides=sides,
+        ).to_dict()
+        total_est = float(pricing["totals"]["grand_total"])
+        unit_price_est = float(pricing["totals"]["unit_price"])
         paper_label = f"{paper.sheet_size} {paper.gsm}gsm {paper.get_paper_type_display()}"
         paper_costs.append({
             "paper": paper,
             "unit_price_est": unit_price_est,
             "total_est": total_est,
-            "sheets": sheets,
+            "sheets": pricing["breakdown"]["imposition"]["good_sheets"],
             "paper_label": paper_label,
         })
 
@@ -655,9 +624,15 @@ def get_product_price_range(product: Product) -> dict:
                             machine, paper.sheet_size, color, sides
                         )
                         if rate and price is not None:
-                            paper_cost = paper.selling_price * sheets
-                            print_cost = price * sheets
-                            total = paper_cost + print_cost
+                            pricing = calculate_sheet_pricing(
+                                product=product,
+                                quantity=min_qty,
+                                paper=paper,
+                                machine=machine,
+                                color_mode=color,
+                                sides=sides,
+                            ).to_dict()
+                            total = Decimal(pricing["totals"]["grand_total"])
                             low_total = min(low_total, total)
                             high_total = max(high_total, total)
                             has_valid_combination = True
@@ -710,9 +685,20 @@ def get_product_price_range(product: Product) -> dict:
                 "missing_fields": missing,
             }
 
-        area_sqm = (Decimal(w_mm) / 1000) * (Decimal(h_mm) / 1000) * min_qty
-        low_total = min(m.selling_price * area_sqm for m in materials)
-        high_total = max(m.selling_price * area_sqm for m in materials)
+        totals = [
+            Decimal(
+                calculate_large_format_pricing(
+                    product=product,
+                    quantity=min_qty,
+                    material=m,
+                    width_mm=w_mm,
+                    height_mm=h_mm,
+                ).to_dict()["totals"]["grand_total"]
+            )
+            for m in materials
+        ]
+        low_total = min(totals)
+        high_total = max(totals)
 
         return {
             "lowest_price": low_total,

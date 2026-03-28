@@ -16,6 +16,10 @@ WEEKDAY_SUNDAY = 7
 class Shop(AutoSlugMixin, models.Model):
     """Print shop - owner is the seller."""
 
+    class VatMode(models.TextChoices):
+        INCLUSIVE = "inclusive", _("Inclusive")
+        EXCLUSIVE = "exclusive", _("Exclusive")
+
     slug_source_field = "name"
 
     name = models.CharField(
@@ -37,6 +41,25 @@ class Shop(AutoSlugMixin, models.Model):
         default="KES",
         verbose_name=_("currency"),
         help_text=_("ISO 4217 currency code (e.g. KES, USD)."),
+    )
+    is_vat_enabled = models.BooleanField(
+        default=False,
+        verbose_name=_("VAT enabled"),
+        help_text=_("Whether VAT should be applied to quote calculations for this shop."),
+    )
+    vat_rate = models.DecimalField(
+        max_digits=5,
+        decimal_places=2,
+        default="16.00",
+        verbose_name=_("VAT rate"),
+        help_text=_("VAT rate percentage applied when VAT is enabled."),
+    )
+    vat_mode = models.CharField(
+        max_length=20,
+        choices=VatMode.choices,
+        default=VatMode.EXCLUSIVE,
+        verbose_name=_("VAT mode"),
+        help_text=_("Whether prices returned by the pricing engine are VAT-inclusive or VAT-exclusive."),
     )
     is_active = models.BooleanField(
         default=True,

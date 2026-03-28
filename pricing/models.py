@@ -1,3 +1,4 @@
+from django.core.exceptions import ValidationError
 from django.db import models
 from django.utils.text import slugify
 from django.utils.translation import gettext_lazy as _
@@ -295,6 +296,60 @@ class FinishingRate(TimeStampedModel):
 
     def __str__(self):
         return f"{self.name} ({self.shop.name})"
+
+    def is_lamination_rule(self) -> bool:
+        category_name = (getattr(self.category, "name", "") or "").strip().lower()
+        name = (self.name or "").strip().lower()
+        slug = (self.slug or "").strip().lower()
+        return bool(
+            self.thickness_microns
+            or "lamination" in category_name
+            or "lamination" in name
+            or "lamination" in slug
+        )
+
+    def clean(self):
+        super().clean()
+
+        errors = {}
+        per_side_sheet_unit = self.charge_unit == ChargeUnit.PER_SIDE_PER_SHEET
+        flat_basis_values = {
+            FinishingBillingBasis.FLAT_PER_JOB,
+            FinishingBillingBasis.FLAT_PER_GROUP,
+            FinishingBillingBasis.FLAT_PER_LINE,
+        }
+
+        if per_side_sheet_unit and self.billing_basis != FinishingBillingBasis.PER_SHEET:
+            errors["billing_basis"] = _("Per-side-per-sheet finishings must use per_sheet billing.")
+
+        if per_side_sheet_unit and self.side_mode != FinishingSideMode.PER_SELECTED_SIDE:
+            errors["side_mode"] = _("Per-side-per-sheet finishings must bill per selected side.")
+
+        if self.billing_basis == FinishingBillingBasis.PER_PIECE and self.side_mode != FinishingSideMode.IGNORE_SIDES:
+            errors["side_mode"] = _("Per-piece finishings must ignore sides.")
+
+        if self.billing_basis in flat_basis_values and self.side_mode != FinishingSideMode.IGNORE_SIDES:
+            errors["side_mode"] = _("Flat finishings must ignore sides.")
+
+        if self.billing_basis in flat_basis_values and self.charge_unit not in {ChargeUnit.FLAT, ChargeUnit.PER_SIDE}:
+            errors["charge_unit"] = _("Flat finishings must use a flat-compatible charge unit.")
+
+        if self.billing_basis == FinishingBillingBasis.PER_SHEET and not per_side_sheet_unit and self.side_mode == FinishingSideMode.PER_SELECTED_SIDE:
+            errors["side_mode"] = _("Per selected side is only valid for per-sheet finishings that bill per side per sheet.")
+
+        if self.double_side_price and self.side_mode != FinishingSideMode.PER_SELECTED_SIDE:
+            errors["double_side_price"] = _("Double-side price is only valid when finishing bills per selected side.")
+
+        if self.is_lamination_rule():
+            if self.charge_unit != ChargeUnit.PER_SIDE_PER_SHEET:
+                errors["charge_unit"] = _("Lamination must use PER_SIDE_PER_SHEET charge_unit.")
+            if self.billing_basis != FinishingBillingBasis.PER_SHEET:
+                errors["billing_basis"] = _("Lamination must use per_sheet billing.")
+            if self.side_mode != FinishingSideMode.PER_SELECTED_SIDE:
+                errors["side_mode"] = _("Lamination must use per_selected_side side_mode.")
+
+        if errors:
+            raise ValidationError(errors)
 
     def save(self, *args, **kwargs):
         if not self.slug:

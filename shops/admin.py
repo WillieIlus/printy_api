@@ -43,7 +43,18 @@ class FinishingRateInline(admin.TabularInline):
     """Formset-like: add/edit finishing options (lamination, cutting, etc.) per shop."""
     model = FinishingRate
     extra = 1
-    fields = ["name", "charge_unit", "price", "double_side_price", "setup_fee", "min_qty", "is_active"]
+    fields = [
+        "name",
+        "charge_unit",
+        "billing_basis",
+        "side_mode",
+        "price",
+        "double_side_price",
+        "setup_fee",
+        "min_qty",
+        "minimum_charge",
+        "is_active",
+    ]
     show_change_link = True
     verbose_name_plural = "Finishing rates"
 

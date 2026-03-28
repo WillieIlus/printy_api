@@ -8,9 +8,35 @@ from .models import (
 
 
 class ShopSerializer(serializers.ModelSerializer):
+    def validate_vat_rate(self, value):
+        if value is None:
+            return 16
+        if value < 0:
+            raise serializers.ValidationError("VAT rate must be 0 or greater.")
+        if value > 100:
+            raise serializers.ValidationError("VAT rate cannot exceed 100.")
+        return value
+
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+        is_vat_enabled = attrs.get("is_vat_enabled", getattr(self.instance, "is_vat_enabled", False))
+        vat_mode = attrs.get("vat_mode", getattr(self.instance, "vat_mode", None))
+        if is_vat_enabled and not vat_mode:
+            raise serializers.ValidationError({"vat_mode": "VAT mode is required when VAT is enabled."})
+        return attrs
+
     class Meta:
         model = Shop
-        fields = ['id', 'name', 'owner', 'created_at', 'updated_at']
+        fields = [
+            'id',
+            'name',
+            'owner',
+            'is_vat_enabled',
+            'vat_rate',
+            'vat_mode',
+            'created_at',
+            'updated_at',
+        ]
         read_only_fields = ['owner', 'created_at', 'updated_at']
 
 

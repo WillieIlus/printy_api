@@ -15,6 +15,7 @@ from django.utils.translation import gettext_lazy as _
 from common.models import TimeStampedModel
 from core.querysets import QuoteRequestQuerySet, QuoteItemQuerySet
 from shops.models import Shop
+from .choices import QuoteDraftStatus, QuoteStatus, ShopQuoteStatus
 
 
 class CustomerInquiry(TimeStampedModel):
@@ -284,6 +285,9 @@ class QuoteRequest(TimeStampedModel):
             status__in=[ShopQuote.SENT, ShopQuote.ACCEPTED]
         ).order_by("-sent_at", "-created_at").first()
 
+    def get_latest_response(self):
+        return self.shop_quotes.order_by("-created_at", "-id").first()
+
 
 class ShopQuote(TimeStampedModel):
     """
@@ -415,6 +419,9 @@ class ShopQuote(TimeStampedModel):
 
     def __str__(self):
         return f"Quote #{self.id} for Request #{self.quote_request_id} ({self.status})"
+
+    def is_terminal_status(self) -> bool:
+        return self.status in {ShopQuoteStatus.ACCEPTED, ShopQuoteStatus.REJECTED}
 
 
 class QuoteItem(TimeStampedModel):
@@ -712,9 +719,9 @@ class QuoteDraft(TimeStampedModel):
     """Saved calculator draft owned by a client before shop requests are sent."""
 
     class Status(models.TextChoices):
-        DRAFT = "draft", "Draft"
-        SENT = "sent", "Sent"
-        ARCHIVED = "archived", "Archived"
+        DRAFT = QuoteDraftStatus.DRAFT, "Draft"
+        SENT = QuoteDraftStatus.SENT, "Sent"
+        ARCHIVED = QuoteDraftStatus.ARCHIVED, "Archived"
 
     user = models.ForeignKey(
         settings.AUTH_USER_MODEL,
@@ -750,6 +757,9 @@ class QuoteDraft(TimeStampedModel):
 
     def __str__(self):
         return self.title or self.draft_reference or f"Draft #{self.pk}"
+
+    def can_send(self) -> bool:
+        return self.status == QuoteDraftStatus.DRAFT
 
 
 class QuoteItemComponent(TimeStampedModel):

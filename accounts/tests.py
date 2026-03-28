@@ -2,6 +2,7 @@ from django.test import TestCase
 from rest_framework.test import APIClient
 
 from .models import User, UserProfile
+from shops.models import Shop, ShopMembership
 
 
 class AccountProfileAPITestCase(TestCase):
@@ -20,7 +21,7 @@ class AccountProfileAPITestCase(TestCase):
             {
                 "first_name": "Amina",
                 "last_name": "Otieno",
-                "role": "PRINTER",
+                "role": "shop_owner",
                 "preferred_language": "sw",
                 "phone": "+254700000000",
                 "bio": "Print production lead",
@@ -44,7 +45,7 @@ class AccountProfileAPITestCase(TestCase):
         self.assertEqual(self.user.first_name, "Amina")
         self.assertEqual(self.user.last_name, "Otieno")
         self.assertEqual(self.user.name, "Amina Otieno")
-        self.assertEqual(self.user.role, "PRINTER")
+        self.assertEqual(self.user.role, "shop_owner")
         self.assertEqual(self.user.preferred_language, "sw")
         self.assertEqual(profile.phone, "+254700000000")
         self.assertEqual(profile.city, "Westlands")
@@ -89,3 +90,29 @@ class AccountProfileAPITestCase(TestCase):
         delete_response = self.client.delete(f"/api/social-links/{link_id}/")
         self.assertEqual(delete_response.status_code, 204)
         self.assertEqual(profile.social_links.count(), 0)
+
+    def test_shop_creation_promotes_client_to_shop_owner(self):
+        self.assertEqual(self.user.role, User.Role.CLIENT)
+
+        Shop.objects.create(name="Role Sync Shop", slug="role-sync-shop", owner=self.user)
+
+        self.user.refresh_from_db()
+        self.assertEqual(self.user.role, User.Role.SHOP_OWNER)
+
+    def test_active_membership_promotes_client_to_staff(self):
+        owner = User.objects.create_user(
+            email="owner2@test.com",
+            password="pass12345",
+            role=User.Role.SHOP_OWNER,
+        )
+        shop = Shop.objects.create(name="Staff Shop", slug="staff-shop", owner=owner)
+
+        ShopMembership.objects.create(
+            shop=shop,
+            user=self.user,
+            role=ShopMembership.Role.STAFF,
+            is_active=True,
+        )
+
+        self.user.refresh_from_db()
+        self.assertEqual(self.user.role, User.Role.STAFF)

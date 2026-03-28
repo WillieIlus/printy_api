@@ -31,30 +31,62 @@ class FinishingRateAdmin(admin.ModelAdmin):
         "shop",
         "category",
         "charge_unit",
+        "billing_basis",
+        "side_mode",
         "thickness_microns",
         "is_single_sided_only",
         "price",
         "double_side_price",
+        "minimum_charge",
         "setup_fee",
         "is_active",
     ]
-    list_filter = ["charge_unit", "is_active", "category"]
-    search_fields = ["name"]
+    list_filter = ["charge_unit", "billing_basis", "side_mode", "is_active", "category"]
+    search_fields = ["name", "slug"]
     autocomplete_fields = ["category"]
     fieldsets = (
-        (None, {"fields": ("shop", "name", "category", "charge_unit", "is_active")}),
+        (
+            None,
+            {
+                "fields": (
+                    "shop",
+                    "name",
+                    "slug",
+                    "category",
+                    "charge_unit",
+                    "billing_basis",
+                    "side_mode",
+                    "is_active",
+                )
+            },
+        ),
         (
             "Pricing",
             {
-                "fields": ("price", "double_side_price", "setup_fee", "min_qty"),
-                "description": "double_side_price: for lamination etc. when applied to both sides. Blank = 2× single.",
+                "fields": (
+                    "price",
+                    "double_side_price",
+                    "setup_fee",
+                    "min_qty",
+                    "minimum_charge",
+                    "display_unit_label",
+                    "help_text",
+                ),
+                "description": "Use per_sheet + per_selected_side for lamination. Use flat_per_job, flat_per_group, or flat_per_line for configurable flat logic.",
             },
         ),
         (
             "Lamination",
             {
                 "fields": ("thickness_microns", "is_single_sided_only"),
-                "description": "thickness_microns: e.g. 12, 25, 50. is_single_sided_only: can only apply to one side.",
+                "description": "Use these only for lamination-like finishings.",
+                "classes": ("collapse",),
+            },
+        ),
+        (
+            "Targeting",
+            {
+                "fields": ("applies_to_product_types",),
                 "classes": ("collapse",),
             },
         ),

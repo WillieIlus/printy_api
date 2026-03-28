@@ -3,6 +3,7 @@ from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 from rest_framework_simplejwt.settings import api_settings
 
 from .models import User, UserProfile, UserSocialLink
+from .services.roles import get_assignable_roles, set_account_role
 
 PROFILE_FIELDS = (
     "bio",
@@ -76,8 +77,14 @@ class UserSerializer(serializers.ModelSerializer):
         data["social_links"] = UserSocialLinkSerializer(profile.social_links.all(), many=True).data
         return data
 
+    def validate_role(self, value):
+        if value not in get_assignable_roles():
+            raise serializers.ValidationError("Role must be one of: client, shop_owner, staff.")
+        return value
+
     def update(self, instance, validated_data):
         social_links_data = validated_data.pop("social_links", None)
+        next_role = validated_data.pop("role", None)
         profile_data = {
             field: validated_data.pop(field)
             for field in PROFILE_FIELDS
@@ -94,6 +101,9 @@ class UserSerializer(serializers.ModelSerializer):
                 part for part in [instance.first_name.strip(), instance.last_name.strip()] if part
             )
         instance.save()
+        if next_role is not None:
+            set_account_role(instance, next_role)
+            instance.refresh_from_db(fields=["role"])
 
         if profile_data or social_links_data is not None:
             profile = get_or_create_profile(instance)
@@ -127,6 +137,11 @@ class UserCreateSerializer(serializers.ModelSerializer):
         model = User
         fields = ["id", "email", "password", "name", "first_name", "last_name", "role"]
         read_only_fields = ["id"]
+
+    def validate_role(self, value):
+        if value not in get_assignable_roles():
+            raise serializers.ValidationError("Role must be one of: client, shop_owner, staff.")
+        return value
 
     def create(self, validated_data):
         return User.objects.create_user(**validated_data)

@@ -23,7 +23,7 @@ from catalog.imposition import (
 )
 from pricing.choices import ChargeUnit, Sides
 from pricing.models import PrintingRate
-from services.pricing.engine import build_sheet_pricing
+from services.pricing.engine import calculate_sheet_pricing
 
 
 # ---------------------------------------------------------------------------
@@ -284,32 +284,32 @@ def _compute_sheet_pricing(item, product, quantity, sides_count, result: Pricing
             result.reason = f"Missing: {', '.join(result.missing_fields)}"
         return result
 
-    pricing = build_sheet_pricing(
+    pricing = calculate_sheet_pricing(
         product=product,
         quantity=quantity,
         paper=paper,
         machine=item.machine,
         color_mode=item.color_mode,
         sides=item.sides,
-        finishings=[
+        finishing_selections=[
             {
                 "rule": qif.finishing_rate,
                 "selected_side": getattr(qif, "selected_side", "both"),
             }
             for qif in item.finishings.select_related("finishing_rate").all()
         ],
-    )
+    ).to_dict()
 
-    result.copies_per_sheet = pricing["copies_per_sheet"]
-    result.sheets_needed = pricing["good_sheets"]
+    result.copies_per_sheet = pricing["breakdown"]["imposition"]["copies_per_sheet"]
+    result.sheets_needed = pricing["breakdown"]["imposition"]["good_sheets"]
     result.paper_cost = pricing["totals"]["paper_cost"]
     result.print_cost = pricing["totals"]["print_cost"]
     result.finishing_total = pricing["totals"]["finishing_total"]
     result.line_total = pricing["totals"]["grand_total"]
     result.unit_price = pricing["totals"]["unit_price"]
-    result.paper_label = pricing["paper"]["label"]
-    result.machine_label = pricing["printing"]["machine_name"]
-    result.finishing_lines = pricing["finishings"]
+    result.paper_label = pricing["breakdown"]["paper"]["label"]
+    result.machine_label = pricing["breakdown"]["printing"]["machine_name"]
+    result.finishing_lines = pricing["breakdown"]["finishings"]
     result.can_calculate = True
     return result
 

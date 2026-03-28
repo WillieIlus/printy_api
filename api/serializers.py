@@ -754,6 +754,9 @@ class ShopSerializer(serializers.ModelSerializer):
             "name",
             "slug",
             "currency",
+            "is_vat_enabled",
+            "vat_rate",
+            "vat_mode",
             "is_active",
             "owner",
             "description",
@@ -784,6 +787,23 @@ class ShopSerializer(serializers.ModelSerializer):
             "zip_code": {"allow_null": True, "default": ""},
             "google_place_id": {"allow_null": True, "default": ""},
         }
+
+    def validate_vat_rate(self, value):
+        if value is None:
+            return Decimal("16.00")
+        if value < 0:
+            raise serializers.ValidationError("VAT rate must be 0 or greater.")
+        if value > 100:
+            raise serializers.ValidationError("VAT rate cannot exceed 100.")
+        return value
+
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+        is_vat_enabled = attrs.get("is_vat_enabled", getattr(self.instance, "is_vat_enabled", False))
+        vat_mode = attrs.get("vat_mode", getattr(self.instance, "vat_mode", None))
+        if is_vat_enabled and not vat_mode:
+            raise serializers.ValidationError({"vat_mode": "VAT mode is required when VAT is enabled."})
+        return attrs
 
     def validate_description(self, value):
         return value or ""
@@ -930,6 +950,81 @@ class FinishingRateSerializer(serializers.ModelSerializer):
             "is_active",
         ]
 
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+
+        instance = self.instance
+        charge_unit = attrs.get("charge_unit", getattr(instance, "charge_unit", ChargeUnit.PER_PIECE))
+        billing_basis = attrs.get(
+            "billing_basis",
+            getattr(instance, "billing_basis", FinishingBillingBasis.PER_PIECE),
+        )
+        side_mode = attrs.get(
+            "side_mode",
+            getattr(instance, "side_mode", FinishingSideMode.IGNORE_SIDES),
+        )
+        double_side_price = attrs.get(
+            "double_side_price",
+            getattr(instance, "double_side_price", None),
+        )
+        name = (attrs.get("name", getattr(instance, "name", "")) or "").strip().lower()
+        slug = (attrs.get("slug", getattr(instance, "slug", "")) or "").strip().lower()
+        category = attrs.get("category", getattr(instance, "category", None))
+        category_name = (getattr(category, "name", "") or "").strip().lower()
+        thickness_microns = attrs.get("thickness_microns", getattr(instance, "thickness_microns", None))
+
+        errors = {}
+        per_side_sheet_unit = charge_unit == ChargeUnit.PER_SIDE_PER_SHEET
+        flat_basis_values = {
+            FinishingBillingBasis.FLAT_PER_JOB,
+            FinishingBillingBasis.FLAT_PER_GROUP,
+            FinishingBillingBasis.FLAT_PER_LINE,
+        }
+
+        if per_side_sheet_unit and billing_basis != FinishingBillingBasis.PER_SHEET:
+            errors["billing_basis"] = "Per-side-per-sheet finishings must use per_sheet billing_basis."
+
+        if per_side_sheet_unit and side_mode != FinishingSideMode.PER_SELECTED_SIDE:
+            errors["side_mode"] = "Per-side-per-sheet finishings must use per_selected_side side_mode."
+
+        if billing_basis == FinishingBillingBasis.PER_PIECE and side_mode != FinishingSideMode.IGNORE_SIDES:
+            errors["side_mode"] = "Per-piece finishings must use ignore_sides side_mode."
+
+        if billing_basis in flat_basis_values and side_mode != FinishingSideMode.IGNORE_SIDES:
+            errors["side_mode"] = "Flat finishings must use ignore_sides side_mode."
+
+        if billing_basis in flat_basis_values and charge_unit not in {ChargeUnit.FLAT, ChargeUnit.PER_SIDE}:
+            errors["charge_unit"] = "Flat finishings must use a flat-compatible charge_unit."
+
+        if (
+            billing_basis == FinishingBillingBasis.PER_SHEET
+            and not per_side_sheet_unit
+            and side_mode == FinishingSideMode.PER_SELECTED_SIDE
+        ):
+            errors["side_mode"] = "per_selected_side is only valid for per-sheet finishings charged per side per sheet."
+
+        if double_side_price and side_mode != FinishingSideMode.PER_SELECTED_SIDE:
+            errors["double_side_price"] = "double_side_price is only valid when side_mode is per_selected_side."
+
+        is_lamination = bool(
+            thickness_microns
+            or "lamination" in name
+            or "lamination" in slug
+            or "lamination" in category_name
+        )
+        if is_lamination:
+            if charge_unit != ChargeUnit.PER_SIDE_PER_SHEET:
+                errors["charge_unit"] = "Lamination must use PER_SIDE_PER_SHEET charge_unit."
+            if billing_basis != FinishingBillingBasis.PER_SHEET:
+                errors["billing_basis"] = "Lamination must use per_sheet billing_basis."
+            if side_mode != FinishingSideMode.PER_SELECTED_SIDE:
+                errors["side_mode"] = "Lamination must use per_selected_side side_mode."
+
+        if errors:
+            raise serializers.ValidationError(errors)
+
+        return attrs
+
 
 class VolumeDiscountSerializer(serializers.ModelSerializer):
     """CRUD for shop volume discounts."""
@@ -984,6 +1079,16 @@ class ProductFinishingOptionWriteSerializer(serializers.ModelSerializer):
     class Meta:
         model = ProductFinishingOption
         fields = ["finishing_rate", "is_default", "price_adjustment", "apply_to_sides"]
+
+    def to_internal_value(self, data):
+        # Allow shorthand payloads like: finishing_options: [1, 2]
+        if isinstance(data, (int, str)):
+            data = {"finishing_rate": data}
+        elif not isinstance(data, dict):
+            raise serializers.ValidationError(
+                "Each finishing_options entry must be an object or a finishing_rate id."
+            )
+        return super().to_internal_value(data)
 
     def validate(self, attrs):
         product = self.context.get("product")
@@ -1077,6 +1182,31 @@ class ProductWriteSerializer(serializers.ModelSerializer):
         invalid = [item for item in value if not isinstance(item, str) or not item.strip()]
         if invalid:
             raise serializers.ValidationError("Each allowed_sheet_sizes entry must be a non-empty string sheet size code.")
+        return value
+
+    def validate_finishing_options(self, value):
+        if value is None:
+            return value
+
+        seen_finishing_rates: dict[int, int] = {}
+        errors: list[dict[str, list[str]]] = [{} for _ in value]
+
+        for index, item in enumerate(value):
+            finishing_rate = item.get("finishing_rate")
+            if not finishing_rate:
+                continue
+
+            existing_index = seen_finishing_rates.get(finishing_rate.pk)
+            if existing_index is not None:
+                errors[index]["finishing_rate"] = [
+                    "Duplicate finishing_rate entries are not allowed."
+                ]
+            else:
+                seen_finishing_rates[finishing_rate.pk] = index
+
+        if any(errors):
+            raise serializers.ValidationError(errors)
+
         return value
 
     def validate(self, attrs):

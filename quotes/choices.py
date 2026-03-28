@@ -15,6 +15,14 @@ class QuoteStatus(models.TextChoices):
     CANCELLED = "cancelled", "Cancelled"
 
 
+class QuoteDraftStatus(models.TextChoices):
+    """QuoteDraft status (client saved-calculation lifecycle)."""
+
+    DRAFT = "draft", "Draft"
+    SENT = "sent", "Sent"
+    ARCHIVED = "archived", "Archived"
+
+
 class ShopQuoteStatus(models.TextChoices):
     """ShopQuote status (shop offer lifecycle)."""
 

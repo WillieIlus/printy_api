@@ -12,10 +12,10 @@ from catalog.choices import PricingMode, ProductStatus
 from catalog.models import Product, ProductCategory
 from inventory.models import Machine, Paper
 from locations.models import Location
-from pricing.choices import Sides
-from pricing.models import Material, PrintingRate, VolumeDiscount
+from pricing.choices import ChargeUnit, FinishingBillingBasis, FinishingSideMode, Sides
+from pricing.models import FinishingRate, Material, PrintingRate, VolumeDiscount
 from quotes.choices import QuoteStatus, ShopQuoteStatus
-from quotes.models import QuoteDraftFile, QuoteItem, QuoteRequest, ShopQuote
+from quotes.models import QuoteDraft, QuoteDraftFile, QuoteItem, QuoteRequest, ShopQuote
 from shops.models import Shop
 
 
@@ -1337,6 +1337,234 @@ class PricingAPITestCase(TestCase):
         self.assertEqual(str(data["discount_percent"]), "10.00")
 
 
+class ShopFinishingRateAPITestCase(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.owner = User.objects.create_user(email="finishing-owner@test.com", password="pass12345")
+        self.shop = Shop.objects.create(
+            owner=self.owner,
+            name="Finishing Shop",
+            slug="finishing-shop",
+            is_active=True,
+        )
+        self.client.force_authenticate(user=self.owner)
+
+    def _payload(self, **overrides):
+        payload = {
+            "name": "Matte Lamination",
+            "charge_unit": ChargeUnit.PER_SIDE_PER_SHEET,
+            "billing_basis": FinishingBillingBasis.PER_SHEET,
+            "side_mode": FinishingSideMode.PER_SELECTED_SIDE,
+            "price": "12.00",
+            "double_side_price": "20.00",
+            "minimum_charge": "100.00",
+            "setup_fee": "0.00",
+            "is_active": True,
+        }
+        payload.update(overrides)
+        return payload
+
+    def test_create_accepts_lamination_per_sheet_per_side_contract(self):
+        response = self.client.post(
+            f"/api/shops/{self.shop.slug}/finishing-rates/",
+            self._payload(),
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 201)
+        data = response.json()
+        self.assertEqual(data["billing_basis"], FinishingBillingBasis.PER_SHEET)
+        self.assertEqual(data["side_mode"], FinishingSideMode.PER_SELECTED_SIDE)
+
+    def test_create_rejects_side_billed_lamination_with_wrong_billing_basis(self):
+        response = self.client.post(
+            f"/api/shops/{self.shop.slug}/finishing-rates/",
+            self._payload(billing_basis=FinishingBillingBasis.PER_PIECE),
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(
+            response.json()["field_errors"]["billing_basis"][0],
+            "Lamination must use per_sheet billing_basis.",
+        )
+
+    def test_create_rejects_lamination_per_piece(self):
+        response = self.client.post(
+            f"/api/shops/{self.shop.slug}/finishing-rates/",
+            self._payload(
+                charge_unit=ChargeUnit.PER_PIECE,
+                billing_basis=FinishingBillingBasis.PER_PIECE,
+                side_mode=FinishingSideMode.IGNORE_SIDES,
+            ),
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(
+            response.json()["field_errors"]["charge_unit"][0],
+            "Lamination must use PER_SIDE_PER_SHEET charge_unit.",
+        )
+
+    def test_create_rejects_per_piece_with_side_multiplier(self):
+        response = self.client.post(
+            f"/api/shops/{self.shop.slug}/finishing-rates/",
+            self._payload(
+                name="Round Corner",
+                charge_unit=ChargeUnit.PER_PIECE,
+                billing_basis=FinishingBillingBasis.PER_PIECE,
+                side_mode=FinishingSideMode.PER_SELECTED_SIDE,
+                double_side_price=None,
+            ),
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(
+            response.json()["field_errors"]["side_mode"][0],
+            "Per-piece finishings must use ignore_sides side_mode.",
+        )
+
+    def test_create_accepts_flat_per_line_cutting(self):
+        response = self.client.post(
+            f"/api/shops/{self.shop.slug}/finishing-rates/",
+            self._payload(
+                name="Cutting",
+                charge_unit=ChargeUnit.FLAT,
+                billing_basis=FinishingBillingBasis.FLAT_PER_LINE,
+                side_mode=FinishingSideMode.IGNORE_SIDES,
+                double_side_price=None,
+            ),
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 201)
+        data = response.json()
+        self.assertEqual(data["billing_basis"], FinishingBillingBasis.FLAT_PER_LINE)
+        self.assertEqual(data["side_mode"], FinishingSideMode.IGNORE_SIDES)
+
+
+class ShopProductValidationAPITestCase(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.owner = User.objects.create_user(email="product-owner@test.com", password="pass12345")
+        self.shop = Shop.objects.create(
+            owner=self.owner,
+            name="Validation Shop",
+            slug="validation-shop",
+            is_active=True,
+        )
+        self.category = ProductCategory.objects.create(
+            shop=self.shop,
+            name="Cards",
+            slug="cards",
+        )
+        self.machine = Machine.objects.create(
+            shop=self.shop,
+            name="Digital Press",
+            max_width_mm=320,
+            max_height_mm=450,
+            is_active=True,
+        )
+        self.finishing_rate = FinishingRate.objects.create(
+            shop=self.shop,
+            name="Matte Lamination",
+            price=Decimal("12.00"),
+            is_active=True,
+        )
+        self.client.force_authenticate(user=self.owner)
+
+    def _product_payload(self, **overrides):
+        payload = {
+            "name": "Business Cards",
+            "description": "Premium cards",
+            "category": self.category.id,
+            "pricing_mode": "SHEET",
+            "default_finished_width_mm": 90,
+            "default_finished_height_mm": 55,
+            "default_sheet_size": "SRA3",
+            "default_bleed_mm": 3,
+            "default_sides": "SIMPLEX",
+            "default_machine": self.machine.id,
+            "turnaround_days": 2,
+            "min_quantity": 100,
+            "allowed_sheet_sizes": ["SRA3"],
+            "allow_simplex": True,
+            "allow_duplex": True,
+            "is_active": True,
+        }
+        payload.update(overrides)
+        return payload
+
+    def test_product_create_returns_field_error_for_object_select_payload(self):
+        response = self.client.post(
+            f"/api/shops/{self.shop.slug}/products/",
+            self._product_payload(category={"value": self.category.id, "label": "Cards"}),
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(
+            response.json()["field_errors"]["category"][0],
+            "category must be sent as a primitive value, not an object or array.",
+        )
+
+    def test_product_create_returns_nested_field_errors_for_duplicate_finishing_rules(self):
+        response = self.client.post(
+            f"/api/shops/{self.shop.slug}/products/",
+            self._product_payload(
+                finishing_options=[
+                    {"finishing_rate": self.finishing_rate.id},
+                    {"finishing_rate": self.finishing_rate.id},
+                ],
+            ),
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(
+            response.json()["field_errors"]["finishing_options"][1]["finishing_rate"][0],
+            "Duplicate finishing_rate entries are not allowed.",
+        )
+
+    def test_product_create_accepts_finishing_rule_id_shorthand(self):
+        response = self.client.post(
+            f"/api/shops/{self.shop.slug}/products/",
+            self._product_payload(finishing_options=[self.finishing_rate.id]),
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 201)
+        product = Product.objects.get(name="Business Cards")
+        self.assertEqual(product.finishing_options.count(), 1)
+        self.assertEqual(product.finishing_options.first().finishing_rate_id, self.finishing_rate.id)
+
+    def test_product_update_returns_nested_field_error_for_malformed_finishing_rate(self):
+        product = Product.objects.create(
+            shop=self.shop,
+            name="Flyers",
+            pricing_mode=PricingMode.SHEET,
+            default_finished_width_mm=210,
+            default_finished_height_mm=297,
+        )
+
+        response = self.client.patch(
+            f"/api/shops/{self.shop.slug}/products/{product.id}/",
+            {
+                "finishing_options": [
+                    {"finishing_rate": {"value": self.finishing_rate.id, "label": "Matte Lamination"}},
+                ],
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(
+            response.json()["field_errors"]["finishing_options"][0]["finishing_rate"][0],
+            "finishing_rate must be sent as a primitive value, not an object or array.",
+        )
+
+
 class DashboardQuoteFileAPITestCase(TestCase):
     def setUp(self):
         self.client = APIClient()
@@ -1443,3 +1671,314 @@ class DashboardQuoteFileAPITestCase(TestCase):
         self.client.force_authenticate(user=self.other_user)
         response = self.client.get(f"/api/quote-draft-files/{self.file.id}/?scope=dashboard")
         self.assertEqual(response.status_code, 404)
+
+
+class QuoteWorkflowAPITestCase(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.customer = User.objects.create_user(email="workflow-client@test.com", password="pass12345", role="client")
+        self.owner = User.objects.create_user(email="workflow-owner@test.com", password="pass12345", role="shop_owner")
+        self.shop = Shop.objects.create(owner=self.owner, name="Workflow Shop", slug="workflow-shop", is_active=True)
+
+    def test_draft_request_response_workflow_preserves_snapshots(self):
+        self.client.force_authenticate(user=self.customer)
+
+        draft_response = self.client.post(
+            "/api/calculator/drafts/",
+            {
+                "title": "Business cards draft",
+                "shop": self.shop.id,
+                "calculator_inputs_snapshot": {"quantity": 100, "sides": "DUPLEX"},
+                "pricing_snapshot": {"totals": {"grand_total": "2400.00"}},
+                "request_details_snapshot": {"customer_name": "Client One", "notes": "Urgent"},
+            },
+            format="json",
+        )
+        self.assertEqual(draft_response.status_code, 201)
+        draft_id = draft_response.json()["id"]
+
+        patch_response = self.client.patch(
+            f"/api/calculator/drafts/{draft_id}/",
+            {
+                "title": "Updated cards draft",
+                "request_details_snapshot": {"customer_name": "Client One", "notes": "Updated brief"},
+            },
+            format="json",
+        )
+        self.assertEqual(patch_response.status_code, 200)
+        self.assertEqual(patch_response.json()["title"], "Updated cards draft")
+
+        send_response = self.client.post(
+            f"/api/calculator/drafts/{draft_id}/send/",
+            {
+                "shops": [self.shop.id],
+                "request_details_snapshot": {"customer_name": "Client One", "customer_email": "workflow-client@test.com"},
+            },
+            format="json",
+        )
+        self.assertEqual(send_response.status_code, 201)
+        request_payload = send_response.json()[0]
+        request_id = request_payload["id"]
+        self.assertEqual(request_payload["status"], "submitted")
+        self.assertEqual(
+            request_payload["request_snapshot"]["draft_reference"],
+            QuoteDraft.objects.get(pk=draft_id).draft_reference,
+        )
+
+        self.client.force_authenticate(user=self.owner)
+        create_response = self.client.post(
+            f"/api/quote-requests/{request_id}/responses/",
+            {
+                "status": "modified",
+                "response_snapshot": {"pricing": {"grand_total": "2550.00"}},
+                "revised_pricing_snapshot": {"line_items": [{"line_total": "2550.00"}]},
+                "total": "2550.00",
+                "note": "Adjusted for stock",
+                "turnaround_days": 3,
+            },
+            format="json",
+        )
+        self.assertEqual(create_response.status_code, 201)
+        response_id = create_response.json()["id"]
+        self.assertEqual(create_response.json()["status"], "modified")
+        self.assertEqual(create_response.json()["response_snapshot"]["pricing"]["grand_total"], "2550.00")
+
+        list_requests = self.client.get("/api/workflow/quote-requests/")
+        self.assertEqual(list_requests.status_code, 200)
+        self.assertEqual(list_requests.json()[0]["latest_response"]["status"], "modified")
+
+        patch_quote_response = self.client.patch(
+            f"/api/workflow/quote-responses/{response_id}/",
+            {
+                "status": "accepted",
+                "note": "Accepted internally",
+            },
+            format="json",
+        )
+        self.assertEqual(patch_quote_response.status_code, 200)
+        self.assertEqual(patch_quote_response.json()["status"], "accepted")
+
+        request_record = QuoteRequest.objects.get(pk=request_id)
+        response_record = ShopQuote.objects.get(pk=response_id)
+        self.assertEqual(request_record.status, "accepted")
+        self.assertEqual(response_record.response_snapshot["pricing"]["grand_total"], "2550.00")
+
+        self.client.force_authenticate(user=self.customer)
+        response_list = self.client.get(f"/api/quote-requests/{request_id}/responses/")
+        self.assertEqual(response_list.status_code, 200)
+        self.assertEqual(response_list.json()[0]["status"], "accepted")
+
+
+class CalculatorPreviewAPITestCase(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.owner = User.objects.create_user(email="preview-owner@test.com", password="pass12345", role="shop_owner")
+        self.other_owner = User.objects.create_user(email="preview-other@test.com", password="pass12345", role="shop_owner")
+        self.shop = Shop.objects.create(owner=self.owner, name="Preview Shop", slug="preview-shop", is_active=True)
+        self.other_shop = Shop.objects.create(owner=self.other_owner, name="Other Shop", slug="other-shop", is_active=True)
+        self.product = Product.objects.create(
+            shop=self.shop,
+            name="Preview Cards",
+            pricing_mode=PricingMode.SHEET,
+            default_finished_width_mm=90,
+            default_finished_height_mm=55,
+            default_bleed_mm=3,
+            min_quantity=100,
+            is_active=True,
+        )
+        self.machine = Machine.objects.create(
+            shop=self.shop,
+            name="Preview Press",
+            max_width_mm=320,
+            max_height_mm=450,
+            is_active=True,
+        )
+        self.paper = Paper.objects.create(
+            shop=self.shop,
+            sheet_size="SRA3",
+            gsm=300,
+            paper_type="GLOSS",
+            buying_price=Decimal("15.00"),
+            selling_price=Decimal("24.00"),
+            width_mm=320,
+            height_mm=450,
+            is_active=True,
+        )
+        PrintingRate.objects.create(
+            machine=self.machine,
+            sheet_size="SRA3",
+            color_mode="COLOR",
+            single_price=Decimal("45.00"),
+            double_price=Decimal("75.00"),
+            is_active=True,
+        )
+        self.finishing = FinishingRate.objects.create(
+            shop=self.shop,
+            name="Preview Lamination",
+            charge_unit=ChargeUnit.PER_SIDE_PER_SHEET,
+            billing_basis=FinishingBillingBasis.PER_SHEET,
+            side_mode=FinishingSideMode.PER_SELECTED_SIDE,
+            price=Decimal("12.00"),
+            is_active=True,
+        )
+        self.other_machine = Machine.objects.create(
+            shop=self.other_shop,
+            name="Other Press",
+            max_width_mm=320,
+            max_height_mm=450,
+            is_active=True,
+        )
+
+    def test_preview_returns_totals_and_breakdown_lines(self):
+        response = self.client.post(
+            "/api/calculator/preview/",
+            {
+                "shop": self.shop.id,
+                "product": self.product.id,
+                "quantity": 100,
+                "paper": self.paper.id,
+                "machine": self.machine.id,
+                "color_mode": "COLOR",
+                "sides": "DUPLEX",
+                "finishings": [
+                    {"finishing_rate": self.finishing.id, "selected_side": "both"},
+                ],
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertIn("totals", data)
+        self.assertIn("breakdown", data)
+        self.assertIn("finishings", data["breakdown"])
+        self.assertEqual(data["breakdown"]["finishings"][0]["name"], "Preview Lamination")
+        self.assertEqual(data["breakdown"]["finishings"][0]["formula"], "good_sheets x rate x side_count")
+        self.assertIn("Printing:", data["explanations"][2])
+
+    def test_preview_returns_field_errors_for_cross_shop_resources(self):
+        response = self.client.post(
+            "/api/calculator/preview/",
+            {
+                "shop": self.shop.id,
+                "product": self.product.id,
+                "quantity": 100,
+                "paper": self.paper.id,
+                "machine": self.other_machine.id,
+                "color_mode": "COLOR",
+                "sides": "DUPLEX",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(
+            response.json()["field_errors"]["machine"][0],
+            "Machine must belong to the selected shop.",
+        )
+
+    def test_preview_returns_vat_totals_for_exclusive_vat_shop(self):
+        self.shop.is_vat_enabled = True
+        self.shop.vat_rate = Decimal("16.00")
+        self.shop.vat_mode = "exclusive"
+        self.shop.save(update_fields=["is_vat_enabled", "vat_rate", "vat_mode"])
+
+        response = self.client.post(
+            "/api/calculator/preview/",
+            {
+                "shop": self.shop.id,
+                "product": self.product.id,
+                "quantity": 100,
+                "paper": self.paper.id,
+                "machine": self.machine.id,
+                "color_mode": "COLOR",
+                "sides": "DUPLEX",
+                "finishings": [
+                    {"finishing_rate": self.finishing.id, "selected_side": "both"},
+                ],
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(data["totals"]["subtotal"], "615.00")
+        self.assertEqual(data["totals"]["vat_amount"], "98.40")
+        self.assertEqual(data["totals"]["grand_total"], "713.40")
+        self.assertEqual(data["totals"]["vat_mode"], "exclusive")
+        self.assertEqual(data["vat"]["mode"], "exclusive")
+        self.assertEqual(data["vat"]["amount"], "98.40")
+
+
+class ShopDashboardSummaryAPITestCase(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.owner = User.objects.create_user(email="dashboard-owner@test.com", password="pass12345", role="shop_owner")
+        self.shop = Shop.objects.create(owner=self.owner, name="Dashboard Shop", slug="dashboard-shop", is_active=True)
+        self.client.force_authenticate(user=self.owner)
+
+        self.pending_request = QuoteRequest.objects.create(
+            shop=self.shop,
+            created_by=self.owner,
+            customer_name="Pending Customer",
+            status=QuoteStatus.SUBMITTED,
+        )
+        self.modified_request = QuoteRequest.objects.create(
+            shop=self.shop,
+            created_by=self.owner,
+            customer_name="Modified Customer",
+            status=QuoteStatus.QUOTED,
+        )
+        self.accepted_request = QuoteRequest.objects.create(
+            shop=self.shop,
+            created_by=self.owner,
+            customer_name="Accepted Customer",
+            status=QuoteStatus.ACCEPTED,
+        )
+        self.rejected_request = QuoteRequest.objects.create(
+            shop=self.shop,
+            created_by=self.owner,
+            customer_name="Rejected Customer",
+            status=QuoteStatus.CLOSED,
+        )
+
+        ShopQuote.objects.create(
+            quote_request=self.modified_request,
+            shop=self.shop,
+            created_by=self.owner,
+            status=ShopQuoteStatus.MODIFIED,
+            total=Decimal("1200.00"),
+        )
+        ShopQuote.objects.create(
+            quote_request=self.accepted_request,
+            shop=self.shop,
+            created_by=self.owner,
+            status=ShopQuoteStatus.ACCEPTED,
+            total=Decimal("2200.00"),
+        )
+        ShopQuote.objects.create(
+            quote_request=self.rejected_request,
+            shop=self.shop,
+            created_by=self.owner,
+            status=ShopQuoteStatus.REJECTED,
+            total=Decimal("900.00"),
+        )
+
+    def test_shop_home_dashboard_returns_request_summary_counts_and_recent_requests(self):
+        response = self.client.get("/api/dashboard/shop-home/")
+
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(data["received_quote_requests"], 4)
+        self.assertEqual(
+            data["status_counts"],
+            {
+                "pending": 1,
+                "modified": 1,
+                "accepted": 1,
+                "rejected": 1,
+            },
+        )
+        self.assertEqual(len(data["recent_requests"]), 4)
+        self.assertEqual(data["recent_requests"][0]["customer_name"], "Rejected Customer")
+        self.assertEqual(data["recent_requests"][0]["latest_response"]["status"], "rejected")

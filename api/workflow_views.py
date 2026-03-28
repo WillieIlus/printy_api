@@ -1,4 +1,4 @@
-from django.db.models import Count
+from django.db.models import Count, OuterRef, Q, Subquery
 from django.shortcuts import get_object_or_404
 from rest_framework import generics, status
 from rest_framework.permissions import AllowAny, IsAuthenticated
@@ -7,7 +7,13 @@ from rest_framework.views import APIView
 
 from accounts.services.roles import is_client
 from quotes.models import QuoteDraft, QuoteRequest, ShopQuote
-from quotes.services_workflow import create_quote_response, save_quote_draft, send_quote_draft_to_shops
+from quotes.services_workflow import (
+    create_quote_response,
+    save_quote_draft,
+    send_quote_draft_to_shops,
+    update_quote_draft,
+    update_quote_response,
+)
 from services.pricing.quote_builder import build_quote_preview
 from setup.services import get_setup_status_for_shop, get_setup_status_for_user
 from shops.models import Shop
@@ -15,12 +21,15 @@ from shops.services import can_manage_quotes, can_manage_shop
 
 from .workflow_serializers import (
     CalculatorPreviewSerializer,
+    DashboardQuoteRequestSummarySerializer,
     QuoteDraftCreateSerializer,
     QuoteDraftReadSerializer,
     QuoteDraftSendSerializer,
+    QuoteDraftUpdateSerializer,
     QuoteRequestReadSerializer,
     QuoteResponseCreateSerializer,
     QuoteResponseReadSerializer,
+    QuoteResponseUpdateSerializer,
 )
 
 
@@ -50,10 +59,10 @@ class CalculatorPreviewView(APIView):
         validated = serializer.validated_data
         pricing = build_quote_preview(
             shop=validated["shop"],
-            product_id=validated["product"].id,
+            product=validated["product"],
             quantity=validated["quantity"],
-            paper_id=validated["paper"],
-            machine_id=validated["machine"],
+            paper=validated["paper"],
+            machine=validated["machine"],
             color_mode=validated["color_mode"],
             sides=validated["sides"],
             finishing_selections=validated.get("finishings") or [],
@@ -99,6 +108,16 @@ class QuoteDraftDetailView(generics.RetrieveAPIView):
     def get_queryset(self):
         return QuoteDraft.objects.filter(user=self.request.user)
 
+    def patch(self, request, pk):
+        draft = get_object_or_404(QuoteDraft, pk=pk, user=request.user)
+        serializer = QuoteDraftUpdateSerializer(data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        try:
+            updated = update_quote_draft(draft=draft, **serializer.validated_data)
+        except ValueError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(QuoteDraftReadSerializer(updated).data)
+
 
 class QuoteDraftSendView(APIView):
     permission_classes = [IsAuthenticated]
@@ -109,16 +128,57 @@ class QuoteDraftSendView(APIView):
         draft = get_object_or_404(QuoteDraft, pk=pk, user=request.user)
         serializer = QuoteDraftSendSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        quote_requests = send_quote_draft_to_shops(
-            draft=draft,
-            shops=list(serializer.validated_data["shops"]),
-            request_details_snapshot=serializer.validated_data.get("request_details_snapshot"),
-        )
+        try:
+            quote_requests = send_quote_draft_to_shops(
+                draft=draft,
+                shops=list(serializer.validated_data["shops"]),
+                request_details_snapshot=serializer.validated_data.get("request_details_snapshot"),
+            )
+        except ValueError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         return Response(QuoteRequestReadSerializer(quote_requests, many=True).data, status=status.HTTP_201_CREATED)
 
 
-class QuoteResponseCreateView(APIView):
+class QuoteRequestListView(APIView):
     permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        customer_requests = QuoteRequest.objects.filter(created_by=request.user)
+        managed_shop_ids = list(
+            Shop.objects.filter(owner=request.user).values_list("id", flat=True)
+        )
+        if not managed_shop_ids:
+            managed_shop_ids = list(
+                Shop.objects.filter(memberships__user=request.user, memberships__is_active=True).values_list("id", flat=True)
+            )
+        shop_requests = QuoteRequest.objects.filter(shop_id__in=managed_shop_ids)
+        combined = (customer_requests | shop_requests).distinct().select_related("shop", "source_draft").order_by("-created_at")
+        return Response(QuoteRequestReadSerializer(combined, many=True).data)
+
+
+class QuoteRequestDetailView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, pk):
+        quote_request = get_object_or_404(QuoteRequest.objects.select_related("shop", "source_draft"), pk=pk)
+        is_owner = quote_request.created_by_id == request.user.id
+        can_manage = can_manage_quotes(quote_request.shop, request.user)
+        if not is_owner and not can_manage:
+            return Response({"detail": "You cannot access this quote request."}, status=status.HTTP_403_FORBIDDEN)
+        return Response(QuoteRequestReadSerializer(quote_request).data)
+
+
+class QuoteResponseListCreateView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, request_id):
+        quote_request = get_object_or_404(QuoteRequest.objects.select_related("shop"), pk=request_id)
+        is_owner = quote_request.created_by_id == request.user.id
+        can_manage = can_manage_quotes(quote_request.shop, request.user)
+        if not is_owner and not can_manage:
+            return Response({"detail": "You cannot access responses for this quote request."}, status=status.HTTP_403_FORBIDDEN)
+        responses = quote_request.shop_quotes.order_by("-created_at")
+        return Response(QuoteResponseReadSerializer(responses, many=True).data)
 
     def post(self, request, request_id):
         quote_request = get_object_or_404(QuoteRequest.objects.select_related("shop"), pk=request_id)
@@ -140,6 +200,32 @@ class QuoteResponseCreateView(APIView):
         return Response(QuoteResponseReadSerializer(response).data, status=status.HTTP_201_CREATED)
 
 
+class QuoteResponseDetailView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, pk):
+        response = get_object_or_404(ShopQuote.objects.select_related("quote_request", "shop"), pk=pk)
+        is_owner = response.quote_request.created_by_id == request.user.id
+        can_manage = can_manage_quotes(response.shop, request.user)
+        if not is_owner and not can_manage:
+            return Response({"detail": "You cannot access this quote response."}, status=status.HTTP_403_FORBIDDEN)
+        return Response(QuoteResponseReadSerializer(response).data)
+
+    def patch(self, request, pk):
+        response = get_object_or_404(ShopQuote.objects.select_related("quote_request", "shop"), pk=pk)
+        if not can_manage_quotes(response.shop, request.user):
+            return Response({"detail": "You cannot update this quote response."}, status=status.HTTP_403_FORBIDDEN)
+        serializer = QuoteResponseUpdateSerializer(data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        if "status" not in serializer.validated_data:
+            return Response({"detail": "status is required."}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            updated = update_quote_response(response=response, **serializer.validated_data)
+        except ValueError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(QuoteResponseReadSerializer(updated).data)
+
+
 class ShopHomeDashboardView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -151,21 +237,34 @@ class ShopHomeDashboardView(APIView):
         if not shop or not can_manage_quotes(shop, request.user):
             return Response({"detail": "No accessible shop dashboard."}, status=status.HTTP_403_FORBIDDEN)
 
-        received = QuoteRequest.objects.filter(shop=shop)
-        responses = ShopQuote.objects.filter(shop=shop)
-        counts = dict(received.values("status").annotate(count=Count("id")).values_list("status", "count"))
+        latest_response = ShopQuote.objects.filter(
+            quote_request_id=OuterRef("pk")
+        ).order_by("-created_at", "-id")
+        received = QuoteRequest.objects.filter(shop=shop).select_related("source_draft").annotate(
+            latest_response_id=Subquery(latest_response.values("id")[:1]),
+            latest_response_reference=Subquery(latest_response.values("quote_reference")[:1]),
+            latest_response_status=Subquery(latest_response.values("status")[:1]),
+            latest_response_total=Subquery(latest_response.values("total")[:1]),
+            latest_response_created_at=Subquery(latest_response.values("created_at")[:1]),
+            latest_response_sent_at=Subquery(latest_response.values("sent_at")[:1]),
+        )
+        status_buckets = received.aggregate(
+            pending=Count("id", filter=Q(latest_response_status__isnull=True) | Q(latest_response_status="pending")),
+            modified=Count("id", filter=Q(latest_response_status="modified")),
+            accepted=Count("id", filter=Q(latest_response_status="accepted")),
+            rejected=Count("id", filter=Q(latest_response_status="rejected")),
+        )
 
         return Response(
             {
                 "shop": {"id": shop.id, "name": shop.name, "slug": shop.slug},
                 "received_quote_requests": received.count(),
                 "status_counts": {
-                    "pending": counts.get("submitted", 0),
-                    "modified": responses.filter(status="modified").count(),
-                    "accepted": responses.filter(status="accepted").count(),
-                    "rejected": responses.filter(status__in=["rejected", "declined"]).count(),
+                    "pending": status_buckets["pending"],
+                    "modified": status_buckets["modified"],
+                    "accepted": status_buckets["accepted"],
+                    "rejected": status_buckets["rejected"],
                 },
-                "recent_requests": QuoteRequestReadSerializer(received.order_by("-created_at")[:10], many=True).data,
-                "recent_responses": QuoteResponseReadSerializer(responses.order_by("-created_at")[:10], many=True).data,
+                "recent_requests": DashboardQuoteRequestSummarySerializer(received.order_by("-created_at")[:10], many=True).data,
             }
         )
