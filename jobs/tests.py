@@ -46,6 +46,7 @@ class JobRequestAPITestCase(TestCase):
         data = r.json()
         self.assertEqual(data["title"], "Brochure 500 pcs")
         self.assertEqual(data["status"], "OPEN")
+        self.assertEqual(data["status_label"], "Open")
         self.assertEqual(data["created_by"], self.user.id)
 
     def test_list_filter_by_status(self):
@@ -140,6 +141,7 @@ class JobRequestTokenSecurityTestCase(TestCase):
         self.assertIn("title", data)
         self.assertIn("specs", data)
         self.assertIn("location", data)
+        self.assertEqual(data["status_label"], "Open")
         self.assertNotIn("created_by", data)
         self.assertNotIn("created_by_email", data)
         # Specs may include keys - we don't filter specs, but we don't expose created_by

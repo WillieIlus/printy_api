@@ -1,6 +1,7 @@
 """JobShare API views."""
 from django.conf import settings
 from django.shortcuts import get_object_or_404
+from django.utils.translation import gettext as _
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
@@ -78,12 +79,12 @@ class JobRequestViewSet(viewsets.ModelViewSet):
         job = self.get_object()
         if job.status != JobRequest.OPEN:
             return Response(
-                {"detail": "Only open jobs can be claimed."},
+                {"detail": _("Only open jobs can be claimed.")},
                 status=status.HTTP_400_BAD_REQUEST,
             )
         if job.created_by_id == request.user.id:
             return Response(
-                {"detail": "You cannot claim your own job."},
+                {"detail": _("You cannot claim your own job.")},
                 status=status.HTTP_400_BAD_REQUEST,
             )
         serializer = JobClaimCreateSerializer(data=request.data)
@@ -98,7 +99,7 @@ class JobRequestViewSet(viewsets.ModelViewSet):
         )
         if not created:
             return Response(
-                {"detail": "You have already claimed this job."},
+                {"detail": _("You have already claimed this job.")},
                 status=status.HTTP_400_BAD_REQUEST,
             )
         return Response(
@@ -133,12 +134,12 @@ class JobClaimViewSet(viewsets.ReadOnlyModelViewSet):
         claim = self.get_object()
         if claim.job_request.created_by_id != request.user.id:
             return Response(
-                {"detail": "Only the job owner can accept claims."},
+                {"detail": _("Only the job owner can accept claims.")},
                 status=status.HTTP_403_FORBIDDEN,
             )
         if claim.status != JobClaim.PENDING:
             return Response(
-                {"detail": "Claim is no longer pending."},
+                {"detail": _("Claim is no longer pending.")},
                 status=status.HTTP_400_BAD_REQUEST,
             )
         claim.status = JobClaim.ACCEPTED
@@ -149,7 +150,7 @@ class JobClaimViewSet(viewsets.ReadOnlyModelViewSet):
             user=claim.claimed_by,
             job_request=claim.job_request,
             job_claim=claim,
-            message=f"Your claim on '{claim.job_request.title}' was accepted!",
+            message=_("Your claim on '%(title)s' was accepted!") % {"title": claim.job_request.title},
         )
         return Response(JobClaimSerializer(claim).data)
 
@@ -159,12 +160,12 @@ class JobClaimViewSet(viewsets.ReadOnlyModelViewSet):
         claim = self.get_object()
         if claim.job_request.created_by_id != request.user.id:
             return Response(
-                {"detail": "Only the job owner can reject claims."},
+                {"detail": _("Only the job owner can reject claims.")},
                 status=status.HTTP_403_FORBIDDEN,
             )
         if claim.status != JobClaim.PENDING:
             return Response(
-                {"detail": "Claim is no longer pending."},
+                {"detail": _("Claim is no longer pending.")},
                 status=status.HTTP_400_BAD_REQUEST,
             )
         claim.status = JobClaim.REJECTED
@@ -185,6 +186,6 @@ class PublicJobView(APIView):
         serializer = JobRequestPublicSerializer(job)
         data = serializer.data
         # Add CTA hint
-        data["claim_cta"] = "Claim job"
+        data["claim_cta"] = _("Claim job")
         data["requires_login"] = True
         return Response(data)

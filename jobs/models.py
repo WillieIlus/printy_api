@@ -9,7 +9,7 @@ from django.utils.translation import gettext_lazy as _
 
 from common.models import TimeStampedModel
 
-from .choices import JobMachineType
+from .choices import JobClaimStatus, JobMachineType, JobRequestStatus
 
 
 def _generate_public_token():
@@ -20,14 +20,10 @@ def _generate_public_token():
 class JobRequest(TimeStampedModel):
     """Overflow job a printer wants to share with others."""
 
-    OPEN = "OPEN"
-    CLAIMED = "CLAIMED"
-    CLOSED = "CLOSED"
-    STATUS_CHOICES = [
-        (OPEN, "Open"),
-        (CLAIMED, "Claimed"),
-        (CLOSED, "Closed"),
-    ]
+    OPEN = JobRequestStatus.OPEN
+    CLAIMED = JobRequestStatus.CLAIMED
+    CLOSED = JobRequestStatus.CLOSED
+    STATUS_CHOICES = JobRequestStatus.choices
 
     created_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
@@ -107,14 +103,10 @@ class JobRequest(TimeStampedModel):
 class JobClaim(TimeStampedModel):
     """A printer's claim on a job request."""
 
-    PENDING = "PENDING"
-    ACCEPTED = "ACCEPTED"
-    REJECTED = "REJECTED"
-    STATUS_CHOICES = [
-        (PENDING, "Pending"),
-        (ACCEPTED, "Accepted"),
-        (REJECTED, "Rejected"),
-    ]
+    PENDING = JobClaimStatus.PENDING
+    ACCEPTED = JobClaimStatus.ACCEPTED
+    REJECTED = JobClaimStatus.REJECTED
+    STATUS_CHOICES = JobClaimStatus.choices
 
     job_request = models.ForeignKey(
         JobRequest,

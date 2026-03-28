@@ -18,6 +18,7 @@ class JobRequestListSerializer(serializers.ModelSerializer):
     created_by_email = serializers.EmailField(source="created_by.email", read_only=True)
     claims_count = serializers.SerializerMethodField()
     claims = serializers.SerializerMethodField()
+    status_label = serializers.CharField(source="get_status_display", read_only=True)
 
     class Meta:
         model = JobRequest
@@ -28,6 +29,7 @@ class JobRequestListSerializer(serializers.ModelSerializer):
             "location",
             "deadline",
             "status",
+            "status_label",
             "created_by",
             "created_by_email",
             "created_at",
@@ -51,6 +53,7 @@ class JobRequestDetailSerializer(serializers.ModelSerializer):
     created_by_email = serializers.EmailField(source="created_by.email", read_only=True)
     claims_count = serializers.SerializerMethodField()
     claims = serializers.SerializerMethodField()
+    status_label = serializers.CharField(source="get_status_display", read_only=True)
 
     class Meta:
         model = JobRequest
@@ -61,6 +64,7 @@ class JobRequestDetailSerializer(serializers.ModelSerializer):
             "location",
             "deadline",
             "status",
+            "status_label",
             "machine_type",
             "finishing_capabilities",
             "created_by",
@@ -91,6 +95,7 @@ class JobClaimSerializer(serializers.ModelSerializer):
 
     claimed_by_email = serializers.EmailField(source="claimed_by.email", read_only=True)
     job_request_title = serializers.SerializerMethodField()
+    status_label = serializers.CharField(source="get_status_display", read_only=True)
 
     class Meta:
         model = JobClaim
@@ -103,6 +108,7 @@ class JobClaimSerializer(serializers.ModelSerializer):
             "price_offered",
             "message",
             "status",
+            "status_label",
             "created_at",
         ]
 
@@ -113,6 +119,18 @@ class JobClaimSerializer(serializers.ModelSerializer):
 class JobRequestPublicSerializer(serializers.ModelSerializer):
     """Minimal safe fields for public token view. No internal data."""
 
+    status_label = serializers.CharField(source="get_status_display", read_only=True)
+
     class Meta:
         model = JobRequest
-        fields = ["id", "title", "specs", "location", "deadline", "status", "machine_type", "finishing_capabilities"]
+        fields = [
+            "id",
+            "title",
+            "specs",
+            "location",
+            "deadline",
+            "status",
+            "status_label",
+            "machine_type",
+            "finishing_capabilities",
+        ]
