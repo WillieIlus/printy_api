@@ -151,7 +151,8 @@ def select_paper_for_pricing(
 
 def calculate_sheet_pricing(
     *,
-    product,
+    shop,
+    product=None,
     quantity: int,
     paper: Paper,
     machine,
@@ -159,15 +160,17 @@ def calculate_sheet_pricing(
     sides: str,
     finishing_selections: list[dict] | None = None,
     use_cost_price: bool = False,
+    width_mm: int | None = None,
+    height_mm: int | None = None,
 ) -> PricingEngineResult:
     sheet_width, sheet_height = paper.get_dimensions_mm()
     imposition = build_imposition_breakdown(
         quantity=quantity,
-        finished_width_mm=product.default_finished_width_mm or 0,
-        finished_height_mm=product.default_finished_height_mm or 0,
+        finished_width_mm=width_mm or getattr(product, "default_finished_width_mm", 0) or 0,
+        finished_height_mm=height_mm or getattr(product, "default_finished_height_mm", 0) or 0,
         sheet_width_mm=sheet_width or 0,
         sheet_height_mm=sheet_height or 0,
-        bleed_mm=product.default_bleed_mm or 3,
+        bleed_mm=getattr(product, "default_bleed_mm", 3) or 3,
     )
     resolved_rate, print_rate = PrintingRate.resolve(machine, paper.sheet_size, color_mode, sides)
     paper_rate = _decimal(paper.buying_price if use_cost_price else paper.selling_price)
@@ -180,7 +183,7 @@ def calculate_sheet_pricing(
         good_sheets=imposition.good_sheets,
     )
     subtotal = paper_cost + print_cost + finishing_total
-    vat_summary = _resolve_vat_summary(product.shop, subtotal)
+    vat_summary = _resolve_vat_summary(shop, subtotal)
     grand_total = vat_summary["grand_total"]
     unit_price = grand_total / Decimal(quantity) if quantity else Decimal("0")
 
@@ -194,7 +197,7 @@ def calculate_sheet_pricing(
     return PricingEngineResult(
         pricing_mode=PricingMode.SHEET,
         quantity=quantity,
-        currency=getattr(product.shop, "currency", "KES") or "KES",
+        currency=getattr(shop, "currency", "KES") or "KES",
         totals={
             "subtotal": _format_money(vat_summary["subtotal"]),
             "paper_cost": _format_money(paper_cost),
@@ -243,7 +246,8 @@ def calculate_sheet_pricing(
 
 def calculate_large_format_pricing(
     *,
-    product,
+    shop,
+    product=None,
     quantity: int,
     material: Material,
     width_mm: int,
@@ -261,7 +265,7 @@ def calculate_large_format_pricing(
         area_sqm=area_sqm,
     )
     subtotal = material_cost + finishing_total
-    vat_summary = _resolve_vat_summary(product.shop, subtotal)
+    vat_summary = _resolve_vat_summary(shop, subtotal)
     grand_total = vat_summary["grand_total"]
     unit_price = grand_total / Decimal(quantity) if quantity else Decimal("0")
     explanations = [
@@ -273,7 +277,7 @@ def calculate_large_format_pricing(
     return PricingEngineResult(
         pricing_mode=PricingMode.LARGE_FORMAT,
         quantity=quantity,
-        currency=getattr(product.shop, "currency", "KES") or "KES",
+        currency=getattr(shop, "currency", "KES") or "KES",
         totals={
             "subtotal": _format_money(vat_summary["subtotal"]),
             "paper_cost": _format_money(Decimal("0")),

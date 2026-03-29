@@ -181,6 +181,7 @@ def get_product_starting_price(product: Product) -> dict:
             return {"price": None, "is_valid": False, "errors": errors, "warnings": warnings, "assumptions": {}}
 
         pricing = calculate_sheet_pricing(
+            shop=shop,
             product=product,
             quantity=min_qty,
             paper=paper,
@@ -227,6 +228,7 @@ def get_product_starting_price(product: Product) -> dict:
 
     mat = materials[0]
     pricing = calculate_large_format_pricing(
+        shop=shop,
         product=product,
         quantity=min_qty,
         material=mat,
@@ -431,6 +433,7 @@ def compute_product_price_range_est(product: Product) -> dict:
     paper_costs = []
     for paper in eligible_papers:
         pricing = calculate_sheet_pricing(
+            shop=shop,
             product=product,
             quantity=min_qty,
             paper=paper,
@@ -625,6 +628,7 @@ def get_product_price_range(product: Product) -> dict:
                         )
                         if rate and price is not None:
                             pricing = calculate_sheet_pricing(
+                                shop=shop,
                                 product=product,
                                 quantity=min_qty,
                                 paper=paper,
@@ -688,6 +692,7 @@ def get_product_price_range(product: Product) -> dict:
         totals = [
             Decimal(
                 calculate_large_format_pricing(
+                    shop=shop,
                     product=product,
                     quantity=min_qty,
                     material=m,

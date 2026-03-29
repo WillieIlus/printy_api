@@ -541,6 +541,9 @@ class QuoteItemWriteSerializer(serializers.ModelSerializer):
             elif item_type == "CUSTOM":
                 validated_data["pricing_mode"] = "LARGE_FORMAT" if material else "SHEET"
 
+        if item_spec_snapshot is None:
+            item_spec_snapshot = self._build_item_spec_snapshot(validated_data, finishings_data)
+
         with transaction.atomic():
             item = QuoteItem.objects.create(
                 quote_request=quote_request,
@@ -560,19 +563,67 @@ class QuoteItemWriteSerializer(serializers.ModelSerializer):
         from quotes.pricing_service import compute_and_store_pricing
 
         finishings_data = validated_data.pop("finishings", None)
+        item_spec_snapshot = validated_data.pop("item_spec_snapshot", None)
         for attr, value in validated_data.items():
             setattr(instance, attr, value)
+        if item_spec_snapshot is not None:
+            instance.item_spec_snapshot = item_spec_snapshot
         instance.save()
         if finishings_data is not None:
             instance.finishings.all().delete()
             for fd in finishings_data:
                 QuoteItemFinishing.objects.create(quote_item=instance, **fd)
+            if item_spec_snapshot is None:
+                instance.item_spec_snapshot = self._build_item_spec_snapshot(
+                    {
+                        "item_type": instance.item_type,
+                        "product": instance.product,
+                        "title": instance.title,
+                        "spec_text": instance.spec_text,
+                        "quantity": instance.quantity,
+                        "pricing_mode": instance.pricing_mode,
+                        "paper": instance.paper,
+                        "material": instance.material,
+                        "chosen_width_mm": instance.chosen_width_mm,
+                        "chosen_height_mm": instance.chosen_height_mm,
+                        "sides": instance.sides,
+                        "color_mode": instance.color_mode,
+                        "machine": instance.machine,
+                    },
+                    finishings_data,
+                )
+                instance.save(update_fields=["item_spec_snapshot", "updated_at"])
         try:
             compute_and_store_pricing(instance)
         except Exception:
             instance.needs_review = True
             instance.save(update_fields=["needs_review"])
         return instance
+
+    def _build_item_spec_snapshot(self, item_data, finishings_data):
+        return {
+            "item_type": item_data.get("item_type"),
+            "product_id": getattr(item_data.get("product"), "id", None),
+            "title": item_data.get("title") or "",
+            "spec_text": item_data.get("spec_text") or "",
+            "quantity": item_data.get("quantity"),
+            "pricing_mode": item_data.get("pricing_mode"),
+            "paper_id": getattr(item_data.get("paper"), "id", None),
+            "material_id": getattr(item_data.get("material"), "id", None),
+            "chosen_width_mm": item_data.get("chosen_width_mm"),
+            "chosen_height_mm": item_data.get("chosen_height_mm"),
+            "sides": item_data.get("sides") or "",
+            "color_mode": item_data.get("color_mode") or "COLOR",
+            "machine_id": getattr(item_data.get("machine"), "id", None),
+            "finishings": [
+                {
+                    "finishing_rate_id": getattr(finishing.get("finishing_rate"), "id", None),
+                    "apply_to_sides": finishing.get("apply_to_sides"),
+                    "selected_side": finishing.get("selected_side"),
+                }
+                for finishing in finishings_data
+            ],
+        }
 
 
 class QuoteItemReadSerializer(serializers.ModelSerializer):

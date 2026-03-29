@@ -20,20 +20,26 @@ class FinishingSelectionSerializer(serializers.Serializer):
 
 class CalculatorPreviewSerializer(serializers.Serializer):
     shop = serializers.PrimaryKeyRelatedField(queryset=Shop.objects.all())
-    product = serializers.PrimaryKeyRelatedField(queryset=Product.objects.all())
+    product = serializers.PrimaryKeyRelatedField(queryset=Product.objects.all(), required=False, allow_null=True)
     quantity = serializers.IntegerField(min_value=1)
     paper = serializers.PrimaryKeyRelatedField(queryset=Paper.objects.filter(is_active=True))
     machine = serializers.PrimaryKeyRelatedField(queryset=Machine.objects.filter(is_active=True))
     color_mode = serializers.ChoiceField(choices=["BW", "COLOR"], default="COLOR")
     sides = serializers.ChoiceField(choices=["SIMPLEX", "DUPLEX"], default="SIMPLEX")
+    width_mm = serializers.IntegerField(required=False, allow_null=True, min_value=1)
+    height_mm = serializers.IntegerField(required=False, allow_null=True, min_value=1)
     finishings = FinishingSelectionSerializer(many=True, required=False)
 
     def validate(self, attrs):
         shop = attrs["shop"]
+        product = attrs.get("product")
         errors = {}
 
-        if attrs["product"].shop_id != shop.id:
+        if product and product.shop_id != shop.id:
             errors["product"] = ["Product must belong to the selected shop."]
+        if not product and (not attrs.get("width_mm") or not attrs.get("height_mm")):
+            errors["non_field_errors"] = ["width_mm and height_mm are required for custom previews."]
+
         if attrs["paper"].shop_id != shop.id:
             errors["paper"] = ["Paper must belong to the selected shop."]
         if attrs["machine"].shop_id != shop.id:

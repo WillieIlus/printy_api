@@ -4,7 +4,7 @@ API URL configuration with DRF routers.
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 
-from . import quote_views, views, workflow_views
+from . import public_matching_views, quote_views, views, workflow_views
 from .analytics_views import AnalyticsEventIngestView
 from .admin_views import (
     AnalyticsDashboardSummaryView,
@@ -94,7 +94,7 @@ urlpatterns = [
     path("", include(public_router.urls)),
     path("", include(finishing_category_router.urls)),
     path("public/products/", views.PublicAllProductsView.as_view(), name="public-all-products"),
-    path("public/match-shops/", views.MatchShopsView.as_view(), name="public-match-shops"),
+    path("public/match-shops/", public_matching_views.PublicMatchShopsView.as_view(), name="public-match-shops"),
     # SEO (public, no auth — for sitemap and dynamic pages)
     path("seo/locations/", SEOLocationsView.as_view(), name="seo-locations"),
     path("seo/locations/<slug:slug>/", SEOLocationDetailView.as_view(), name="seo-location-detail"),
@@ -221,6 +221,11 @@ urlpatterns = [
         "public/shops/<slug:slug>/custom-options/",
         views.ShopCustomOptionsView.as_view(),
         name="public-shop-custom-options",
+    ),
+    path(
+        "public/shops/<slug:slug>/calculator-preview/",
+        public_matching_views.PublicShopCalculatorPreviewView.as_view(),
+        name="public-shop-calculator-preview",
     ),
     path(
         "public/products/<int:pk>/options/",

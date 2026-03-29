@@ -1,9 +1,13 @@
 """Signals for shops app."""
-from django.db.models.signals import post_save
+from django.db.models.signals import post_delete, post_save
 from django.dispatch import receiver
 
 from accounts.models import User
 from accounts.services.roles import promote_to_shop_owner, set_account_role
+from catalog.models import Product
+from inventory.models import Machine, Paper
+from pricing.models import FinishingRate, Material, PrintingRate
+from services.public_matching import recompute_shop_match_readiness
 
 from .models import OpeningHours, Shop, ShopMembership
 
@@ -38,6 +42,12 @@ def promote_shop_owner_role(sender, instance, **kwargs):
     promote_to_shop_owner(instance.owner)
 
 
+@receiver(post_save, sender=Shop)
+def recompute_shop_readiness_after_shop_save(sender, instance, **kwargs):
+    """Keep denormalized public matching flags current on shop edits."""
+    recompute_shop_match_readiness(instance)
+
+
 @receiver(post_save, sender=ShopMembership)
 def promote_shop_membership_role(sender, instance, **kwargs):
     """Active delegated members are represented as staff accounts."""
@@ -48,3 +58,36 @@ def promote_shop_membership_role(sender, instance, **kwargs):
         return
     if instance.user.role == User.Role.CLIENT:
         set_account_role(instance.user, User.Role.STAFF)
+
+
+def _related_shop_for_instance(instance):
+    if isinstance(instance, Shop):
+        return instance
+    if hasattr(instance, "shop") and getattr(instance, "shop_id", None):
+        return instance.shop
+    if hasattr(instance, "machine") and getattr(instance, "machine_id", None):
+        return instance.machine.shop
+    return None
+
+
+def _recompute_related_shop(instance):
+    shop = _related_shop_for_instance(instance)
+    if shop:
+        recompute_shop_match_readiness(shop)
+
+
+@receiver(post_save, sender=Product)
+@receiver(post_delete, sender=Product)
+@receiver(post_save, sender=Machine)
+@receiver(post_delete, sender=Machine)
+@receiver(post_save, sender=Paper)
+@receiver(post_delete, sender=Paper)
+@receiver(post_save, sender=Material)
+@receiver(post_delete, sender=Material)
+@receiver(post_save, sender=PrintingRate)
+@receiver(post_delete, sender=PrintingRate)
+@receiver(post_save, sender=FinishingRate)
+@receiver(post_delete, sender=FinishingRate)
+def recompute_shop_readiness_from_related_models(sender, instance, **kwargs):
+    """Refresh public calculator readiness when pricing or catalog setup changes."""
+    _recompute_related_shop(instance)

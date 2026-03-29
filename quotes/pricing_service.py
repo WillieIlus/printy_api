@@ -285,6 +285,7 @@ def _compute_sheet_pricing(item, product, quantity, sides_count, result: Pricing
         return result
 
     pricing = calculate_sheet_pricing(
+        shop=getattr(item, "shop", product.shop if product else None),
         product=product,
         quantity=quantity,
         paper=paper,

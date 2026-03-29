@@ -244,6 +244,7 @@ def calculate_quote_item(
             finishings.append({"rule": rule, "selected_side": "both"})
 
     pricing = calculate_sheet_pricing(
+        shop=product.shop,
         product=product,
         quantity=quantity,
         paper=paper,

@@ -114,7 +114,7 @@ class PublicShopViewSet(viewsets.ReadOnlyModelViewSet):
     lookup_url_kwarg = "slug"
 
     def get_queryset(self):
-        return Shop.objects.filter(is_active=True).exclude(
+        return Shop.objects.filter(is_active=True, is_public=True).exclude(
             slug__isnull=True
         ).exclude(slug="").prefetch_related("opening_hours")
 
@@ -380,7 +380,8 @@ class PublicAllProductsView(APIView):
         products = (
             Product.objects.filter(
                 shop__is_active=True,
-                shop__pricing_ready=True,
+                shop__is_public=True,
+                shop__public_match_ready=True,
                 is_active=True,
                 status="PUBLISHED",
             )

@@ -59,13 +59,15 @@ class CalculatorPreviewView(APIView):
         validated = serializer.validated_data
         pricing = build_quote_preview(
             shop=validated["shop"],
-            product=validated["product"],
+            product=validated.get("product"),
             quantity=validated["quantity"],
             paper=validated["paper"],
             machine=validated["machine"],
             color_mode=validated["color_mode"],
             sides=validated["sides"],
             finishing_selections=validated.get("finishings") or [],
+            width_mm=validated.get("width_mm"),
+            height_mm=validated.get("height_mm"),
         )
         return Response(pricing)
 

@@ -157,6 +157,26 @@ class Shop(AutoSlugMixin, models.Model):
         verbose_name=_("pricing ready"),
         help_text=_("Denormalized flag: True when shop has at least one machine, paper, and printing rate."),
     )
+    public_match_ready = models.BooleanField(
+        default=False,
+        verbose_name=_("public match ready"),
+        help_text=_("True when the shop can produce usable public calculator preview results."),
+    )
+    supports_custom_requests = models.BooleanField(
+        default=True,
+        verbose_name=_("supports custom requests"),
+        help_text=_("Whether public calculator custom requests can be matched to this shop."),
+    )
+    supports_catalog_requests = models.BooleanField(
+        default=True,
+        verbose_name=_("supports catalog requests"),
+        help_text=_("Whether public catalog/tweak calculators can match against this shop."),
+    )
+    is_public = models.BooleanField(
+        default=True,
+        verbose_name=_("is public"),
+        help_text=_("Whether this shop can appear in public marketplace matching and browsing."),
+    )
     opening_time = models.TimeField(
         default="08:00",
         verbose_name=_("opening time"),
