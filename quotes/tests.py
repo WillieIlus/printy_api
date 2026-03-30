@@ -19,6 +19,7 @@ from quotes.services import (
     calculate_quote_item,
     calculate_quote_request,
 )
+from quotes.pricing_service import compute_and_store_pricing
 from shops.models import Shop
 
 User = get_user_model()
@@ -380,6 +381,8 @@ class QuoteEngineTests(TestCase):
         resp = build_preview_price_response(qr)
         for key in ("can_calculate", "total", "lines", "needs_review_items", "missing_fields", "reason"):
             self.assertIn(key, resp, f"Response must include {key}")
+        self.assertIn("item_explanations", resp)
+        self.assertIn("item_calculations", resp)
         self.assertEqual(resp["total"], 0)
         self.assertEqual(resp["lines"], [])
         self.assertEqual(resp["needs_review_items"], [])
@@ -518,3 +521,58 @@ class QuoteEngineTests(TestCase):
         self.assertIsNotNone(item.pricing_locked_at)
         self.assertEqual(item.unit_price, Decimal("0.25"))
         self.assertEqual(item.line_total, Decimal("25.00"))
+
+    def test_compute_and_store_pricing_snapshot_includes_engine_layout(self):
+        qr = QuoteRequest.objects.create(
+            shop=self.shop,
+            created_by=self.user,
+            customer_name="Engine Snapshot",
+            customer_email="engine@test.com",
+            status="DRAFT",
+        )
+        item = QuoteItem.objects.create(
+            quote_request=qr,
+            product=self.product_sheet,
+            quantity=100,
+            pricing_mode=PricingMode.SHEET,
+            paper=self.paper,
+            machine=self.machine,
+            sides=Sides.SIMPLEX,
+            color_mode=ColorMode.COLOR,
+        )
+
+        result = compute_and_store_pricing(item)
+        item.refresh_from_db()
+
+        self.assertTrue(result.can_calculate)
+        self.assertEqual(item.pricing_snapshot["engine_type"], "flat_sheet")
+        self.assertIn("layout_result", item.pricing_snapshot)
+        self.assertIn("finishing_plan", item.pricing_snapshot)
+        self.assertIn("explanations", item.pricing_snapshot)
+        self.assertIn("calculation_description", item.pricing_snapshot)
+
+    def test_preview_price_response_includes_item_explanations(self):
+        qr = QuoteRequest.objects.create(
+            shop=self.shop,
+            created_by=self.user,
+            customer_name="Explain",
+            customer_email="explain@test.com",
+            status="DRAFT",
+        )
+        item = QuoteItem.objects.create(
+            quote_request=qr,
+            product=self.product_sheet,
+            quantity=100,
+            pricing_mode=PricingMode.SHEET,
+            paper=self.paper,
+            machine=self.machine,
+            sides=Sides.SIMPLEX,
+            color_mode=ColorMode.COLOR,
+        )
+
+        resp = build_preview_price_response(qr)
+
+        self.assertIn(str(item.id), resp["item_explanations"])
+        self.assertIn(str(item.id), resp["item_calculations"])
+        self.assertTrue(resp["item_explanations"][str(item.id)])
+        self.assertIn("Sheet job", resp["item_calculations"][str(item.id)])

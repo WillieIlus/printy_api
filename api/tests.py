@@ -1856,6 +1856,37 @@ class CalculatorPreviewAPITestCase(TestCase):
         self.assertEqual(data["breakdown"]["finishings"][0]["formula"], "good_sheets x rate x side_count")
         self.assertIn("Printing:", data["explanations"][2])
 
+    def test_tweaked_item_response_exposes_calculation_fields(self):
+        self.owner.is_staff = True
+        self.owner.save(update_fields=["is_staff"])
+        self.client.force_authenticate(user=self.owner)
+        quote_request = QuoteRequest.objects.create(
+            shop=self.shop,
+            created_by=self.owner,
+            customer_name="Preview Customer",
+            status=QuoteStatus.DRAFT,
+        )
+        item = QuoteItem.objects.create(
+            quote_request=quote_request,
+            item_type="PRODUCT",
+            product=self.product,
+            quantity=100,
+            pricing_mode=PricingMode.SHEET,
+            paper=self.paper,
+            machine=self.machine,
+            color_mode="COLOR",
+            sides="DUPLEX",
+        )
+        from quotes.pricing_service import compute_and_store_pricing
+
+        compute_and_store_pricing(item)
+        response = self.client.get(f"/api/quotes/{quote_request.id}/")
+
+        self.assertEqual(response.status_code, 200)
+        item_payload = response.json()["items"][0]
+        self.assertIn("calculation_description", item_payload)
+        self.assertIn("calculation_explanations", item_payload)
+
     def test_preview_returns_field_errors_for_cross_shop_resources(self):
         response = self.client.post(
             "/api/calculator/preview/",

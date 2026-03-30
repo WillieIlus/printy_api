@@ -83,6 +83,9 @@ class QuoteDraftUpdateSerializer(serializers.Serializer):
 
 class QuoteDraftReadSerializer(serializers.ModelSerializer):
     generated_request_ids = serializers.SerializerMethodField()
+    shop_name = serializers.CharField(source="shop.name", read_only=True)
+    shop_slug = serializers.CharField(source="shop.slug", read_only=True)
+    shop_currency = serializers.CharField(source="shop.currency", read_only=True)
 
     class Meta:
         model = QuoteDraft
@@ -92,6 +95,9 @@ class QuoteDraftReadSerializer(serializers.ModelSerializer):
             "title",
             "status",
             "shop",
+            "shop_name",
+            "shop_slug",
+            "shop_currency",
             "selected_product",
             "calculator_inputs_snapshot",
             "pricing_snapshot",

@@ -32,6 +32,17 @@ class PricingEngineResult:
     vat: dict | None = None
     can_calculate: bool = True
     reason: str = ""
+    copies_per_sheet: int | None = None
+    good_sheets: int | None = None
+    parent_sheets_required: int | None = None
+    parent_sheet_name: str | None = None
+    rotated: bool | None = None
+    roll_width_mm: int | None = None
+    roll_length_mm: int | None = None
+    tiles_x: int | None = None
+    tiles_y: int | None = None
+    total_tiles: int | None = None
+    explanation_lines: list[str] | None = None
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -241,6 +252,14 @@ def calculate_sheet_pricing(
             f"VAT: {_format_money(vat_summary['vat_amount'])} ({vat_summary['vat']['mode']})."
         ],
         vat=vat_summary["vat"],
+        copies_per_sheet=imposition.copies_per_sheet,
+        good_sheets=imposition.good_sheets,
+        parent_sheets_required=imposition.good_sheets,
+        parent_sheet_name=paper.sheet_size,
+        rotated=imposition.orientation == "rotated",
+        explanation_lines=explanations + [
+            f"VAT: {_format_money(vat_summary['vat_amount'])} ({vat_summary['vat']['mode']})."
+        ],
     )
 
 
@@ -312,4 +331,7 @@ def calculate_large_format_pricing(
             f"VAT: {_format_money(vat_summary['vat_amount'])} ({vat_summary['vat']['mode']})."
         ],
         vat=vat_summary["vat"],
+        explanation_lines=explanations + [
+            f"VAT: {_format_money(vat_summary['vat_amount'])} ({vat_summary['vat']['mode']})."
+        ],
     )

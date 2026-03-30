@@ -97,6 +97,8 @@ class QuoteCalculatorTestCase(TestCase):
         self.assertGreaterEqual(result.sheets_required, 1)
         self.assertGreaterEqual(result.imposition["per_sheet"], 1)
         self.assertIn(result.imposition["sheet_size_used"], ["SRA3", "A3", "A4"])
+        self.assertIn("utilization_ratio", result.imposition)
+        self.assertIn("waste_area_mm2", result.imposition)
 
     def test_costs_structure(self):
         """Costs dict has all required keys with string values."""

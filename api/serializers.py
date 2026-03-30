@@ -687,6 +687,8 @@ class QuoteItemWithBreakdownSerializer(serializers.ModelSerializer):
 
     product_name = serializers.SerializerMethodField()
     finishings = QuoteItemFinishingWriteSerializer(many=True, read_only=True)
+    calculation_description = serializers.SerializerMethodField()
+    calculation_explanations = serializers.SerializerMethodField()
 
     class Meta:
         model = QuoteItem
@@ -711,6 +713,8 @@ class QuoteItemWithBreakdownSerializer(serializers.ModelSerializer):
             "unit_price",
             "line_total",
             "pricing_snapshot",
+            "calculation_description",
+            "calculation_explanations",
             "pricing_locked_at",
             "finishings",
         ]
@@ -719,6 +723,14 @@ class QuoteItemWithBreakdownSerializer(serializers.ModelSerializer):
         if obj.item_type == "PRODUCT" and obj.product_id:
             return obj.product.name
         return obj.title or ""
+
+    def get_calculation_description(self, obj):
+        snapshot = obj.pricing_snapshot or {}
+        return snapshot.get("calculation_description", "")
+
+    def get_calculation_explanations(self, obj):
+        snapshot = obj.pricing_snapshot or {}
+        return snapshot.get("explanations", [])
 
 
 class QuoteCreateSerializer(serializers.ModelSerializer):

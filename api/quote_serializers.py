@@ -81,6 +81,8 @@ class QuoteItemShopSerializer(serializers.ModelSerializer):
     product_name = serializers.SerializerMethodField()
     paper_label = serializers.SerializerMethodField()
     finishings = QuoteItemFinishingReadSerializer(many=True, read_only=True)
+    calculation_description = serializers.SerializerMethodField()
+    calculation_explanations = serializers.SerializerMethodField()
 
     class Meta:
         model = QuoteItem
@@ -106,6 +108,8 @@ class QuoteItemShopSerializer(serializers.ModelSerializer):
             "unit_price",
             "line_total",
             "pricing_snapshot",
+            "calculation_description",
+            "calculation_explanations",
             "pricing_locked_at",
             "needs_review",
             "finishings",
@@ -121,6 +125,14 @@ class QuoteItemShopSerializer(serializers.ModelSerializer):
             p = obj.paper
             return f"{p.sheet_size} {p.gsm}gsm {p.get_paper_type_display()}"
         return None
+
+    def get_calculation_description(self, obj):
+        snapshot = obj.pricing_snapshot or {}
+        return snapshot.get("calculation_description", "")
+
+    def get_calculation_explanations(self, obj):
+        snapshot = obj.pricing_snapshot or {}
+        return snapshot.get("explanations", [])
 
 
 class ShopQuoteSummarySerializer(serializers.ModelSerializer):

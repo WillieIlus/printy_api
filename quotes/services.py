@@ -114,6 +114,13 @@ def get_quote_item_calculation_description(item: QuoteItem) -> str:
     """
     Human-readable description of how the price is calculated.
     """
+    from quotes.pricing_service import compute_quote_item_pricing
+
+    pricing = compute_quote_item_pricing(item)
+    if pricing.calculation_description:
+        extra = "\n".join(pricing.explanations or [])
+        return f"{pricing.calculation_description}\n{extra}".strip()
+
     product = item.product
     quantity = item.quantity or 0
     pricing_mode = _get_effective_pricing_mode(item)
@@ -443,6 +450,8 @@ def build_preview_price_response(quote_request: QuoteRequest) -> dict:
     items_missing_fields = {}
     item_diagnostics = {}
     has_negotiable = False
+    item_explanations = {}
+    item_calculations = {}
 
     for item in quote_request.items.prefetch_related(
         "paper", "material", "machine", "product", "finishings__finishing_rate", "services__service_rate"
@@ -463,6 +472,11 @@ def build_preview_price_response(quote_request: QuoteRequest) -> dict:
             continue
 
         unit_price, line_total = calculate_quote_item(item, force=False)
+        from quotes.pricing_service import compute_quote_item_pricing
+
+        pricing = compute_quote_item_pricing(item)
+        item_explanations[str(item.id)] = pricing.explanations
+        item_calculations[str(item.id)] = pricing.calculation_description
         if line_total and line_total > 0:
             total += line_total
             item_label = (
@@ -500,6 +514,8 @@ def build_preview_price_response(quote_request: QuoteRequest) -> dict:
         "currency": currency,
         "total": float(total),
         "lines": lines,
+        "item_explanations": item_explanations,
+        "item_calculations": item_calculations,
         **diagnostics,
         "hasNegotiable": has_negotiable,
         "items_missing_fields": items_missing_fields,

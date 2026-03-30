@@ -13,16 +13,20 @@ Design:
 """
 from dataclasses import dataclass, field, asdict
 from decimal import Decimal
-from math import ceil
 from typing import Optional
 
 from catalog.choices import PricingMode
-from catalog.imposition import (
-    pieces_per_sheet as _pieces_per_sheet,
-    sheets_needed as _sheets_needed,
-)
+from catalog.imposition import sheets_needed as _sheets_needed
 from pricing.choices import ChargeUnit, Sides
 from pricing.models import PrintingRate
+from services.engine.integration import (
+    build_job_spec,
+    build_media_spec_from_material,
+    build_media_spec_from_paper,
+    classify_finishing_spec,
+    serialize_result,
+)
+from services.engine.services.quote_calculator import QuoteCalculator as EngineQuoteCalculator
 from services.pricing.engine import calculate_sheet_pricing
 
 
@@ -41,6 +45,7 @@ class FinishingLineItem:
 class PricingResult:
     can_calculate: bool = False
     pricing_mode: str = ""
+    engine_type: str = ""
 
     # Imposition (SHEET)
     copies_per_sheet: int = 0
@@ -67,6 +72,11 @@ class PricingResult:
     sides_label: str = ""
     color_label: str = ""
     material_label: str = ""
+    layout_result: dict = field(default_factory=dict)
+    finishing_plan: dict = field(default_factory=dict)
+    layout_notes: list = field(default_factory=list)
+    explanations: list = field(default_factory=list)
+    calculation_description: str = ""
 
     # Missing fields (empty = fully calculable)
     missing_fields: list = field(default_factory=list)
@@ -183,6 +193,31 @@ def _iter_finishings(finishings):
     return finishings or []
 
 
+def _calculate_engine_summary(item, product=None):
+    product = product or getattr(item, "product", None)
+    finishings = list(_iter_finishings(getattr(item, "finishings", [])))
+    calculator = EngineQuoteCalculator()
+
+    if getattr(item, "paper_id", None) and getattr(item, "paper", None):
+        return calculator.calculate(
+            build_job_spec(product=product, item=item),
+            [build_media_spec_from_paper(item.paper)],
+            classify_finishing_spec(finishings, print_sides=getattr(item, "sides", None)),
+        )
+
+    if getattr(item, "material_id", None) and getattr(item, "material", None):
+        media = build_media_spec_from_material(item.material)
+        if media is None:
+            return None
+        return calculator.calculate(
+            build_job_spec(product=product, item=item),
+            [media],
+            classify_finishing_spec(finishings, print_sides=getattr(item, "sides", None)),
+        )
+
+    return None
+
+
 def compute_finishings_cost(
     finishings_qs,
     quantity: int,
@@ -284,6 +319,8 @@ def _compute_sheet_pricing(item, product, quantity, sides_count, result: Pricing
             result.reason = f"Missing: {', '.join(result.missing_fields)}"
         return result
 
+    engine_summary = _calculate_engine_summary(item, product)
+
     pricing = calculate_sheet_pricing(
         shop=getattr(item, "shop", product.shop if product else None),
         product=product,
@@ -299,10 +336,20 @@ def _compute_sheet_pricing(item, product, quantity, sides_count, result: Pricing
             }
             for qif in item.finishings.select_related("finishing_rate").all()
         ],
+        width_mm=getattr(product, "default_finished_width_mm", None) or None,
+        height_mm=getattr(product, "default_finished_height_mm", None) or None,
     ).to_dict()
 
-    result.copies_per_sheet = pricing["breakdown"]["imposition"]["copies_per_sheet"]
-    result.sheets_needed = pricing["breakdown"]["imposition"]["good_sheets"]
+    layout = engine_summary.layout_result if engine_summary else None
+    result.engine_type = engine_summary.engine_type if engine_summary else "flat_sheet"
+    result.copies_per_sheet = (
+        getattr(layout, "copies_per_sheet", 0)
+        or pricing["breakdown"]["imposition"]["copies_per_sheet"]
+    )
+    result.sheets_needed = (
+        getattr(layout, "total_sheets", 0)
+        or pricing["breakdown"]["imposition"]["good_sheets"]
+    )
     result.paper_cost = pricing["totals"]["paper_cost"]
     result.print_cost = pricing["totals"]["print_cost"]
     result.finishing_total = pricing["totals"]["finishing_total"]
@@ -311,6 +358,15 @@ def _compute_sheet_pricing(item, product, quantity, sides_count, result: Pricing
     result.paper_label = pricing["breakdown"]["paper"]["label"]
     result.machine_label = pricing["breakdown"]["printing"]["machine_name"]
     result.finishing_lines = pricing["breakdown"]["finishings"]
+    result.layout_result = serialize_result(layout) if layout else {}
+    result.finishing_plan = serialize_result(engine_summary.finishing) if engine_summary and engine_summary.finishing else {}
+    result.layout_notes = list(getattr(engine_summary, "notes", []) or [])
+    result.explanations = list(pricing.get("explanations", []))
+    result.explanations.extend(result.layout_notes)
+    result.calculation_description = (
+        f"Sheet job: {result.copies_per_sheet} up on {paper.sheet_size}, "
+        f"{result.sheets_needed} sheet(s), paper + printing + finishing."
+    )
     result.can_calculate = True
     return result
 
@@ -348,6 +404,23 @@ def _compute_large_format_pricing(item, product, quantity, sides_count, result: 
     line_total = material_cost + finishing_total + services_total
     result.line_total = str(line_total)
     result.unit_price = str(line_total / quantity) if quantity > 0 else "0"
+    engine_summary = _calculate_engine_summary(item, product)
+    result.engine_type = engine_summary.engine_type if engine_summary else "roll"
+    result.layout_result = serialize_result(engine_summary.layout_result) if engine_summary and engine_summary.layout_result else {}
+    result.finishing_plan = serialize_result(engine_summary.finishing) if engine_summary and engine_summary.finishing else {}
+    result.layout_notes = list(getattr(engine_summary, "notes", []) or [])
+    result.explanations = [
+        f"Large format area: {result.area_m2} sqm for {quantity} piece(s).",
+        f"Material cost: {result.material_cost}.",
+        f"Finishing total: {result.finishing_total}.",
+    ]
+    result.explanations.extend(result.layout_notes)
+    layout_result = result.layout_result or {}
+    if layout_result.get("roll_length_mm"):
+        result.explanations.append(
+            f"Roll usage: {layout_result['roll_length_mm']} mm total length on {layout_result.get('media_name') or 'selected roll'}."
+        )
+    result.calculation_description = "Large format job: material area/roll usage plus finishing."
     result.can_calculate = True
     return result
 

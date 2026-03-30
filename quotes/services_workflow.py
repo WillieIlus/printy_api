@@ -63,22 +63,26 @@ def send_quote_draft_to_shops(*, draft: QuoteDraft, shops: list[Shop], request_d
     if draft.status != QuoteDraftStatus.DRAFT:
         raise ValueError("Only draft quote drafts can be sent.")
 
+    merged_request_details = {
+        **(draft.request_details_snapshot or {}),
+        **(request_details_snapshot or {}),
+    }
     created_requests = []
     for shop in shops:
         quote_request = QuoteRequest.objects.create(
             shop=shop,
             created_by=draft.user,
-            customer_name=(request_details_snapshot or {}).get("customer_name") or getattr(draft.user, "name", "") or draft.user.email,
-            customer_email=(request_details_snapshot or {}).get("customer_email") or draft.user.email,
-            customer_phone=(request_details_snapshot or {}).get("customer_phone", ""),
-            notes=(request_details_snapshot or {}).get("notes", ""),
+            customer_name=merged_request_details.get("customer_name") or getattr(draft.user, "name", "") or draft.user.email,
+            customer_email=merged_request_details.get("customer_email") or draft.user.email,
+            customer_phone=merged_request_details.get("customer_phone", ""),
+            notes=merged_request_details.get("notes", ""),
             status=QuoteStatus.SUBMITTED,
             source_draft=draft,
             request_snapshot={
                 "draft_reference": draft.draft_reference,
                 "calculator_inputs": draft.calculator_inputs_snapshot,
                 "pricing_snapshot": draft.pricing_snapshot,
-                "request_details": request_details_snapshot or draft.request_details_snapshot or {},
+                "request_details": merged_request_details,
                 "custom_product_snapshot": draft.custom_product_snapshot,
             },
         )
