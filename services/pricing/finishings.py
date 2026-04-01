@@ -58,6 +58,21 @@ def _resolve_units(
     return area_sqm, f"{area_sqm.normalize()} sqm"
 
 
+def _format_unit_label(billing_basis: str, units: Decimal) -> str:
+    normalized_units = int(units) if units == units.to_integral_value() else units.normalize()
+    if billing_basis == FinishingBillingBasis.PER_SHEET:
+        return f"{normalized_units} sheets"
+    if billing_basis == FinishingBillingBasis.PER_PIECE:
+        return f"{normalized_units} pieces"
+    if billing_basis == FinishingBillingBasis.FLAT_PER_GROUP:
+        return f"{normalized_units} groups"
+    if billing_basis == FinishingBillingBasis.FLAT_PER_LINE:
+        return f"{normalized_units} lines"
+    if billing_basis == FinishingBillingBasis.FLAT_PER_JOB:
+        return "1 job"
+    return f"{normalized_units} sqm"
+
+
 def compute_finishing_line(
     rule,
     *,
@@ -78,27 +93,47 @@ def compute_finishing_line(
     )
     side_count = selected_side_count(selected_side) if rule.side_mode == FinishingSideMode.PER_SELECTED_SIDE else 1
     side_multiplier = Decimal(side_count)
-    base_rate = Decimal(str(rule.price))
-    subtotal = base_rate * units * side_multiplier
-    minimum_charge = Decimal(str(rule.minimum_charge or "0"))
-    total = max(subtotal, minimum_charge) if minimum_charge else subtotal
     is_lamination = bool(
         getattr(rule, "is_lamination_rule", None) and rule.is_lamination_rule()
     )
-    explanation = (
-        f"{rule.name}: {units_label} at {base_rate} {getattr(rule, 'display_unit_label', '').strip() or rule.billing_basis}"
+    use_both_side_override = bool(
+        is_lamination
+        and selected_side == "both"
+        and getattr(rule, "double_side_price", None) is not None
     )
+    base_rate = Decimal(str(
+        getattr(rule, "double_side_price", rule.price)
+        if use_both_side_override
+        else rule.price
+    ))
+    subtotal = base_rate * units
+    if not use_both_side_override:
+        subtotal *= side_multiplier
+    minimum_charge = Decimal(str(rule.minimum_charge or "0"))
+    total = max(subtotal, minimum_charge) if minimum_charge else subtotal
+    human_units_label = _format_unit_label(rule.billing_basis, units)
+    explanation = f"{rule.name}: {human_units_label} x {base_rate}"
     formula = "units x rate"
     calculation_basis = f"{units} x {base_rate}"
-    if side_count > 1:
+    if side_count > 1 and not use_both_side_override:
         formula += " x side_count"
         calculation_basis += f" x {side_count}"
-        explanation += f" x {int(side_multiplier)} side(s)"
+        explanation += f" x {int(side_multiplier)} sides"
     if is_lamination:
-        formula = "good_sheets x rate x side_count"
-        explanation += f"; lamination total = {good_sheets} good_sheets x {base_rate} rate x {side_count} side_count"
+        formula = "good_sheets x rate"
+        calculation_basis = f"{good_sheets} x {base_rate}"
+        explanation = f"{rule.name}: {good_sheets} sheets x {base_rate}"
+        if use_both_side_override:
+            formula = "good_sheets x both_side_rate"
+            explanation += " both-side rate"
+        elif side_count > 1:
+            formula += " x side_count"
+            calculation_basis += f" x {side_count}"
+            explanation += f" x {side_count} sides"
+        elif selected_side in {"front", "back"}:
+            explanation += " x 1 side"
     if minimum_charge and total == minimum_charge and minimum_charge > subtotal:
-        explanation += f"; minimum charge applied ({minimum_charge})"
+        explanation += f" (minimum {minimum_charge} applied)"
 
     return FinishingChargeLine(
         name=rule.name,

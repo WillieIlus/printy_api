@@ -282,7 +282,7 @@ class QuoteRequest(TimeStampedModel):
     def get_latest_shop_quote(self):
         """Return the most recent sent/accepted ShopQuote, or None."""
         return self.shop_quotes.filter(
-            status__in=[ShopQuote.SENT, ShopQuote.ACCEPTED]
+            status__in=[ShopQuote.SENT, ShopQuote.REVISED, ShopQuote.ACCEPTED]
         ).order_by("-sent_at", "-created_at").first()
 
     def get_latest_response(self):
@@ -422,6 +422,83 @@ class ShopQuote(TimeStampedModel):
 
     def is_terminal_status(self) -> bool:
         return self.status in {ShopQuoteStatus.ACCEPTED, ShopQuoteStatus.REJECTED}
+
+
+class QuoteRequestMessage(TimeStampedModel):
+    """Lightweight request thread message between client and shop."""
+
+    class SenderRole(models.TextChoices):
+        CLIENT = "client", "Client"
+        SHOP = "shop", "Shop"
+        SYSTEM = "system", "System"
+
+    class MessageKind(models.TextChoices):
+        STATUS = "status", "Status update"
+        QUESTION = "question", "Question"
+        REPLY = "reply", "Reply"
+        REJECTION = "rejection", "Rejection"
+        QUOTE = "quote", "Quote"
+        NOTE = "note", "Note"
+
+    quote_request = models.ForeignKey(
+        QuoteRequest,
+        on_delete=models.CASCADE,
+        related_name="messages",
+        verbose_name=_("quote request"),
+        help_text=_("Quote request this thread message belongs to."),
+    )
+    shop_quote = models.ForeignKey(
+        "ShopQuote",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="messages",
+        verbose_name=_("shop quote"),
+        help_text=_("Optional linked quote revision for this message."),
+    )
+    sender = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="quote_request_messages",
+        verbose_name=_("sender"),
+        help_text=_("User who sent this message."),
+    )
+    sender_role = models.CharField(
+        max_length=20,
+        choices=SenderRole.choices,
+        default=SenderRole.SYSTEM,
+        verbose_name=_("sender role"),
+        help_text=_("Whether this message came from the client, shop, or system."),
+    )
+    message_kind = models.CharField(
+        max_length=20,
+        choices=MessageKind.choices,
+        default=MessageKind.NOTE,
+        verbose_name=_("message kind"),
+        help_text=_("Thread message classification for UI timelines."),
+    )
+    body = models.TextField(
+        blank=True,
+        default="",
+        verbose_name=_("body"),
+        help_text=_("Visible thread message body."),
+    )
+    metadata = models.JSONField(
+        null=True,
+        blank=True,
+        verbose_name=_("metadata"),
+        help_text=_("Optional structured metadata for timeline rendering."),
+    )
+
+    class Meta:
+        ordering = ["created_at", "id"]
+        verbose_name = _("quote request message")
+        verbose_name_plural = _("quote request messages")
+
+    def __str__(self):
+        return f"{self.get_sender_role_display()} message for request #{self.quote_request_id}"
 
 
 class QuoteItem(TimeStampedModel):

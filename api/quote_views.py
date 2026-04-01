@@ -15,7 +15,7 @@ from rest_framework.response import Response
 
 from notifications.models import Notification
 from quotes.choices import QuoteStatus, ShopQuoteStatus
-from quotes.models import QuoteRequest, QuoteRequestAttachment, ShopQuote, ShopQuoteAttachment
+from quotes.models import QuoteRequest, QuoteRequestAttachment, QuoteRequestMessage, ShopQuote, ShopQuoteAttachment
 from shops.models import Shop
 
 from .quote_serializers import (
@@ -25,6 +25,8 @@ from .quote_serializers import (
     QuoteRequestCustomerDetailSerializer,
     QuoteRequestCustomerListSerializer,
     QuoteRequestCustomerUpdateSerializer,
+    QuoteRequestReplySerializer,
+    QuoteRequestRejectSerializer,
     QuoteRequestShopDetailSerializer,
     QuoteRequestShopListSerializer,
     ShopQuoteAttachmentSerializer,
@@ -34,6 +36,18 @@ from .quote_serializers import (
     ShopQuoteListSerializer,
     ShopQuoteUpdateSerializer,
 )
+
+
+def _create_request_message(*, quote_request, sender=None, sender_role="system", message_kind="note", body="", shop_quote=None, metadata=None):
+    return QuoteRequestMessage.objects.create(
+        quote_request=quote_request,
+        sender=sender,
+        sender_role=sender_role,
+        message_kind=message_kind,
+        body=body or "",
+        shop_quote=shop_quote,
+        metadata=metadata or {},
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -64,7 +78,7 @@ class CustomerQuoteRequestViewSet(viewsets.ModelViewSet):
             "shop", "delivery_location"
         ).prefetch_related(
             "items__product", "items__paper", "items__material", "items__finishings__finishing_rate",
-            "services__service_rate", "attachments",
+            "services__service_rate", "attachments", "messages__sender",
         ).order_by("-created_at")
 
     def get_serializer_class(self):
@@ -110,6 +124,14 @@ class CustomerQuoteRequestViewSet(viewsets.ModelViewSet):
             )
         qr.status = QuoteStatus.SUBMITTED
         qr.save(update_fields=["status", "updated_at"])
+        _create_request_message(
+            quote_request=qr,
+            sender=request.user,
+            sender_role="client",
+            message_kind="status",
+            body="Request submitted to the shop.",
+            metadata={"status": QuoteStatus.SUBMITTED},
+        )
         if qr.shop.owner_id and qr.shop.owner_id != request.user.id:
             notify(
                 recipient=qr.shop.owner,
@@ -140,15 +162,22 @@ class CustomerQuoteRequestViewSet(viewsets.ModelViewSet):
                 {"detail": "Only sent or revised quotes can be accepted."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        if qr.status == QuoteStatus.ACCEPTED:
-            return Response(
-                {"detail": "Request already accepted."},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
         shop_quote.status = ShopQuoteStatus.ACCEPTED
         shop_quote.save(update_fields=["status", "updated_at"])
-        qr.status = QuoteStatus.ACCEPTED
-        qr.save(update_fields=["status", "updated_at"])
+        if qr.status in (QuoteStatus.REJECTED, QuoteStatus.CANCELLED, QuoteStatus.EXPIRED):
+            return Response({"detail": "This request can no longer be accepted."}, status=status.HTTP_400_BAD_REQUEST)
+        if qr.status != QuoteStatus.QUOTED:
+            qr.status = QuoteStatus.QUOTED
+            qr.save(update_fields=["status", "updated_at"])
+        _create_request_message(
+            quote_request=qr,
+            sender=request.user,
+            sender_role="client",
+            message_kind="status",
+            body="Client accepted the quote.",
+            shop_quote=shop_quote,
+            metadata={"quote_status": ShopQuoteStatus.ACCEPTED},
+        )
         if qr.shop.owner_id and qr.shop.owner_id != request.user.id:
             from notifications.services import notify
 
@@ -162,17 +191,63 @@ class CustomerQuoteRequestViewSet(viewsets.ModelViewSet):
             )
         return Response(QuoteRequestCustomerDetailSerializer(qr).data)
 
+    @action(detail=True, methods=["post"], url_path="reply")
+    def reply(self, request, pk=None):
+        qr = self.get_object()
+        serializer = QuoteRequestReplySerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        if qr.status != QuoteStatus.AWAITING_CLIENT_REPLY:
+            return Response(
+                {"detail": "This request is not waiting for a client reply."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        _create_request_message(
+            quote_request=qr,
+            sender=request.user,
+            sender_role="client",
+            message_kind="reply",
+            body=serializer.validated_data["body"],
+            metadata={"status": QuoteStatus.AWAITING_SHOP_ACTION},
+        )
+        qr.status = QuoteStatus.AWAITING_SHOP_ACTION
+        qr.save(update_fields=["status", "updated_at"])
+        if qr.shop.owner_id and qr.shop.owner_id != request.user.id:
+            from notifications.services import notify
+
+            notify(
+                recipient=qr.shop.owner,
+                notification_type=Notification.QUOTE_REQUEST_SUBMITTED,
+                message=f"{qr.customer_name or 'Client'} replied to request #{qr.id}",
+                object_type="quote_request",
+                object_id=qr.id,
+                actor=request.user,
+            )
+        return Response(QuoteRequestCustomerDetailSerializer(qr).data)
+
     @action(detail=True, methods=["post"], url_path="cancel")
     def cancel(self, request, pk=None):
         """Cancel quote request (draft or submitted)."""
         qr = self.get_object()
-        if qr.status in (QuoteStatus.ACCEPTED, QuoteStatus.CLOSED, QuoteStatus.CANCELLED):
+        if qr.status in (QuoteStatus.CLOSED, QuoteStatus.CANCELLED):
             return Response(
-                {"detail": "Cannot cancel an accepted, closed, or already cancelled request."},
+                {"detail": "Cannot cancel a closed or already cancelled request."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if qr.shop_quotes.filter(status=ShopQuoteStatus.ACCEPTED).exists():
+            return Response(
+                {"detail": "Cannot cancel a request after accepting a quote."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
         qr.status = QuoteStatus.CANCELLED
         qr.save(update_fields=["status", "updated_at"])
+        _create_request_message(
+            quote_request=qr,
+            sender=request.user,
+            sender_role="client",
+            message_kind="status",
+            body="Request cancelled by the client.",
+            metadata={"status": QuoteStatus.CANCELLED},
+        )
         if qr.shop.owner_id and qr.shop.owner_id != request.user.id:
             from notifications.services import notify
 
@@ -197,9 +272,10 @@ class IncomingRequestViewSet(viewsets.ReadOnlyModelViewSet):
     Shop incoming quote requests.
     GET /shops/<slug>/incoming-requests/ — list
     GET /shops/<slug>/incoming-requests/{id}/ — view detail
+    POST /shops/<slug>/incoming-requests/{id}/accept-request/ — accept and begin work
+    POST /shops/<slug>/incoming-requests/{id}/ask-question/ — request clarification
+    POST /shops/<slug>/incoming-requests/{id}/reject-request/ — reject request with reason
     POST /shops/<slug>/incoming-requests/{id}/send-quote/ — send shop quote
-    POST /shops/<slug>/incoming-requests/{id}/mark-viewed/ — mark as viewed
-    POST /shops/<slug>/incoming-requests/{id}/decline/ — decline request
     """
 
     permission_classes = [IsAuthenticated, IsQuoteRequestSeller]
@@ -216,7 +292,7 @@ class IncomingRequestViewSet(viewsets.ReadOnlyModelViewSet):
             "shop", "delivery_location"
         ).prefetch_related(
             "items__product", "items__paper", "items__material", "items__finishings__finishing_rate",
-            "services__service_rate", "shop_quotes", "attachments",
+            "services__service_rate", "shop_quotes", "attachments", "messages__sender",
         ).order_by("-created_at")
 
     def get_serializer_class(self):
@@ -240,6 +316,89 @@ class IncomingRequestViewSet(viewsets.ReadOnlyModelViewSet):
             return Response({"detail": "Not your shop."}, status=status.HTTP_403_FORBIDDEN)
         return super().retrieve(request, *args, **kwargs)
 
+    @action(detail=True, methods=["post"], url_path="accept-request")
+    def accept_request(self, request, shop_slug=None, request_id=None):
+        if not self.check_shop_owner():
+            return Response({"detail": "Not your shop."}, status=status.HTTP_403_FORBIDDEN)
+        qr = self.get_object()
+        if qr.status in (QuoteStatus.QUOTED, QuoteStatus.REJECTED, QuoteStatus.CANCELLED, QuoteStatus.EXPIRED):
+            return Response({"detail": "This request cannot be accepted in its current state."}, status=status.HTTP_400_BAD_REQUEST)
+        qr.status = QuoteStatus.ACCEPTED
+        qr.save(update_fields=["status", "updated_at"])
+        _create_request_message(
+            quote_request=qr,
+            sender=request.user,
+            sender_role="shop",
+            message_kind="status",
+            body="The shop accepted this request and is preparing a quote.",
+            metadata={"status": QuoteStatus.ACCEPTED},
+        )
+        return Response(QuoteRequestShopDetailSerializer(qr).data)
+
+    @action(detail=True, methods=["post"], url_path="ask-question")
+    def ask_question(self, request, shop_slug=None, request_id=None):
+        if not self.check_shop_owner():
+            return Response({"detail": "Not your shop."}, status=status.HTTP_403_FORBIDDEN)
+        qr = self.get_object()
+        serializer = QuoteRequestReplySerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        if qr.status in (QuoteStatus.QUOTED, QuoteStatus.REJECTED, QuoteStatus.CANCELLED, QuoteStatus.EXPIRED):
+            return Response({"detail": "This request can no longer receive clarification messages."}, status=status.HTTP_400_BAD_REQUEST)
+        qr.status = QuoteStatus.AWAITING_CLIENT_REPLY
+        qr.save(update_fields=["status", "updated_at"])
+        _create_request_message(
+            quote_request=qr,
+            sender=request.user,
+            sender_role="shop",
+            message_kind="question",
+            body=serializer.validated_data["body"],
+            metadata={"status": QuoteStatus.AWAITING_CLIENT_REPLY},
+        )
+        if qr.created_by_id and qr.created_by_id != request.user.id:
+            from notifications.services import notify
+
+            notify(
+                recipient=qr.created_by,
+                notification_type=Notification.QUOTE_REQUEST_SUBMITTED,
+                message=f"{qr.shop.name} asked a question about request #{qr.id}",
+                object_type="quote_request",
+                object_id=qr.id,
+                actor=request.user,
+            )
+        return Response(QuoteRequestShopDetailSerializer(qr).data)
+
+    @action(detail=True, methods=["post"], url_path="reject-request")
+    def reject_request(self, request, shop_slug=None, request_id=None):
+        if not self.check_shop_owner():
+            return Response({"detail": "Not your shop."}, status=status.HTTP_403_FORBIDDEN)
+        qr = self.get_object()
+        serializer = QuoteRequestRejectSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        if qr.status in (QuoteStatus.QUOTED, QuoteStatus.REJECTED, QuoteStatus.CANCELLED, QuoteStatus.EXPIRED):
+            return Response({"detail": "This request cannot be rejected in its current state."}, status=status.HTTP_400_BAD_REQUEST)
+        qr.status = QuoteStatus.REJECTED
+        qr.save(update_fields=["status", "updated_at"])
+        _create_request_message(
+            quote_request=qr,
+            sender=request.user,
+            sender_role="shop",
+            message_kind="rejection",
+            body=serializer.validated_data["reason"],
+            metadata={"status": QuoteStatus.REJECTED},
+        )
+        if qr.created_by_id and qr.created_by_id != request.user.id:
+            from notifications.services import notify
+
+            notify(
+                recipient=qr.created_by,
+                notification_type=Notification.REQUEST_DECLINED,
+                message=f"{qr.shop.name} rejected your quote request #{qr.id}",
+                object_type="quote_request",
+                object_id=qr.id,
+                actor=request.user,
+            )
+        return Response(QuoteRequestShopDetailSerializer(qr).data)
+
     @action(detail=True, methods=["post"], url_path="send-quote")
     def send_quote(self, request, shop_slug=None, request_id=None):
         """Send shop quote. Body: { "total", "note", "turnaround_days" }."""
@@ -250,9 +409,14 @@ class IncomingRequestViewSet(viewsets.ReadOnlyModelViewSet):
         if not self.check_shop_owner():
             return Response({"detail": "Not your shop."}, status=status.HTTP_403_FORBIDDEN)
         qr = self.get_object()
-        if qr.status not in (QuoteStatus.SUBMITTED, QuoteStatus.VIEWED):
+        if qr.status not in (
+            QuoteStatus.SUBMITTED,
+            QuoteStatus.VIEWED,
+            QuoteStatus.ACCEPTED,
+            QuoteStatus.AWAITING_SHOP_ACTION,
+        ):
             return Response(
-                {"detail": "Only submitted or viewed requests can receive a quote."},
+                {"detail": "This request is not ready for a quote yet."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
         serializer = ShopQuoteCreateSerializer(
@@ -278,6 +442,20 @@ class IncomingRequestViewSet(viewsets.ReadOnlyModelViewSet):
             qr.items.update(shop_quote=shop_quote)
             qr.status = QuoteStatus.QUOTED
             qr.save(update_fields=["status", "updated_at"])
+            _create_request_message(
+                quote_request=qr,
+                sender=request.user,
+                sender_role="shop",
+                message_kind="quote",
+                body=serializer.validated_data.get("note", "") or "The shop sent a quote.",
+                shop_quote=shop_quote,
+                metadata={
+                    "status": QuoteStatus.QUOTED,
+                    "quote_status": shop_quote.status,
+                    "total": str(total),
+                    "turnaround_days": shop_quote.turnaround_days,
+                },
+            )
         if qr.created_by_id and qr.created_by_id != request.user.id:
             from notifications.services import notify
 
@@ -307,29 +485,8 @@ class IncomingRequestViewSet(viewsets.ReadOnlyModelViewSet):
 
     @action(detail=True, methods=["post"], url_path="decline")
     def decline(self, request, shop_slug=None, request_id=None):
-        """Decline the request (shop will not quote)."""
-        if not self.check_shop_owner():
-            return Response({"detail": "Not your shop."}, status=status.HTTP_403_FORBIDDEN)
-        qr = self.get_object()
-        if qr.status in (QuoteStatus.ACCEPTED, QuoteStatus.CLOSED, QuoteStatus.CANCELLED):
-            return Response(
-                {"detail": "Cannot decline an accepted, closed, or cancelled request."},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-        qr.status = QuoteStatus.CLOSED
-        qr.save(update_fields=["status", "updated_at"])
-        if qr.created_by_id and qr.created_by_id != request.user.id:
-            from notifications.services import notify
-
-            notify(
-                recipient=qr.created_by,
-                notification_type=Notification.REQUEST_DECLINED,
-                message=f"{qr.shop.name} declined your quote request #{qr.id}",
-                object_type="quote_request",
-                object_id=qr.id,
-                actor=request.user,
-            )
-        return Response(QuoteRequestShopDetailSerializer(qr).data)
+        """Backward-compatible alias for reject-request."""
+        return self.reject_request(request, shop_slug=shop_slug, request_id=request_id)
 
 
 # ---------------------------------------------------------------------------
@@ -376,11 +533,29 @@ class ShopQuoteViewSet(viewsets.ModelViewSet):
             return Response({"detail": "Not your shop quote."}, status=status.HTTP_403_FORBIDDEN)
         response = super().partial_update(request, *args, **kwargs)
         quote.refresh_from_db()
+        if quote.status != ShopQuoteStatus.REVISED:
+            quote.status = ShopQuoteStatus.REVISED
         from quotes.summary_service import get_shop_quote_summary_text
 
         quote.whatsapp_message = get_shop_quote_summary_text(quote)
-        quote.save(update_fields=["whatsapp_message"])
+        quote.save(update_fields=["status", "whatsapp_message", "updated_at"])
+        _create_request_message(
+            quote_request=quote.quote_request,
+            sender=request.user,
+            sender_role="shop",
+            message_kind="quote",
+            body=quote.note or "The shop revised the quote.",
+            shop_quote=quote,
+            metadata={
+                "status": QuoteStatus.QUOTED,
+                "quote_status": quote.status,
+                "total": str(quote.total or ""),
+                "turnaround_days": quote.turnaround_days,
+            },
+        )
         qr = quote.quote_request
+        qr.status = QuoteStatus.QUOTED
+        qr.save(update_fields=["status", "updated_at"])
         if qr.created_by_id and qr.created_by_id != request.user.id:
             notify(
                 recipient=qr.created_by,
@@ -403,12 +578,6 @@ class ShopQuoteViewSet(viewsets.ModelViewSet):
         if quote.status != ShopQuoteStatus.ACCEPTED:
             return Response(
                 {"detail": "Only accepted quotes can be turned into jobs."},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-        qr = quote.quote_request
-        if qr.status != QuoteStatus.ACCEPTED:
-            return Response(
-                {"detail": "Quote request must be accepted first."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
         if quote.production_orders.exists():

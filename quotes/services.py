@@ -10,7 +10,7 @@ from django.utils import timezone
 
 from catalog.choices import PricingMode
 from catalog.imposition import pieces_per_sheet, sheets_needed
-from pricing.choices import ChargeUnit, ServicePricingType, Sides
+from pricing.choices import ChargeUnit, FinishingBillingBasis, FinishingSideMode, ServicePricingType, Sides
 from pricing.models import FinishingRate, PrintingRate, ServiceRate
 from quotes.choices import QuoteStatus
 from quotes.diagnostics import (
@@ -221,12 +221,29 @@ def _apply_finishing_cost(
         total += price_single * quantity * effective_sides
     elif finishing_rate.charge_unit == ChargeUnit.PER_SHEET:
         sheets = sheets_needed_val or max(1, quantity)
-        total += finishing_rate.price * sheets
+        lamination_side_pricing = (
+            finishing_rate.billing_basis == FinishingBillingBasis.PER_SHEET
+            and finishing_rate.side_mode == FinishingSideMode.PER_SELECTED_SIDE
+        )
+        if lamination_side_pricing:
+            sheet_rate = (
+                finishing_rate.double_side_price
+                if effective_sides == 2 and finishing_rate.double_side_price is not None
+                else finishing_rate.price * effective_sides
+            )
+            total += sheet_rate * sheets
+        else:
+            total += finishing_rate.price * sheets
         if finishing_rate.setup_fee:
             total += finishing_rate.setup_fee
     elif finishing_rate.charge_unit == ChargeUnit.PER_SIDE_PER_SHEET:
         sheets = sheets_needed_val or max(1, quantity)
-        total += price_single * sheets * effective_sides
+        sheet_rate = (
+            finishing_rate.double_side_price
+            if effective_sides == 2 and finishing_rate.double_side_price is not None
+            else price_single * effective_sides
+        )
+        total += sheet_rate * sheets
         if finishing_rate.setup_fee:
             total += finishing_rate.setup_fee
     elif finishing_rate.charge_unit == ChargeUnit.PER_SQM:

@@ -2,9 +2,12 @@
 DRF viewsets and API views.
 """
 import math
+import os
+import uuid
 
 from django.shortcuts import get_object_or_404
 from django.http import HttpResponse
+from django.core.files.storage import default_storage
 
 from common.geo import haversine_km
 from rest_framework import generics, status, viewsets
@@ -12,6 +15,7 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.views import APIView
+from rest_framework.parsers import FormParser, MultiPartParser
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework.serializers import ModelSerializer
 
@@ -114,9 +118,11 @@ class PublicShopViewSet(viewsets.ReadOnlyModelViewSet):
     lookup_url_kwarg = "slug"
 
     def get_queryset(self):
-        return Shop.objects.filter(is_active=True, is_public=True).exclude(
+        return Shop.objects.filter(is_active=True, is_public=True).select_related(
+            "owner__profile"
+        ).exclude(
             slug__isnull=True
-        ).exclude(slug="").prefetch_related("opening_hours")
+        ).exclude(slug="").prefetch_related("opening_hours", "owner__profile__social_links")
 
     def get_serializer_class(self):
         if self.action == "catalog":
@@ -238,7 +244,7 @@ class ShopRateCardView(APIView):
                 "name": f.name,
                 "category": f.category.name if f.category else "",
                 "price": str(f.price),
-                "charge_by": f.get_charge_unit_display() or f.charge_unit,
+                "charge_by": f.display_unit_label or f.get_charge_unit_display() or f.charge_unit,
                 "is_default": False,
             })
 
@@ -492,6 +498,43 @@ class ProfileMeView(APIView):
         serializer.is_valid(raise_exception=True)
         serializer.save()
         return Response(ProfileSerializer(profile).data)
+
+
+class ProfileAvatarUploadView(APIView):
+    """POST /api/profiles/me/avatar/ - upload the signed-in user's avatar image."""
+
+    permission_classes = [IsAuthenticated]
+    parser_classes = [MultiPartParser, FormParser]
+
+    def post(self, request):
+        profile, _ = UserProfile.objects.get_or_create(user=request.user)
+        uploaded_file = request.FILES.get("avatar")
+
+        if not uploaded_file:
+            return Response(
+                {"avatar": ["Choose an image to upload."]},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        content_type = getattr(uploaded_file, "content_type", "") or ""
+        if content_type and not content_type.startswith("image/"):
+            return Response(
+                {"avatar": ["Avatar uploads must be image files."]},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        extension = os.path.splitext(uploaded_file.name or "")[1].lower()
+        if extension not in {".jpg", ".jpeg", ".png", ".webp", ".gif"}:
+            extension = ".jpg"
+
+        saved_path = default_storage.save(
+            f"avatars/{request.user.id}/{uuid.uuid4().hex}{extension}",
+            uploaded_file,
+        )
+        profile.avatar = default_storage.url(saved_path)
+        profile.save(update_fields=["avatar", "updated_at"])
+
+        return Response(ProfileSerializer(profile).data, status=status.HTTP_200_OK)
 
 
 class ProfileCreateView(APIView):
@@ -1267,12 +1310,12 @@ class ShopRateView(APIView):
         has_eligible_quote = QuoteRequest.objects.filter(
             shop=shop,
             created_by=user,
-            status__in=[QuoteStatus.QUOTED, QuoteStatus.ACCEPTED],
+            status=QuoteStatus.QUOTED,
         ).exists()
         if not has_eligible_quote:
             return Response(
                 {
-                    "detail": "You can only rate a shop after receiving a quote (QUOTED or ACCEPTED)."
+                    "detail": "You can only rate a shop after receiving a quote."
                 },
                 status=status.HTTP_403_FORBIDDEN,
             )
@@ -2148,6 +2191,9 @@ class ShopCustomOptionsView(APIView):
                     "name": f.name,
                     "price": str(f.price),
                     "charge_unit": f.charge_unit,
+                    "billing_basis": f.billing_basis,
+                    "side_mode": f.side_mode,
+                    "display_unit_label": f.display_unit_label,
                 }
                 for f in finishings
             ],

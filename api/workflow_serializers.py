@@ -30,6 +30,16 @@ class CalculatorPreviewSerializer(serializers.Serializer):
     height_mm = serializers.IntegerField(required=False, allow_null=True, min_value=1)
     finishings = FinishingSelectionSerializer(many=True, required=False)
 
+    def to_internal_value(self, data):
+        if isinstance(data, dict):
+            normalized = dict(data)
+            if "chosen_width_mm" in normalized and "width_mm" not in normalized:
+                normalized["width_mm"] = normalized["chosen_width_mm"]
+            if "chosen_height_mm" in normalized and "height_mm" not in normalized:
+                normalized["height_mm"] = normalized["chosen_height_mm"]
+            data = normalized
+        return super().to_internal_value(data)
+
     def validate(self, attrs):
         shop = attrs["shop"]
         product = attrs.get("product")

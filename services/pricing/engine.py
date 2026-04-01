@@ -58,6 +58,36 @@ def _format_money(value: Decimal) -> str:
     return str(value.quantize(Decimal("0.01")))
 
 
+def _humanize_finishing_explanation(line: dict, currency: str) -> str:
+    name = line.get("name", "Finishing")
+    billing_basis = line.get("billing_basis")
+    side_mode = line.get("side_mode")
+    rate = line.get("rate")
+    selected_side = line.get("selected_side")
+    side_count = line.get("side_count")
+    good_sheets = line.get("good_sheets")
+    units = line.get("units_count") or line.get("units")
+    minimum_charge = line.get("minimum_charge")
+    total = line.get("total")
+    formula = line.get("formula")
+
+    if billing_basis == "per_sheet" and side_mode == "per_selected_side":
+        parts = [f"{name}:", f"{good_sheets} sheets", f"{currency} {rate}"]
+        if formula == "good_sheets x both_side_rate":
+            parts.append("both-side rate")
+        elif selected_side == "both" or side_count == 2:
+            parts.append("2 sides")
+        else:
+            parts.append("1 side")
+        explanation = " ".join(part for part in parts if part)
+    else:
+        explanation = line.get("explanation") or f"{name}: {units} units x {currency} {rate}"
+
+    if minimum_charge and total and Decimal(str(minimum_charge)) > 0 and Decimal(str(total)) == Decimal(str(minimum_charge)):
+        explanation += f" (minimum {currency} {minimum_charge})"
+    return explanation
+
+
 def _resolve_vat_summary(shop, subtotal: Decimal) -> dict:
     is_vat_enabled = bool(getattr(shop, "is_vat_enabled", False))
     vat_rate = _decimal(getattr(shop, "vat_rate", Decimal("0")))
@@ -203,7 +233,7 @@ def calculate_sheet_pricing(
         f"Paper: {paper_rate} x {imposition.good_sheets} sheet(s).",
         f"Printing: {print_rate_value} x {imposition.good_sheets} sheet(s) for {color_mode} / {sides}.",
     ]
-    explanations.extend(line["explanation"] for line in finishing_lines)
+    explanations.extend(_humanize_finishing_explanation(line, getattr(shop, "currency", "KES") or "KES") for line in finishing_lines)
 
     return PricingEngineResult(
         pricing_mode=PricingMode.SHEET,
@@ -291,7 +321,7 @@ def calculate_large_format_pricing(
         f"Material area: {area_sqm.quantize(Decimal('0.0001'))} sqm for {quantity} piece(s).",
         f"Material: {material_rate} x {area_sqm.quantize(Decimal('0.0001'))} sqm.",
     ]
-    explanations.extend(line["explanation"] for line in finishing_lines)
+    explanations.extend(_humanize_finishing_explanation(line, getattr(shop, "currency", "KES") or "KES") for line in finishing_lines)
 
     return PricingEngineResult(
         pricing_mode=PricingMode.LARGE_FORMAT,

@@ -17,7 +17,7 @@ from typing import Optional
 
 from catalog.choices import PricingMode
 from catalog.imposition import sheets_needed as _sheets_needed
-from pricing.choices import ChargeUnit, Sides
+from pricing.choices import ChargeUnit, FinishingBillingBasis, FinishingSideMode, Sides
 from pricing.models import PrintingRate
 from services.engine.integration import (
     build_job_spec,
@@ -163,18 +163,33 @@ def compute_single_finishing_cost(
     cost = Decimal("0")
     cu = finishing_rate.charge_unit
     sheet_count = sheets_count or max(1, quantity)
+    lamination_side_pricing = (
+        finishing_rate.billing_basis == FinishingBillingBasis.PER_SHEET
+        and finishing_rate.side_mode == FinishingSideMode.PER_SELECTED_SIDE
+    )
     if cu == ChargeUnit.PER_PIECE:
         cost = (p_double if eff_sides == 2 else p_single) * quantity
     elif cu == ChargeUnit.PER_SIDE:
         cost = p_single * quantity * eff_sides
     elif cu == ChargeUnit.PER_SHEET:
-        # Flat per sheet (cutting, folding) — no single/double distinction
-        cost = finishing_rate.price * sheet_count
+        if lamination_side_pricing:
+            sheet_rate = (
+                finishing_rate.double_side_price
+                if eff_sides == 2 and finishing_rate.double_side_price is not None
+                else finishing_rate.price * eff_sides
+            )
+            cost = sheet_rate * sheet_count
+        else:
+            cost = finishing_rate.price * sheet_count
         if finishing_rate.setup_fee:
             cost += finishing_rate.setup_fee
     elif cu == ChargeUnit.PER_SIDE_PER_SHEET:
-        # Per side per sheet: price × sheets × sides (e.g. lamination)
-        cost = p_single * sheet_count * eff_sides
+        sheet_rate = (
+            finishing_rate.double_side_price
+            if eff_sides == 2 and finishing_rate.double_side_price is not None
+            else p_single * eff_sides
+        )
+        cost = sheet_rate * sheet_count
         if finishing_rate.setup_fee:
             cost += finishing_rate.setup_fee
     elif cu == ChargeUnit.PER_SQM:

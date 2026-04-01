@@ -17,7 +17,7 @@ class ChargeUnit(models.TextChoices):
     PER_PIECE = "PER_PIECE", "Per Piece"
     PER_SIDE = "PER_SIDE", "Per Side"
     PER_SHEET = "PER_SHEET", "Per Sheet"
-    PER_SIDE_PER_SHEET = "PER_SIDE_PER_SHEET", "Per Side Per Sheet"
+    PER_SIDE_PER_SHEET = "PER_SIDE_PER_SHEET", "Per Side Per Sheet (Legacy)"
     PER_SQM = "PER_SQM", "Per Square Meter"
     FLAT = "FLAT", "Flat"
 

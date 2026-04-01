@@ -8,9 +8,13 @@ class QuoteStatus(models.TextChoices):
 
     DRAFT = "draft", "Draft"
     SUBMITTED = "submitted", "Submitted"
+    AWAITING_SHOP_ACTION = "awaiting_shop_action", "Awaiting shop action"
+    ACCEPTED = "accepted", "Accepted by shop"
+    AWAITING_CLIENT_REPLY = "awaiting_client_reply", "Awaiting client reply"
     VIEWED = "viewed", "Viewed"
     QUOTED = "quoted", "Quoted"
-    ACCEPTED = "accepted", "Accepted"
+    REJECTED = "rejected", "Rejected"
+    EXPIRED = "expired", "Expired"
     CLOSED = "closed", "Closed"
     CANCELLED = "cancelled", "Cancelled"
 

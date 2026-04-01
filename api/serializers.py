@@ -138,6 +138,8 @@ class PublicShopListSerializer(serializers.ModelSerializer):
     opening_hours = OpeningHoursSerializer(many=True, read_only=True)
     status = serializers.SerializerMethodField()
     description = serializers.CharField(read_only=True)
+    logo = serializers.SerializerMethodField()
+    social_links = serializers.SerializerMethodField()
 
     class Meta:
         model = Shop
@@ -147,9 +149,11 @@ class PublicShopListSerializer(serializers.ModelSerializer):
             "slug",
             "currency",
             "description",
+            "logo",
             "latitude",
             "longitude",
             "opening_hours",
+            "social_links",
             "status",
             "opening_time",
             "closing_time",
@@ -159,6 +163,16 @@ class PublicShopListSerializer(serializers.ModelSerializer):
 
     def get_status(self, obj):
         return get_shop_status(obj)
+
+    def get_logo(self, obj):
+        profile = getattr(getattr(obj, "owner", None), "profile", None)
+        return getattr(profile, "avatar", None) or None
+
+    def get_social_links(self, obj):
+        profile = getattr(getattr(obj, "owner", None), "profile", None)
+        if not profile:
+            return []
+        return UserSocialLinkSerializer(profile.social_links.all(), many=True).data
 
 
 class MatchShopsInputSerializer(serializers.Serializer):
@@ -1013,10 +1027,36 @@ class FinishingRateSerializer(serializers.ModelSerializer):
             "is_active",
         ]
 
+    def _is_lamination(self, attrs, instance):
+        name = (attrs.get("name", getattr(instance, "name", "")) or "").strip().lower()
+        slug = (attrs.get("slug", getattr(instance, "slug", "")) or "").strip().lower()
+        category = attrs.get("category", getattr(instance, "category", None))
+        category_name = (getattr(category, "name", "") or "").strip().lower()
+        thickness_microns = attrs.get("thickness_microns", getattr(instance, "thickness_microns", None))
+        return bool(
+            thickness_microns
+            or "lamination" in name
+            or "lamination" in slug
+            or "lamination" in category_name
+        )
+
     def validate(self, attrs):
         attrs = super().validate(attrs)
 
         instance = self.instance
+        is_lamination = self._is_lamination(attrs, instance)
+
+        if is_lamination:
+            attrs["charge_unit"] = attrs.get("charge_unit", getattr(instance, "charge_unit", ChargeUnit.PER_SHEET))
+            if attrs["charge_unit"] == ChargeUnit.PER_SIDE_PER_SHEET:
+                attrs["charge_unit"] = ChargeUnit.PER_SHEET
+            attrs["billing_basis"] = attrs.get("billing_basis", getattr(instance, "billing_basis", FinishingBillingBasis.PER_SHEET))
+            attrs["side_mode"] = attrs.get("side_mode", getattr(instance, "side_mode", FinishingSideMode.PER_SELECTED_SIDE))
+            if not attrs.get("display_unit_label"):
+                attrs["display_unit_label"] = "per sheet"
+            if not attrs.get("help_text"):
+                attrs["help_text"] = "Charged per sheet. Choose one side or both sides."
+
         charge_unit = attrs.get("charge_unit", getattr(instance, "charge_unit", ChargeUnit.PER_PIECE))
         billing_basis = attrs.get(
             "billing_basis",
@@ -1030,14 +1070,13 @@ class FinishingRateSerializer(serializers.ModelSerializer):
             "double_side_price",
             getattr(instance, "double_side_price", None),
         )
-        name = (attrs.get("name", getattr(instance, "name", "")) or "").strip().lower()
-        slug = (attrs.get("slug", getattr(instance, "slug", "")) or "").strip().lower()
-        category = attrs.get("category", getattr(instance, "category", None))
-        category_name = (getattr(category, "name", "") or "").strip().lower()
-        thickness_microns = attrs.get("thickness_microns", getattr(instance, "thickness_microns", None))
 
         errors = {}
         per_side_sheet_unit = charge_unit == ChargeUnit.PER_SIDE_PER_SHEET
+        side_selected_sheet_pricing = (
+            billing_basis == FinishingBillingBasis.PER_SHEET
+            and side_mode == FinishingSideMode.PER_SELECTED_SIDE
+        )
         flat_basis_values = {
             FinishingBillingBasis.FLAT_PER_JOB,
             FinishingBillingBasis.FLAT_PER_GROUP,
@@ -1059,29 +1098,19 @@ class FinishingRateSerializer(serializers.ModelSerializer):
         if billing_basis in flat_basis_values and charge_unit not in {ChargeUnit.FLAT, ChargeUnit.PER_SIDE}:
             errors["charge_unit"] = "Flat finishings must use a flat-compatible charge_unit."
 
-        if (
-            billing_basis == FinishingBillingBasis.PER_SHEET
-            and not per_side_sheet_unit
-            and side_mode == FinishingSideMode.PER_SELECTED_SIDE
-        ):
-            errors["side_mode"] = "per_selected_side is only valid for per-sheet finishings charged per side per sheet."
+        if billing_basis == FinishingBillingBasis.PER_SHEET and charge_unit == ChargeUnit.PER_PIECE:
+            errors["charge_unit"] = "Per-sheet finishings cannot use per-piece charge_unit."
 
-        if double_side_price and side_mode != FinishingSideMode.PER_SELECTED_SIDE:
-            errors["double_side_price"] = "double_side_price is only valid when side_mode is per_selected_side."
+        if double_side_price and not side_selected_sheet_pricing:
+            errors["double_side_price"] = "double_side_price is only valid for per-sheet finishings that support side selection."
 
-        is_lamination = bool(
-            thickness_microns
-            or "lamination" in name
-            or "lamination" in slug
-            or "lamination" in category_name
-        )
         if is_lamination:
-            if charge_unit != ChargeUnit.PER_SIDE_PER_SHEET:
-                errors["charge_unit"] = "Lamination must use PER_SIDE_PER_SHEET charge_unit."
             if billing_basis != FinishingBillingBasis.PER_SHEET:
                 errors["billing_basis"] = "Lamination must use per_sheet billing_basis."
             if side_mode != FinishingSideMode.PER_SELECTED_SIDE:
                 errors["side_mode"] = "Lamination must use per_selected_side side_mode."
+            if charge_unit not in {ChargeUnit.PER_SHEET, ChargeUnit.PER_SIDE_PER_SHEET}:
+                errors["charge_unit"] = "Lamination must use per_sheet charge_unit. Legacy PER_SIDE_PER_SHEET is still supported."
 
         if errors:
             raise serializers.ValidationError(errors)
@@ -1904,7 +1933,15 @@ class GalleryProductOptionsSerializer(serializers.ModelSerializer):
     def get_available_finishings(self, obj):
         frs = FinishingRate.objects.filter(shop=obj.shop, is_active=True).select_related("category")
         return [
-            {"id": f.id, "name": f.name, "charge_unit": f.charge_unit,
-             "price": str(f.price), "category": f.category.name if f.category else None}
+            {
+                "id": f.id,
+                "name": f.name,
+                "charge_unit": f.charge_unit,
+                "billing_basis": f.billing_basis,
+                "side_mode": f.side_mode,
+                "display_unit_label": f.display_unit_label,
+                "price": str(f.price),
+                "category": f.category.name if f.category else None,
+            }
             for f in frs[:30]
         ]

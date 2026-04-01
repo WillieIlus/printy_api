@@ -170,11 +170,11 @@ class QuoteCalculatorTestCase(TestCase):
         fc = Decimal(result.costs["finishing_cost"])
         self.assertGreater(fc, 0)
 
-    def test_lamination_per_sheet_per_side_uses_good_sheets_rate_side_count_formula(self):
+    def test_lamination_uses_good_sheets_rate_side_count_formula(self):
         finishing = FinishingRate.objects.create(
             shop=self.shop,
             name="Lamination",
-            charge_unit=ChargeUnit.PER_SIDE_PER_SHEET,
+            charge_unit=ChargeUnit.PER_SHEET,
             billing_basis=FinishingBillingBasis.PER_SHEET,
             side_mode=FinishingSideMode.PER_SELECTED_SIDE,
             price=Decimal("12.00"),
@@ -189,13 +189,13 @@ class QuoteCalculatorTestCase(TestCase):
             selected_side="both",
         )
 
-        self.assertEqual(Decimal(line.total), Decimal("240.00"))
-        self.assertEqual(line.rate, "12.00")
+        self.assertEqual(Decimal(line.total), Decimal("200.00"))
+        self.assertEqual(line.rate, "20.00")
         self.assertEqual(line.good_sheets, 10)
         self.assertEqual(line.side_count, 2)
-        self.assertEqual(line.formula, "good_sheets x rate x side_count")
-        self.assertEqual(line.calculation_basis, "10 x 12.00 x 2")
-        self.assertIn("lamination total = 10 good_sheets x 12.00 rate x 2 side_count", line.explanation)
+        self.assertEqual(line.formula, "good_sheets x both_side_rate")
+        self.assertEqual(line.calculation_basis, "10 x 20.00")
+        self.assertEqual(line.explanation, "Lamination: 10 sheets x 20.00 both-side rate")
 
     def test_round_corner_per_piece_ignores_side_selection(self):
         finishing = FinishingRate.objects.create(
@@ -222,7 +222,7 @@ class QuoteCalculatorTestCase(TestCase):
         finishing = FinishingRate.objects.create(
             shop=self.shop,
             name="Gloss Lamination",
-            charge_unit=ChargeUnit.PER_SIDE_PER_SHEET,
+            charge_unit=ChargeUnit.PER_SHEET,
             billing_basis=FinishingBillingBasis.PER_SHEET,
             side_mode=FinishingSideMode.PER_SELECTED_SIDE,
             price=Decimal("12.00"),
@@ -238,6 +238,30 @@ class QuoteCalculatorTestCase(TestCase):
 
         self.assertEqual(Decimal(line.total), Decimal("120.00"))
         self.assertEqual(line.side_count, 1)
+        self.assertEqual(line.explanation, "Gloss Lamination: 10 sheets x 12.00 x 1 side")
+
+    def test_lamination_both_sides_falls_back_to_double_single_rate_without_override(self):
+        finishing = FinishingRate.objects.create(
+            shop=self.shop,
+            name="Gloss Lamination",
+            charge_unit=ChargeUnit.PER_SHEET,
+            billing_basis=FinishingBillingBasis.PER_SHEET,
+            side_mode=FinishingSideMode.PER_SELECTED_SIDE,
+            price=Decimal("12.00"),
+            is_active=True,
+        )
+
+        line = compute_finishing_line(
+            finishing,
+            quantity=100,
+            good_sheets=10,
+            selected_side="both",
+        )
+
+        self.assertEqual(Decimal(line.total), Decimal("240.00"))
+        self.assertEqual(line.formula, "good_sheets x rate x side_count")
+        self.assertEqual(line.calculation_basis, "10 x 12.00 x 2")
+        self.assertEqual(line.explanation, "Gloss Lamination: 10 sheets x 12.00 x 2 sides")
 
     def test_cutting_flat_per_line_uses_line_quantity(self):
         finishing = FinishingRate.objects.create(

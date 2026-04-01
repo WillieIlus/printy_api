@@ -204,43 +204,43 @@ class FinishingRate(TimeStampedModel):
     )
     is_single_sided_only = models.BooleanField(
         default=False,
-        verbose_name=_("single-sided only"),
-        help_text=_("If true, this finishing can only be applied to one side (e.g. single-sided lamination)."),
+        verbose_name=_("one-side only"),
+        help_text=_("If true, this finishing can only be applied to one side."),
     )
     charge_unit = models.CharField(
         max_length=20,
         choices=ChargeUnit.choices,
         default=ChargeUnit.PER_PIECE,
         verbose_name=_("charge unit"),
-        help_text=_("How this finishing is charged (per piece, per side, per sqm, flat)."),
+        help_text=_("How this finishing is charged. For lamination, use per sheet."),
     )
     billing_basis = models.CharField(
         max_length=30,
         choices=FinishingBillingBasis.choices,
         default=FinishingBillingBasis.PER_PIECE,
         verbose_name=_("billing basis"),
-        help_text=_("Canonical billing basis used by the pricing engine."),
+        help_text=_("Billing basis used by pricing. For lamination, use per sheet."),
     )
     side_mode = models.CharField(
         max_length=30,
         choices=FinishingSideMode.choices,
         default=FinishingSideMode.IGNORE_SIDES,
         verbose_name=_("side mode"),
-        help_text=_("Whether rate multiplies by selected finishing sides."),
+        help_text=_("Whether the rate changes based on one side or both sides."),
     )
     price = models.DecimalField(
         max_digits=12,
         decimal_places=2,
         verbose_name=_("price"),
-        help_text=_("Price per charge unit (single-sided for lamination, etc.)."),
+        help_text=_("Base rate. For lamination, this is the one-side rate per sheet."),
     )
     double_side_price = models.DecimalField(
         max_digits=12,
         decimal_places=2,
         null=True,
         blank=True,
-        verbose_name=_("double-side price"),
-        help_text=_("Price when applied to both sides (e.g. double-sided lamination). Blank = 2× single."),
+        verbose_name=_("both-side rate"),
+        help_text=_("Optional rate when lamination is applied to both sides. Leave blank to use 2× the one-side rate."),
     )
     setup_fee = models.DecimalField(
         max_digits=12,
@@ -275,13 +275,13 @@ class FinishingRate(TimeStampedModel):
         blank=True,
         default="",
         verbose_name=_("display unit label"),
-        help_text=_("Optional UI label like 'per sheet per side'."),
+        help_text=_("Optional UI label like 'per sheet'."),
     )
     help_text = models.TextField(
         blank=True,
         default="",
         verbose_name=_("help text"),
-        help_text=_("Optional frontend-facing pricing explanation."),
+        help_text=_("Optional customer-facing pricing explanation."),
     )
     is_active = models.BooleanField(
         default=True,
@@ -308,11 +308,18 @@ class FinishingRate(TimeStampedModel):
             or "lamination" in slug
         )
 
+    def uses_side_selected_sheet_pricing(self) -> bool:
+        return (
+            self.billing_basis == FinishingBillingBasis.PER_SHEET
+            and self.side_mode == FinishingSideMode.PER_SELECTED_SIDE
+        )
+
     def clean(self):
         super().clean()
 
         errors = {}
         per_side_sheet_unit = self.charge_unit == ChargeUnit.PER_SIDE_PER_SHEET
+        side_selected_sheet_pricing = self.uses_side_selected_sheet_pricing()
         flat_basis_values = {
             FinishingBillingBasis.FLAT_PER_JOB,
             FinishingBillingBasis.FLAT_PER_GROUP,
@@ -334,19 +341,19 @@ class FinishingRate(TimeStampedModel):
         if self.billing_basis in flat_basis_values and self.charge_unit not in {ChargeUnit.FLAT, ChargeUnit.PER_SIDE}:
             errors["charge_unit"] = _("Flat finishings must use a flat-compatible charge unit.")
 
-        if self.billing_basis == FinishingBillingBasis.PER_SHEET and not per_side_sheet_unit and self.side_mode == FinishingSideMode.PER_SELECTED_SIDE:
-            errors["side_mode"] = _("Per selected side is only valid for per-sheet finishings that bill per side per sheet.")
+        if self.billing_basis == FinishingBillingBasis.PER_SHEET and self.charge_unit == ChargeUnit.PER_PIECE:
+            errors["charge_unit"] = _("Per-sheet finishings cannot use per-piece charge_unit.")
 
-        if self.double_side_price and self.side_mode != FinishingSideMode.PER_SELECTED_SIDE:
-            errors["double_side_price"] = _("Double-side price is only valid when finishing bills per selected side.")
+        if self.double_side_price and not side_selected_sheet_pricing:
+            errors["double_side_price"] = _("Double-side price is only valid for per-sheet finishings that support side selection.")
 
         if self.is_lamination_rule():
-            if self.charge_unit != ChargeUnit.PER_SIDE_PER_SHEET:
-                errors["charge_unit"] = _("Lamination must use PER_SIDE_PER_SHEET charge_unit.")
             if self.billing_basis != FinishingBillingBasis.PER_SHEET:
                 errors["billing_basis"] = _("Lamination must use per_sheet billing.")
             if self.side_mode != FinishingSideMode.PER_SELECTED_SIDE:
                 errors["side_mode"] = _("Lamination must use per_selected_side side_mode.")
+            if self.charge_unit not in {ChargeUnit.PER_SHEET, ChargeUnit.PER_SIDE_PER_SHEET}:
+                errors["charge_unit"] = _("Lamination must use per_sheet charge_unit. Legacy PER_SIDE_PER_SHEET is still supported.")
 
         if errors:
             raise ValidationError(errors)
@@ -354,6 +361,9 @@ class FinishingRate(TimeStampedModel):
     def save(self, *args, **kwargs):
         if not self.slug:
             self.slug = slugify(self.name)
+        if self.is_lamination_rule() and self.charge_unit == ChargeUnit.PER_SIDE_PER_SHEET:
+            # TODO: remove legacy PER_SIDE_PER_SHEET entirely after existing rows are migrated.
+            self.charge_unit = ChargeUnit.PER_SHEET
         if not self.billing_basis:
             self.billing_basis = {
                 ChargeUnit.PER_PIECE: FinishingBillingBasis.PER_PIECE,
@@ -364,12 +374,14 @@ class FinishingRate(TimeStampedModel):
         if not self.side_mode:
             self.side_mode = (
                 FinishingSideMode.PER_SELECTED_SIDE
-                if self.charge_unit == ChargeUnit.PER_SIDE_PER_SHEET
+                if self.charge_unit == ChargeUnit.PER_SIDE_PER_SHEET or self.is_lamination_rule()
                 else FinishingSideMode.IGNORE_SIDES
             )
-        if not self.display_unit_label:
+        if self.is_lamination_rule() and not self.help_text:
+            self.help_text = "Charged per sheet. Choose one side or both sides."
+        if not self.display_unit_label or self.display_unit_label == "per sheet per side":
             if self.billing_basis == FinishingBillingBasis.PER_SHEET and self.side_mode == FinishingSideMode.PER_SELECTED_SIDE:
-                self.display_unit_label = "per sheet per side"
+                self.display_unit_label = "per sheet"
             elif self.billing_basis == FinishingBillingBasis.PER_SHEET:
                 self.display_unit_label = "per sheet"
             elif self.billing_basis == FinishingBillingBasis.PER_PIECE:

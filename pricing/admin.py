@@ -72,14 +72,14 @@ class FinishingRateAdmin(admin.ModelAdmin):
                     "display_unit_label",
                     "help_text",
                 ),
-                "description": "Use per_sheet + per_selected_side for lamination. Use flat_per_job, flat_per_group, or flat_per_line for configurable flat logic.",
+                "description": "Lamination should use per-sheet billing. One side uses the base rate, and both sides can use 2x the base rate or an optional both-side rate. Use flat_per_job, flat_per_group, or flat_per_line for flat logic.",
             },
         ),
         (
             "Lamination",
             {
                 "fields": ("thickness_microns", "is_single_sided_only"),
-                "description": "Use these only for lamination-like finishings.",
+                "description": "Use these only for lamination-like finishings. Legacy records are still accepted, but new setup should use simple per-sheet billing.",
                 "classes": ("collapse",),
             },
         ),

@@ -12,6 +12,7 @@ from quotes.models import (
     QuoteItemFinishing,
     QuoteRequest,
     QuoteRequestAttachment,
+    QuoteRequestMessage,
     QuoteRequestService,
     ShopQuote,
     ShopQuoteAttachment,
@@ -180,6 +181,30 @@ class QuoteRequestAttachmentUploadSerializer(serializers.ModelSerializer):
         extra_kwargs = {"file": {"required": True}, "name": {"required": False, "allow_blank": True}}
 
 
+class QuoteRequestMessageSerializer(serializers.ModelSerializer):
+    sender_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = QuoteRequestMessage
+        fields = [
+            "id",
+            "sender_role",
+            "sender_name",
+            "message_kind",
+            "body",
+            "metadata",
+            "shop_quote",
+            "created_at",
+            "updated_at",
+        ]
+
+    def get_sender_name(self, obj):
+        sender = obj.sender
+        if not sender:
+            return "System"
+        return getattr(sender, "name", "") or getattr(sender, "email", "") or "User"
+
+
 class ShopQuoteAttachmentSerializer(serializers.ModelSerializer):
     """Read attachment — id, file URL, name."""
 
@@ -303,6 +328,7 @@ class QuoteRequestCustomerDetailSerializer(serializers.ModelSerializer):
     items = QuoteItemCustomerSerializer(many=True, read_only=True)
     services = QuoteRequestServiceReadSerializer(many=True, read_only=True)
     attachments = QuoteRequestAttachmentSerializer(many=True, read_only=True)
+    messages = QuoteRequestMessageSerializer(many=True, read_only=True)
     latest_sent_quote = serializers.SerializerMethodField()
     whatsapp_summary = serializers.SerializerMethodField()
 
@@ -327,6 +353,7 @@ class QuoteRequestCustomerDetailSerializer(serializers.ModelSerializer):
             "items",
             "services",
             "attachments",
+            "messages",
             "latest_sent_quote",
             "whatsapp_summary",
             "created_at",
@@ -377,7 +404,7 @@ class QuoteRequestShopListSerializer(serializers.ModelSerializer):
         return obj.items.count()
 
     def get_has_sent_quote(self, obj):
-        return obj.shop_quotes.filter(status__in=[ShopQuoteStatus.SENT, ShopQuoteStatus.ACCEPTED]).exists()
+        return obj.shop_quotes.filter(status__in=[ShopQuoteStatus.SENT, ShopQuoteStatus.REVISED, ShopQuoteStatus.ACCEPTED]).exists()
 
 
 class QuoteRequestShopDetailSerializer(serializers.ModelSerializer):
@@ -385,10 +412,12 @@ class QuoteRequestShopDetailSerializer(serializers.ModelSerializer):
 
     shop_name = serializers.CharField(source="shop.name", read_only=True)
     shop_currency = serializers.CharField(source="shop.currency", read_only=True)
+    quote_draft_file_id = serializers.IntegerField(read_only=True)
     delivery_location_name = serializers.CharField(source="delivery_location.name", read_only=True)
     items = QuoteItemShopSerializer(many=True, read_only=True)
     services = QuoteRequestServiceReadSerializer(many=True, read_only=True)
     attachments = QuoteRequestAttachmentSerializer(many=True, read_only=True)
+    messages = QuoteRequestMessageSerializer(many=True, read_only=True)
     sent_quotes = ShopQuoteSummarySerializer(source="shop_quotes", many=True, read_only=True)
     whatsapp_summary = serializers.SerializerMethodField()
 
@@ -399,6 +428,7 @@ class QuoteRequestShopDetailSerializer(serializers.ModelSerializer):
             "shop",
             "shop_name",
             "shop_currency",
+            "quote_draft_file_id",
             "created_by",
             "customer_name",
             "customer_email",
@@ -413,6 +443,7 @@ class QuoteRequestShopDetailSerializer(serializers.ModelSerializer):
             "items",
             "services",
             "attachments",
+            "messages",
             "sent_quotes",
             "whatsapp_summary",
             "created_at",
@@ -458,6 +489,7 @@ class ShopQuoteCreateSerializer(serializers.ModelSerializer):
             quote_request=quote_request,
             shop=shop,
             created_by=request.user,
+            status=ShopQuoteStatus.SENT,
             revision_number=rev,
             **validated_data,
         )
@@ -481,6 +513,14 @@ class ShopQuoteUpdateSerializer(serializers.ModelSerializer):
                 "Only sent or revised quotes can be updated."
             )
         return attrs
+
+
+class QuoteRequestReplySerializer(serializers.Serializer):
+    body = serializers.CharField(required=True, allow_blank=False)
+
+
+class QuoteRequestRejectSerializer(serializers.Serializer):
+    reason = serializers.CharField(required=True, allow_blank=False)
 
 
 class ShopQuoteListSerializer(serializers.ModelSerializer):

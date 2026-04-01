@@ -6,12 +6,13 @@ from django.test import TestCase
 from django.utils import timezone
 from rest_framework.test import APIClient
 
-from accounts.models import User
+from accounts.models import User, UserProfile
 from common.models import AnalyticsEvent
 from catalog.choices import PricingMode, ProductStatus
 from catalog.models import Product, ProductCategory
 from inventory.models import Machine, Paper
 from locations.models import Location
+from notifications.models import Notification
 from pricing.choices import ChargeUnit, FinishingBillingBasis, FinishingSideMode, Sides
 from pricing.models import FinishingRate, Material, PrintingRate, VolumeDiscount
 from quotes.choices import QuoteStatus, ShopQuoteStatus
@@ -737,6 +738,18 @@ class PublicShopsAPITestCase(TestCase):
         self.assertEqual(len(results), 1)
         self.assertEqual(results[0]["slug"], "test-shop")
 
+    def test_public_shop_includes_owner_profile_links(self):
+        profile = UserProfile.objects.create(user=self.user, avatar="/media/avatars/test.jpg")
+        profile.social_links.create(platform="facebook", url="https://facebook.com/test-shop")
+
+        response = self.client.get("/api/public/shops/")
+
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        results = data.get("results", data)
+        self.assertEqual(results[0]["logo"], "/media/avatars/test.jpg")
+        self.assertEqual(results[0]["social_links"][0]["platform"], "facebook")
+
     def test_catalog_by_slug(self):
         response = self.client.get("/api/public/shops/test-shop/catalog/")
         self.assertEqual(response.status_code, 200)
@@ -937,6 +950,164 @@ class QuoteRequestAPITestCase(TestCase):
         r3 = self.client.post(f"/api/quote-requests/{qr_id}/submit/")
         self.assertEqual(r3.status_code, 200)
         self.assertEqual(r3.json()["status"], QuoteStatus.SUBMITTED)
+
+    def test_shop_can_accept_ask_question_and_client_reply(self):
+        self.client.force_authenticate(user=self.buyer)
+        created = self.client.post(
+            "/api/quote-requests/",
+            {"shop": self.shop.id, "customer_name": "Buyer", "customer_email": "b@t.com"},
+            format="json",
+        )
+        self.assertEqual(created.status_code, 201)
+        qr_id = created.json()["id"]
+        submitted = self.client.post(f"/api/quote-requests/{qr_id}/submit/")
+        self.assertEqual(submitted.status_code, 200)
+
+        self.client.force_authenticate(user=self.seller)
+        accepted = self.client.post(
+            f"/api/shops/{self.shop.slug}/incoming-requests/{qr_id}/accept-request/",
+            {},
+            format="json",
+        )
+        self.assertEqual(accepted.status_code, 200)
+        self.assertEqual(accepted.json()["status"], QuoteStatus.ACCEPTED)
+
+        questioned = self.client.post(
+            f"/api/shops/{self.shop.slug}/incoming-requests/{qr_id}/ask-question/",
+            {"body": "Please confirm the final size."},
+            format="json",
+        )
+        self.assertEqual(questioned.status_code, 200)
+        self.assertEqual(questioned.json()["status"], QuoteStatus.AWAITING_CLIENT_REPLY)
+
+        self.client.force_authenticate(user=self.buyer)
+        replied = self.client.post(
+            f"/api/quote-requests/{qr_id}/reply/",
+            {"body": "Use 90 x 55 mm."},
+            format="json",
+        )
+        self.assertEqual(replied.status_code, 200)
+        self.assertEqual(replied.json()["status"], QuoteStatus.AWAITING_SHOP_ACTION)
+        self.assertTrue(Notification.objects.filter(
+            user=self.seller,
+            notification_type=Notification.QUOTE_REQUEST_SUBMITTED,
+            object_id=qr_id,
+        ).exists())
+
+    def test_client_accepts_shop_quote_without_changing_request_from_quoted(self):
+        quote_request = QuoteRequest.objects.create(
+            shop=self.shop,
+            created_by=self.buyer,
+            customer_name="Buyer",
+            customer_email="b@t.com",
+            status=QuoteStatus.QUOTED,
+        )
+        shop_quote = ShopQuote.objects.create(
+            quote_request=quote_request,
+            shop=self.shop,
+            created_by=self.seller,
+            status=ShopQuoteStatus.SENT,
+            total=Decimal("2500.00"),
+            revision_number=1,
+        )
+
+        self.client.force_authenticate(user=self.buyer)
+        response = self.client.post(
+            f"/api/quote-requests/{quote_request.id}/accept/",
+            {"sent_quote_id": shop_quote.id},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["status"], QuoteStatus.QUOTED)
+        shop_quote.refresh_from_db()
+        self.assertEqual(shop_quote.status, ShopQuoteStatus.ACCEPTED)
+
+    def test_activity_summary_returns_shop_and_client_badge_counts(self):
+        customer_request = QuoteRequest.objects.create(
+            shop=self.shop,
+            created_by=self.buyer,
+            customer_name="Buyer",
+            customer_email="b@t.com",
+            status=QuoteStatus.AWAITING_CLIENT_REPLY,
+        )
+        actionable_request = QuoteRequest.objects.create(
+            shop=self.shop,
+            created_by=self.buyer,
+            customer_name="Buyer",
+            customer_email="b@t.com",
+            status=QuoteStatus.ACCEPTED,
+        )
+        new_shop_request = QuoteRequest.objects.create(
+            shop=self.shop,
+            created_by=self.buyer,
+            customer_name="Buyer",
+            customer_email="b@t.com",
+            status=QuoteStatus.SUBMITTED,
+        )
+
+        Notification.objects.create(
+            user=self.buyer,
+            actor=self.seller,
+            notification_type=Notification.SHOP_QUOTE_SENT,
+            object_type="quote_request",
+            object_id=customer_request.id,
+            message="Quote sent",
+        )
+        Notification.objects.create(
+            user=self.buyer,
+            actor=self.seller,
+            notification_type=Notification.QUOTE_REQUEST_SUBMITTED,
+            object_type="quote_request",
+            object_id=customer_request.id,
+            message="Shop asked a question",
+        )
+        Notification.objects.create(
+            user=self.buyer,
+            actor=self.seller,
+            notification_type=Notification.REQUEST_DECLINED,
+            object_type="quote_request",
+            object_id=customer_request.id,
+            message="Request declined",
+        )
+        Notification.objects.create(
+            user=self.seller,
+            actor=self.buyer,
+            notification_type=Notification.QUOTE_REQUEST_SUBMITTED,
+            object_type="quote_request",
+            object_id=new_shop_request.id,
+            message="New request",
+        )
+        Notification.objects.create(
+            user=self.seller,
+            actor=self.buyer,
+            notification_type=Notification.QUOTE_REQUEST_SUBMITTED,
+            object_type="quote_request",
+            object_id=actionable_request.id,
+            message="Client replied",
+        )
+
+        self.client.force_authenticate(user=self.seller)
+        seller_response = self.client.get(f"/api/me/notifications/activity-summary/?shop_slug={self.shop.slug}")
+        self.assertEqual(seller_response.status_code, 200)
+        seller_data = seller_response.json()
+        self.assertEqual(seller_data["shop"]["incoming_requests"], 1)
+        self.assertEqual(seller_data["shop"]["messages_replies"], 0)
+        self.assertEqual(seller_data["shop"]["pending_quote_actions"], 2)
+
+        actionable_request.status = QuoteStatus.AWAITING_SHOP_ACTION
+        actionable_request.save(update_fields=["status", "updated_at"])
+
+        seller_response = self.client.get(f"/api/me/notifications/activity-summary/?shop_slug={self.shop.slug}")
+        seller_data = seller_response.json()
+        self.assertEqual(seller_data["shop"]["messages_replies"], 1)
+
+        self.client.force_authenticate(user=self.buyer)
+        buyer_response = self.client.get("/api/me/notifications/activity-summary/")
+        self.assertEqual(buyer_response.status_code, 200)
+        buyer_data = buyer_response.json()
+        self.assertEqual(buyer_data["client"]["new_quotes"], 1)
+        self.assertEqual(buyer_data["client"]["shop_replies"], 1)
+        self.assertEqual(buyer_data["client"]["request_updates"], 1)
 
 
 class QuoteStaffAPITestCase(TestCase):
@@ -1352,7 +1523,7 @@ class ShopFinishingRateAPITestCase(TestCase):
     def _payload(self, **overrides):
         payload = {
             "name": "Matte Lamination",
-            "charge_unit": ChargeUnit.PER_SIDE_PER_SHEET,
+            "charge_unit": ChargeUnit.PER_SHEET,
             "billing_basis": FinishingBillingBasis.PER_SHEET,
             "side_mode": FinishingSideMode.PER_SELECTED_SIDE,
             "price": "12.00",
@@ -1364,7 +1535,7 @@ class ShopFinishingRateAPITestCase(TestCase):
         payload.update(overrides)
         return payload
 
-    def test_create_accepts_lamination_per_sheet_per_side_contract(self):
+    def test_create_accepts_simplified_lamination_contract(self):
         response = self.client.post(
             f"/api/shops/{self.shop.slug}/finishing-rates/",
             self._payload(),
@@ -1373,8 +1544,19 @@ class ShopFinishingRateAPITestCase(TestCase):
 
         self.assertEqual(response.status_code, 201)
         data = response.json()
+        self.assertEqual(data["charge_unit"], ChargeUnit.PER_SHEET)
         self.assertEqual(data["billing_basis"], FinishingBillingBasis.PER_SHEET)
         self.assertEqual(data["side_mode"], FinishingSideMode.PER_SELECTED_SIDE)
+
+    def test_create_normalizes_legacy_lamination_charge_unit(self):
+        response = self.client.post(
+            f"/api/shops/{self.shop.slug}/finishing-rates/",
+            self._payload(charge_unit=ChargeUnit.PER_SIDE_PER_SHEET),
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.json()["charge_unit"], ChargeUnit.PER_SHEET)
 
     def test_create_rejects_side_billed_lamination_with_wrong_billing_basis(self):
         response = self.client.post(
@@ -1403,7 +1585,7 @@ class ShopFinishingRateAPITestCase(TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertEqual(
             response.json()["field_errors"]["charge_unit"][0],
-            "Lamination must use PER_SIDE_PER_SHEET charge_unit.",
+            "Lamination must use per_sheet charge_unit. Legacy PER_SIDE_PER_SHEET is still supported.",
         )
 
     def test_create_rejects_per_piece_with_side_multiplier(self):
@@ -1724,8 +1906,25 @@ class QuoteWorkflowAPITestCase(TestCase):
             request_payload["request_snapshot"]["draft_reference"],
             QuoteDraft.objects.get(pk=draft_id).draft_reference,
         )
+        created_request = QuoteRequest.objects.get(pk=request_id)
+        created_item = QuoteItem.objects.get(quote_request=created_request)
+        self.assertEqual(created_item.quantity, 100)
+        self.assertEqual(created_item.sides, "DUPLEX")
+        self.assertEqual(created_item.color_mode, "COLOR")
+        self.assertTrue(created_request.messages.filter(message_kind="status").exists())
 
         self.client.force_authenticate(user=self.owner)
+        incoming_list = self.client.get(f"/api/shops/{self.shop.slug}/incoming-requests/")
+        self.assertEqual(incoming_list.status_code, 200)
+        incoming_list_payload = incoming_list.json()
+        incoming_list_results = incoming_list_payload if isinstance(incoming_list_payload, list) else incoming_list_payload["results"]
+        self.assertEqual(incoming_list_results[0]["id"], request_id)
+
+        incoming_detail = self.client.get(f"/api/shops/{self.shop.slug}/incoming-requests/{request_id}/")
+        self.assertEqual(incoming_detail.status_code, 200)
+        self.assertEqual(len(incoming_detail.json()["items"]), 1)
+        self.assertEqual(incoming_detail.json()["items"][0]["quantity"], 100)
+
         create_response = self.client.post(
             f"/api/quote-requests/{request_id}/responses/",
             {
@@ -1760,7 +1959,7 @@ class QuoteWorkflowAPITestCase(TestCase):
 
         request_record = QuoteRequest.objects.get(pk=request_id)
         response_record = ShopQuote.objects.get(pk=response_id)
-        self.assertEqual(request_record.status, "accepted")
+        self.assertEqual(request_record.status, "quoted")
         self.assertEqual(response_record.response_snapshot["pricing"]["grand_total"], "2550.00")
 
         self.client.force_authenticate(user=self.customer)
@@ -1854,6 +2053,8 @@ class CalculatorPreviewAPITestCase(TestCase):
         self.assertIn("finishings", data["breakdown"])
         self.assertEqual(data["breakdown"]["finishings"][0]["name"], "Preview Lamination")
         self.assertEqual(data["breakdown"]["finishings"][0]["formula"], "good_sheets x rate x side_count")
+        self.assertIn("Preview Lamination:", data["explanations"][3])
+        self.assertIn("KES", data["explanations"][3])
         self.assertIn("Printing:", data["explanations"][2])
 
     def test_tweaked_item_response_exposes_calculation_fields(self):
