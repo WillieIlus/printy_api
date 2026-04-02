@@ -13,6 +13,7 @@ from pricing.choices import ChargeUnit, FinishingBillingBasis, FinishingSideMode
 from pricing.models import FinishingRate, PrintingRate
 from shops.models import Shop
 
+from .pricing.quote_builder import build_quote_preview
 from .quote_calculator import calculate_quote_item
 from .pricing.finishings import compute_finishing_line
 
@@ -309,3 +310,21 @@ class QuoteCalculatorTestCase(TestCase):
         )
         self.assertFalse(result.can_calculate)
         self.assertIn("Quantity", result.reason)
+
+    def test_backend_preview_explains_missing_printing_rate(self):
+        PrintingRate.objects.all().delete()
+
+        preview = build_quote_preview(
+            shop=self.shop,
+            product=self.product,
+            quantity=100,
+            paper=self.paper,
+            machine=self.machine,
+            color_mode="COLOR",
+            sides="SIMPLEX",
+            finishing_selections=[],
+        )
+
+        self.assertFalse(preview["can_calculate"])
+        self.assertFalse(preview["totals"])
+        self.assertIn("No active printing rate matches", preview["reason"])

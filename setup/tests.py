@@ -8,7 +8,7 @@ from inventory.models import Machine, Paper
 from pricing.models import PrintingRate
 from shops.models import Shop
 
-from .services import get_setup_status, pricing_exists, get_product_publish_check
+from .services import get_setup_status, get_setup_status_for_shop, pricing_exists, get_product_publish_check
 
 
 class SetupStatusTests(TestCase):
@@ -35,6 +35,19 @@ class SetupStatusTests(TestCase):
         status = get_setup_status(self.user)
         self.assertEqual(status["next_step"], "done")
         self.assertTrue(status["pricing_ready"])
+
+    def test_shop_status_exposes_machine_and_paper_prerequisites(self):
+        shop = Shop.objects.create(name="Prereq Shop", owner=self.user, slug="prereq-shop", currency="KES")
+
+        status = get_setup_status_for_shop(shop)
+        self.assertFalse(status["has_machines"])
+        self.assertFalse(status["has_papers"])
+        self.assertEqual(status["next_step"], "machines")
+
+        Machine.objects.create(name="Konica", shop=shop, machine_type="DIGITAL", max_width_mm=320, max_height_mm=450)
+        status = get_setup_status_for_shop(shop)
+        self.assertTrue(status["has_machines"])
+        self.assertEqual(status["next_step"], "papers")
 
 
 class PricingExistsTests(TestCase):

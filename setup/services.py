@@ -7,7 +7,8 @@ from shops.models import Shop
 
 SETUP_STEPS = [
     ("shop", "create shop"),
-    ("materials", "add materials/papers"),
+    ("machines", "add machines"),
+    ("papers", "add papers/materials"),
     ("pricing", "add pricing rules"),
     ("finishing", "add finishing rules"),
     ("products", "add first product"),
@@ -19,6 +20,8 @@ def _build_status_for_shop(shop: Shop | None) -> dict:
     if not shop:
         return {
             "has_shop": False,
+            "has_machines": False,
+            "has_papers": False,
             "has_materials": False,
             "has_pricing": False,
             "has_finishing": False,
@@ -27,28 +30,44 @@ def _build_status_for_shop(shop: Shop | None) -> dict:
             "next_url": "/dashboard/shops/create",
             "completed_steps": [],
             "pending_steps": [step for step, _ in SETUP_STEPS[:-1]],
+            "blocking_reason": "Create a shop before you can add machines, stock, pricing, or products.",
         }
 
-    has_materials = Paper.objects.filter(shop=shop, is_active=True).exists() or Material.objects.filter(shop=shop, is_active=True).exists()
-    has_pricing = PrintingRate.objects.filter(machine__shop=shop, is_active=True).exists()
+    has_papers = Paper.objects.filter(shop=shop, is_active=True).exists()
+    has_materials = has_papers or Material.objects.filter(shop=shop, is_active=True).exists()
+    has_machines = Machine.objects.filter(shop=shop, is_active=True).exists()
+    has_pricing = pricing_exists(shop)
     has_finishing = FinishingRate.objects.filter(shop=shop, is_active=True).exists()
     has_products = Product.objects.filter(shop=shop, is_active=True).exists()
 
-    if not has_materials:
-        next_step = "materials"
+    if not has_machines:
+        next_step = "machines"
+        blocking_reason = "Add at least one machine before configuring backend pricing."
+    elif not has_papers:
+        next_step = "papers"
+        blocking_reason = "Add paper stock before backend pricing can calculate sheet jobs."
+    elif not has_materials:
+        next_step = "papers"
+        blocking_reason = "Add paper or material stock before finishing and product setup."
     elif not has_pricing:
         next_step = "pricing"
+        blocking_reason = "Add printing rates after machine and paper setup so the calculator can return totals."
     elif not has_finishing:
         next_step = "finishing"
+        blocking_reason = "Add finishing rules so backend quotes can include post-press pricing."
     elif not has_products:
         next_step = "products"
+        blocking_reason = "Add at least one product so clients can request quotes from the public shop catalog."
     else:
         next_step = "complete"
+        blocking_reason = ""
 
     pending_steps = [code for code, _ in SETUP_STEPS if code not in {"complete"}]
     completed_steps = ["shop"]
-    if has_materials:
-        completed_steps.append("materials")
+    if has_machines:
+        completed_steps.append("machines")
+    if has_papers:
+        completed_steps.append("papers")
     if has_pricing:
         completed_steps.append("pricing")
     if has_finishing:
@@ -58,6 +77,8 @@ def _build_status_for_shop(shop: Shop | None) -> dict:
 
     return {
         "has_shop": True,
+        "has_machines": has_machines,
+        "has_papers": has_papers,
         "has_materials": has_materials,
         "has_pricing": has_pricing,
         "has_finishing": has_finishing,
@@ -68,6 +89,7 @@ def _build_status_for_shop(shop: Shop | None) -> dict:
         ),
         "completed_steps": completed_steps,
         "pending_steps": [step for step in pending_steps if step not in completed_steps],
+        "blocking_reason": blocking_reason,
     }
 
 

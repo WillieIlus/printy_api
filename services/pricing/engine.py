@@ -214,6 +214,40 @@ def calculate_sheet_pricing(
         bleed_mm=getattr(product, "default_bleed_mm", 3) or 3,
     )
     resolved_rate, print_rate = PrintingRate.resolve(machine, paper.sheet_size, color_mode, sides)
+    if machine and print_rate is None:
+        reason = (
+            f"No active printing rate matches {getattr(machine, 'name', 'this machine')} for "
+            f"{paper.sheet_size}, {color_mode}, and {sides}. Add the backend printing rate first."
+        )
+        return PricingEngineResult(
+            pricing_mode=PricingMode.SHEET,
+            quantity=quantity,
+            currency=getattr(shop, "currency", "KES") or "KES",
+            totals={},
+            breakdown={
+                "paper": {
+                    "id": paper.id,
+                    "label": f"{paper.sheet_size} {paper.gsm}gsm {paper.get_paper_type_display()}",
+                    "sheet_size": paper.sheet_size,
+                },
+                "printing": {
+                    "machine_id": machine.id if machine else None,
+                    "machine_name": getattr(machine, "name", ""),
+                    "color_mode": color_mode,
+                    "sides": sides,
+                },
+            },
+            explanations=[reason],
+            can_calculate=False,
+            reason=reason,
+            copies_per_sheet=imposition.copies_per_sheet,
+            good_sheets=imposition.good_sheets,
+            parent_sheets_required=imposition.good_sheets,
+            parent_sheet_name=paper.sheet_size,
+            rotated=imposition.orientation == "rotated",
+            explanation_lines=[reason],
+        )
+
     paper_rate = _decimal(paper.buying_price if use_cost_price else paper.selling_price)
     print_rate_value = _decimal(print_rate)
     paper_cost = paper_rate * Decimal(imposition.good_sheets)
