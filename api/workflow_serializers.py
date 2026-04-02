@@ -26,6 +26,7 @@ class CalculatorPreviewSerializer(serializers.Serializer):
     machine = serializers.PrimaryKeyRelatedField(queryset=Machine.objects.filter(is_active=True))
     color_mode = serializers.ChoiceField(choices=["BW", "COLOR"], default="COLOR")
     sides = serializers.ChoiceField(choices=["SIMPLEX", "DUPLEX"], default="SIMPLEX")
+    apply_duplex_surcharge = serializers.BooleanField(required=False, allow_null=True, default=None)
     width_mm = serializers.IntegerField(required=False, allow_null=True, min_value=1)
     height_mm = serializers.IntegerField(required=False, allow_null=True, min_value=1)
     finishings = FinishingSelectionSerializer(many=True, required=False)

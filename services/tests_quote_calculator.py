@@ -14,6 +14,7 @@ from pricing.models import FinishingRate, PrintingRate
 from shops.models import Shop
 
 from .pricing.quote_builder import build_quote_preview
+from .pricing.engine import calculate_sheet_pricing
 from .quote_calculator import calculate_quote_item
 from .pricing.finishings import compute_finishing_line
 
@@ -328,3 +329,90 @@ class QuoteCalculatorTestCase(TestCase):
         self.assertFalse(preview["can_calculate"])
         self.assertFalse(preview["totals"])
         self.assertIn("No active printing rate matches", preview["reason"])
+
+    def test_sheet_pricing_uses_per_side_plus_duplex_surcharge_rule(self):
+        PrintingRate.objects.all().delete()
+        self.paper.selling_price = Decimal("10.00")
+        self.paper.gsm = 250
+        self.paper.save(update_fields=["selling_price", "gsm"])
+        PrintingRate.objects.create(
+            machine=self.machine,
+            sheet_size=SheetSize.SRA3,
+            color_mode="COLOR",
+            single_price=Decimal("15.00"),
+            double_price=None,
+            duplex_surcharge=Decimal("5.00"),
+            duplex_surcharge_enabled=True,
+            duplex_surcharge_min_gsm=150,
+            is_active=True,
+        )
+
+        result = calculate_sheet_pricing(
+            shop=self.shop,
+            product=self.product,
+            quantity=100,
+            paper=self.paper,
+            machine=self.machine,
+            color_mode="COLOR",
+            sides="DUPLEX",
+        )
+
+        self.assertEqual(result.breakdown["paper"]["paper_price_per_sheet"], "10.00")
+        self.assertEqual(result.breakdown["printing"]["print_price_front"], "15.00")
+        self.assertEqual(result.breakdown["printing"]["print_price_back"], "15.00")
+        self.assertEqual(result.breakdown["printing"]["duplex_surcharge"], "5.00")
+        self.assertEqual(result.breakdown["printing"]["total_per_sheet"], "35.00")
+        self.assertEqual(result.breakdown["per_sheet_pricing"]["paper_price"], "10.00")
+        self.assertEqual(result.breakdown["per_sheet_pricing"]["total_per_sheet"], "45.00")
+        self.assertEqual(
+            result.breakdown["per_sheet_pricing"]["formula"],
+            "paper_price + print_price_front + print_price_back + duplex_surcharge",
+        )
+        self.assertIn("paper + 15.00 front + 15.00 back + 5.00 duplex surcharge", result.breakdown["per_sheet_pricing"]["explanation"])
+        self.assertEqual(result.totals["total_per_sheet"], "45.00")
+
+    def test_sheet_pricing_can_force_duplex_surcharge_off_or_on(self):
+        PrintingRate.objects.all().delete()
+        self.paper.selling_price = Decimal("5.00")
+        self.paper.gsm = 130
+        self.paper.save(update_fields=["selling_price", "gsm"])
+        PrintingRate.objects.create(
+            machine=self.machine,
+            sheet_size=SheetSize.SRA3,
+            color_mode="COLOR",
+            single_price=Decimal("15.00"),
+            double_price=None,
+            duplex_surcharge=Decimal("5.00"),
+            duplex_surcharge_enabled=True,
+            duplex_surcharge_min_gsm=150,
+            is_active=True,
+        )
+
+        auto_result = calculate_sheet_pricing(
+            shop=self.shop,
+            product=self.product,
+            quantity=100,
+            paper=self.paper,
+            machine=self.machine,
+            color_mode="COLOR",
+            sides="DUPLEX",
+        )
+        forced_result = calculate_sheet_pricing(
+            shop=self.shop,
+            product=self.product,
+            quantity=100,
+            paper=self.paper,
+            machine=self.machine,
+            color_mode="COLOR",
+            sides="DUPLEX",
+            apply_duplex_surcharge=True,
+        )
+
+        self.assertEqual(auto_result.breakdown["printing"]["duplex_surcharge"], "0.00")
+        self.assertEqual(auto_result.totals["total_per_sheet"], "35.00")
+        self.assertEqual(
+            auto_result.breakdown["per_sheet_pricing"]["formula"],
+            "paper_price + print_price_front + print_price_back",
+        )
+        self.assertEqual(forced_result.breakdown["printing"]["duplex_surcharge"], "5.00")
+        self.assertEqual(forced_result.totals["total_per_sheet"], "40.00")

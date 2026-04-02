@@ -18,10 +18,40 @@ class PrintingRateAdmin(admin.ModelAdmin):
         "color_mode",
         "single_price",
         "double_price",
+        "duplex_surcharge",
+        "duplex_surcharge_enabled",
+        "duplex_surcharge_min_gsm",
         "is_active",
         "is_default",
     ]
-    list_filter = ["sheet_size", "color_mode", "is_active", "is_default"]
+    list_filter = ["sheet_size", "color_mode", "duplex_surcharge_enabled", "is_active", "is_default"]
+    fieldsets = (
+        (
+            None,
+            {
+                "fields": (
+                    "machine",
+                    "sheet_size",
+                    "color_mode",
+                    "is_active",
+                    "is_default",
+                )
+            },
+        ),
+        (
+            "Printing Pricing",
+            {
+                "fields": (
+                    "single_price",
+                    "double_price",
+                    "duplex_surcharge_enabled",
+                    "duplex_surcharge",
+                    "duplex_surcharge_min_gsm",
+                ),
+                "description": "Set the print charge per side. Leave duplex override blank to calculate duplex as one side + back side + optional duplex surcharge.",
+            },
+        ),
+    )
 
 
 @admin.register(FinishingRate)

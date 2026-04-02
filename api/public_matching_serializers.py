@@ -28,6 +28,7 @@ class PublicCalculatorPayloadSerializer(serializers.Serializer):
     height_mm = serializers.IntegerField(required=False, allow_null=True, min_value=1)
     normalized_size = serializers.CharField(required=False, allow_blank=True, default="")
     print_sides = serializers.ChoiceField(choices=["SIMPLEX", "DUPLEX"], default="SIMPLEX")
+    apply_duplex_surcharge = serializers.BooleanField(required=False, allow_null=True, default=None)
     colour_mode = serializers.ChoiceField(choices=["BW", "COLOR"], default="COLOR")
     paper_id = serializers.IntegerField(required=False, allow_null=True)
     material_id = serializers.IntegerField(required=False, allow_null=True)

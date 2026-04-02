@@ -66,7 +66,7 @@ def get_quote_item_missing_fields(item: QuoteItem) -> list[tuple[str, str]]:
             missing.append(("Paper", "selling_price"))
         if item.machine_id and item.sides and item.color_mode:
             rate, price = PrintingRate.resolve(
-                item.machine, paper.sheet_size, item.color_mode, item.sides
+                item.machine, paper.sheet_size, item.color_mode, item.sides, paper=paper
             )
             if rate is None:
                 missing.append(
@@ -317,7 +317,7 @@ def calculate_quote_item(item: QuoteItem, force: bool = False) -> tuple[Decimal,
         # Printing cost: resolve PrintingRate by machine+sheet_size+sides+color_mode
         if item.machine_id and item.sides and item.color_mode:
             _, print_price = PrintingRate.resolve(
-                item.machine, paper.sheet_size, item.color_mode, item.sides
+                item.machine, paper.sheet_size, item.color_mode, item.sides, paper=paper
             )
             if print_price is not None:
                 total += print_price * sheets_count
@@ -379,7 +379,7 @@ def _build_item_breakdown_lines(item: QuoteItem) -> list[dict]:
     if item.machine_id and item.machine and item.paper_id and item.sides and item.color_mode:
         from pricing.models import PrintingRate
         rate, _ = PrintingRate.resolve(
-            item.machine, item.paper.sheet_size, item.color_mode, item.sides
+            item.machine, item.paper.sheet_size, item.color_mode, item.sides, paper=item.paper
         )
         if rate:
             side_label = "Double" if item.sides == Sides.DUPLEX else "Single"

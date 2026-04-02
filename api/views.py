@@ -180,11 +180,16 @@ class ShopRateCardView(APIView):
             .select_related("machine")
             .order_by("-is_default", "sheet_size", "color_mode")[:50]
         ):
+            duplex_breakdown = rate.get_duplex_price_breakdown()
             printing.append({
                 "sheet_size": rate.sheet_size,
                 "color_mode": rate.get_color_mode_display() or rate.color_mode,
                 "price_per_side": str(rate.single_price),
-                "price_double_sided": str(rate.double_price),
+                "price_double_sided": str(duplex_breakdown["total_per_sheet"]),
+                "duplex_surcharge": str(rate.duplex_surcharge),
+                "duplex_surcharge_enabled": rate.duplex_surcharge_enabled,
+                "duplex_surcharge_min_gsm": rate.duplex_surcharge_min_gsm,
+                "duplex_override_used": duplex_breakdown["duplex_override_used"],
                 "is_default": rate.is_default,
             })
         # Dedupe by sheet_size+color_mode (keep first)
@@ -218,7 +223,7 @@ class ShopRateCardView(APIView):
             paper_sell = Decimal(str(p.selling_price))
             if pr:
                 single = paper_sell + pr.single_price
-                double = paper_sell + pr.double_price
+                double = paper_sell + pr.get_price_for_sides("DUPLEX", paper=p)
             else:
                 single = paper_sell
                 double = paper_sell
@@ -233,7 +238,7 @@ class ShopRateCardView(APIView):
             if is_owner and pr:
                 row["price_per_sheet"] = str(p.selling_price)
                 row["printing_single"] = str(pr.single_price)
-                row["printing_double"] = str(pr.double_price)
+                row["printing_double"] = str(pr.get_price_for_sides("DUPLEX", paper=p))
             paper.append(row)
 
         # Finishing: from FinishingRate
@@ -335,12 +340,17 @@ class ShopRateCardForCalculatorView(APIView):
             key = (r.sheet_size, r.color_mode)
             if key not in seen_pr:
                 seen_pr.add(key)
+                duplex_breakdown = r.get_duplex_price_breakdown()
                 printing_rates.append({
                     "id": r.id,
                     "sheet_size": r.sheet_size,
                     "color_mode": r.color_mode,
                     "single_price": str(r.single_price),
-                    "double_price": str(r.double_price),
+                    "double_price": str(duplex_breakdown["total_per_sheet"]) if duplex_breakdown["total_per_sheet"] is not None else None,
+                    "duplex_override_price": str(r.double_price) if r.double_price is not None else None,
+                    "duplex_surcharge": str(r.duplex_surcharge),
+                    "duplex_surcharge_enabled": r.duplex_surcharge_enabled,
+                    "duplex_surcharge_min_gsm": r.duplex_surcharge_min_gsm,
                     "is_active": r.is_active,
                 })
 

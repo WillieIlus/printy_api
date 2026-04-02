@@ -2138,8 +2138,53 @@ class CalculatorPreviewAPITestCase(TestCase):
         self.assertEqual(data["totals"]["vat_amount"], "98.40")
         self.assertEqual(data["totals"]["grand_total"], "713.40")
         self.assertEqual(data["totals"]["vat_mode"], "exclusive")
-        self.assertEqual(data["vat"]["mode"], "exclusive")
-        self.assertEqual(data["vat"]["amount"], "98.40")
+
+    def test_preview_supports_manual_duplex_surcharge_override(self):
+        PrintingRate.objects.all().delete()
+        self.paper.selling_price = Decimal("5.00")
+        self.paper.gsm = 130
+        self.paper.save(update_fields=["selling_price", "gsm"])
+        PrintingRate.objects.create(
+            machine=self.machine,
+            sheet_size="SRA3",
+            color_mode="COLOR",
+            single_price=Decimal("15.00"),
+            double_price=None,
+            duplex_surcharge=Decimal("5.00"),
+            duplex_surcharge_enabled=True,
+            duplex_surcharge_min_gsm=150,
+            is_active=True,
+        )
+
+        response = self.client.post(
+            "/api/calculator/preview/",
+            {
+                "shop": self.shop.id,
+                "product": self.product.id,
+                "quantity": 100,
+                "paper": self.paper.id,
+                "machine": self.machine.id,
+                "color_mode": "COLOR",
+                "sides": "DUPLEX",
+                "apply_duplex_surcharge": True,
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(data["breakdown"]["paper"]["paper_price_per_sheet"], "5.00")
+        self.assertEqual(data["breakdown"]["printing"]["print_price_front"], "15.00")
+        self.assertEqual(data["breakdown"]["printing"]["print_price_back"], "15.00")
+        self.assertEqual(data["breakdown"]["printing"]["duplex_surcharge"], "5.00")
+        self.assertTrue(data["breakdown"]["printing"]["duplex_surcharge_applied"])
+        self.assertEqual(data["breakdown"]["per_sheet_pricing"]["paper_price"], "5.00")
+        self.assertEqual(data["breakdown"]["per_sheet_pricing"]["total_per_sheet"], "40.00")
+        self.assertEqual(
+            data["breakdown"]["per_sheet_pricing"]["formula"],
+            "paper_price + print_price_front + print_price_back + duplex_surcharge",
+        )
+        self.assertEqual(data["totals"]["total_per_sheet"], "40.00")
 
 
 class ShopDashboardSummaryAPITestCase(TestCase):

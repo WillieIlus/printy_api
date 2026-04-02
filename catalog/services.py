@@ -175,7 +175,7 @@ def get_product_starting_price(product: Product) -> dict:
         if sides == Sides.SIMPLEX and not product.allow_simplex:
             sides = Sides.DUPLEX if product.allow_duplex else Sides.SIMPLEX
 
-        rate, print_price = PrintingRate.resolve(machine, paper.sheet_size, ColorMode.COLOR, sides)
+        rate, print_price = PrintingRate.resolve(machine, paper.sheet_size, ColorMode.COLOR, sides, paper=paper)
         if not rate or print_price is None:
             errors.append(f"No printing rate for {machine.name} / {paper.sheet_size} / color.")
             return {"price": None, "is_valid": False, "errors": errors, "warnings": warnings, "assumptions": {}}
@@ -624,7 +624,7 @@ def get_product_price_range(product: Product) -> dict:
                 for color in [ColorMode.BW, ColorMode.COLOR]:
                     for sides in sides_options:
                         rate, price = PrintingRate.resolve(
-                            machine, paper.sheet_size, color, sides
+                            machine, paper.sheet_size, color, sides, paper=paper
                         )
                         if rate and price is not None:
                             pricing = calculate_sheet_pricing(

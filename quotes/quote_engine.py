@@ -42,7 +42,7 @@ def calculate_quote_item(item: QuoteItem) -> tuple[Decimal, Decimal]:
     if item.machine_id and item.sides and item.color_mode:
         sheet_size = _get_sheet_size_from_product(item)
         _, price = PrintingRate.resolve(
-            item.machine, sheet_size, item.color_mode, item.sides
+            item.machine, sheet_size, item.color_mode, item.sides, paper=item.paper if item.paper_id else None
         )
         if price is not None:
             base_cost += price * quantity

@@ -122,7 +122,7 @@ def compute_print_cost(machine, paper, sheets_count: int, sides: str, color_mode
     """Resolve PrintingRate and compute cost = rate × sheets."""
     if not machine or not paper or not sides or not color_mode:
         return Decimal("0")
-    _, price = PrintingRate.resolve(machine, paper.sheet_size, color_mode, sides)
+    _, price = PrintingRate.resolve(machine, paper.sheet_size, color_mode, sides, paper=paper)
     if price is None:
         return Decimal("0")
     return price * sheets_count

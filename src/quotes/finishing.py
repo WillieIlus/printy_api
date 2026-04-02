@@ -53,6 +53,7 @@ def get_sheet_printing_rate(item) -> Decimal:
         item.paper.sheet_size,
         item.color_mode,
         item.sides,
+        paper=item.paper,
     )
     return _safe_decimal(price) if price is not None else ZERO
 

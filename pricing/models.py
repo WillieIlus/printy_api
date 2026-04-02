@@ -1,3 +1,5 @@
+from decimal import Decimal
+
 from django.core.exceptions import ValidationError
 from django.db import models
 from django.utils.text import slugify
@@ -58,7 +60,8 @@ class FinishingCategory(TimeStampedModel):
 class PrintingRate(TimeStampedModel):
     """
     Printing rate per machine, sheet size, color mode.
-    Real print shop pricing: single_price (simplex) and double_price (duplex) per sheet.
+    Real print shop pricing: single_price is the print charge per side.
+    double_price remains available as an optional duplex-per-sheet override.
     Shop implied via machine.
     """
 
@@ -87,13 +90,33 @@ class PrintingRate(TimeStampedModel):
         max_digits=12,
         decimal_places=2,
         verbose_name=_("single price"),
-        help_text=_("Charge per sheet for simplex (1-sided) printing."),
+        help_text=_("Base print charge per side. Simplex uses this once; duplex uses it twice."),
     )
     double_price = models.DecimalField(
         max_digits=12,
         decimal_places=2,
+        null=True,
+        blank=True,
         verbose_name=_("double price"),
-        help_text=_("Charge per sheet for duplex (2-sided) printing."),
+        help_text=_("Optional duplex-per-sheet override. Leave blank to calculate from per-side price plus any duplex surcharge."),
+    )
+    duplex_surcharge = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        default=Decimal("0"),
+        verbose_name=_("duplex surcharge"),
+        help_text=_("Optional flat surcharge added once per duplex sheet when the surcharge rule applies."),
+    )
+    duplex_surcharge_enabled = models.BooleanField(
+        default=False,
+        verbose_name=_("duplex surcharge enabled"),
+        help_text=_("Turn on duplex surcharge logic for this printing rate."),
+    )
+    duplex_surcharge_min_gsm = models.PositiveIntegerField(
+        null=True,
+        blank=True,
+        verbose_name=_("duplex surcharge min gsm"),
+        help_text=_("Optional gsm threshold. The duplex surcharge only applies when the selected paper gsm meets or exceeds this value."),
     )
     is_active = models.BooleanField(
         default=True,
@@ -133,14 +156,64 @@ class PrintingRate(TimeStampedModel):
     def __str__(self):
         return f"{self.machine.name} - {self.sheet_size} {self.get_color_mode_display()}"
 
-    def get_price_for_sides(self, sides):
-        """Return single_price or double_price based on sides (SIMPLEX/DUPLEX)."""
+    def clean(self):
+        super().clean()
+        errors = {}
+        if self.duplex_surcharge < 0:
+            errors["duplex_surcharge"] = _("Duplex surcharge cannot be negative.")
+        if self.duplex_surcharge_min_gsm is not None and self.duplex_surcharge_min_gsm <= 0:
+            errors["duplex_surcharge_min_gsm"] = _("Minimum gsm must be greater than zero.")
+        if errors:
+            raise ValidationError(errors)
+
+    def should_apply_duplex_surcharge(self, *, paper=None, apply_duplex_surcharge=None) -> bool:
+        if apply_duplex_surcharge is False:
+            return False
+        if self.duplex_surcharge <= 0:
+            return False
+        if apply_duplex_surcharge is True:
+            return True
+        if not self.duplex_surcharge_enabled:
+            return False
+        threshold = self.duplex_surcharge_min_gsm
+        if threshold is None:
+            return True
+        paper_gsm = getattr(paper, "gsm", None)
+        if paper_gsm is None:
+            return False
+        return int(paper_gsm) >= int(threshold)
+
+    def get_duplex_price_breakdown(self, *, paper=None, apply_duplex_surcharge=None) -> dict:
+        front_side_price = Decimal(self.single_price or 0)
+        back_side_price = Decimal(self.single_price or 0)
+        surcharge_applied = self.should_apply_duplex_surcharge(
+            paper=paper,
+            apply_duplex_surcharge=apply_duplex_surcharge,
+        )
+        surcharge_amount = Decimal(self.duplex_surcharge or 0) if surcharge_applied else Decimal("0")
+        override_used = self.double_price is not None
+        total_per_sheet = Decimal(self.double_price) if override_used else (front_side_price + back_side_price + surcharge_amount)
+        return {
+            "front_side_price": front_side_price,
+            "back_side_price": back_side_price,
+            "duplex_surcharge": surcharge_amount,
+            "duplex_surcharge_applied": surcharge_applied,
+            "duplex_override_used": override_used,
+            "duplex_override_price": Decimal(self.double_price) if self.double_price is not None else None,
+            "total_per_sheet": total_per_sheet,
+        }
+
+    def get_price_for_sides(self, sides, *, paper=None, apply_duplex_surcharge=None):
+        """Return the effective per-sheet printing price for simplex or duplex."""
         if sides == Sides.DUPLEX:
-            return self.double_price
-        return self.single_price
+            return self.get_duplex_price_breakdown(
+                paper=paper,
+                apply_duplex_surcharge=apply_duplex_surcharge,
+            )["total_per_sheet"]
+        return Decimal(self.single_price or 0)
 
     @classmethod
-    def resolve(cls, machine, sheet_size, color_mode, sides):
+    def resolve(cls, machine, sheet_size, color_mode, sides, *, paper=None, apply_duplex_surcharge=None):
         """
         Resolve PrintingRate and return price for given sides.
         Order: 1) exact match (machine, sheet_size, color_mode), 2) default rate when sheet_size matches.
@@ -152,7 +225,11 @@ class PrintingRate(TimeStampedModel):
             is_active=True,
         ).first()
         if rate:
-            return rate, rate.get_price_for_sides(sides)
+            return rate, rate.get_price_for_sides(
+                sides,
+                paper=paper,
+                apply_duplex_surcharge=apply_duplex_surcharge,
+            )
         # Fallback: use machine's default rate when sheet_size matches
         default_rate = cls.objects.filter(
             machine=machine,
@@ -160,7 +237,11 @@ class PrintingRate(TimeStampedModel):
             is_active=True,
         ).first()
         if default_rate and default_rate.sheet_size == sheet_size:
-            return default_rate, default_rate.get_price_for_sides(sides)
+            return default_rate, default_rate.get_price_for_sides(
+                sides,
+                paper=paper,
+                apply_duplex_surcharge=apply_duplex_surcharge,
+            )
         return None, None
 
 

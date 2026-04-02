@@ -204,6 +204,7 @@ def _preview_catalog_for_shop(shop: Shop, product: Product, payload: dict[str, A
         machine=machine,
         color_mode=payload.get("colour_mode") or "COLOR",
         sides=payload.get("print_sides") or "SIMPLEX",
+        apply_duplex_surcharge=payload.get("apply_duplex_surcharge"),
         finishing_selections=finishing_selections,
         width_mm=int(payload.get("width_mm") or product.default_finished_width_mm or 0),
         height_mm=int(payload.get("height_mm") or product.default_finished_height_mm or 0),
@@ -312,6 +313,7 @@ def _preview_custom_for_shop(shop: Shop, payload: dict[str, Any]) -> dict[str, A
         machine=machine,
         color_mode=payload.get("colour_mode") or "COLOR",
         sides=payload.get("print_sides") or "SIMPLEX",
+        apply_duplex_surcharge=payload.get("apply_duplex_surcharge"),
         finishing_selections=finishing_selections,
         width_mm=width_mm,
         height_mm=height_mm,
@@ -447,12 +449,12 @@ def _pick_machine(shop: Shop, paper: Paper | None, payload: dict[str, Any], prod
     if product and getattr(product, "default_machine_id", None):
         preferred = queryset.filter(id=product.default_machine_id).first()
         if preferred:
-            resolved_rate, resolved_price = PrintingRate.resolve(preferred, paper.sheet_size, colour_mode, print_sides)
+            resolved_rate, resolved_price = PrintingRate.resolve(preferred, paper.sheet_size, colour_mode, print_sides, paper=paper)
             if resolved_rate and resolved_price is not None:
                 return preferred
 
     for machine in queryset.order_by("id"):
-        resolved_rate, resolved_price = PrintingRate.resolve(machine, paper.sheet_size, colour_mode, print_sides)
+        resolved_rate, resolved_price = PrintingRate.resolve(machine, paper.sheet_size, colour_mode, print_sides, paper=paper)
         if resolved_rate and resolved_price is not None:
             return machine
     return None

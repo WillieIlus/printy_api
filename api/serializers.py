@@ -965,7 +965,7 @@ class PaperSerializer(serializers.ModelSerializer):
 
 
 class PrintingRateSerializer(serializers.ModelSerializer):
-    """CRUD for machine printing rates (single_price=simplex, double_price=duplex per sheet)."""
+    """CRUD for machine printing rates (per-side print price + optional duplex override/surcharge)."""
 
     class Meta:
         model = PrintingRate
@@ -975,6 +975,9 @@ class PrintingRateSerializer(serializers.ModelSerializer):
             "color_mode",
             "single_price",
             "double_price",
+            "duplex_surcharge",
+            "duplex_surcharge_enabled",
+            "duplex_surcharge_min_gsm",
             "is_active",
             "is_default",
         ]
@@ -984,6 +987,17 @@ class PrintingRateSerializer(serializers.ModelSerializer):
         if machine and self.instance is None:
             # Ensure machine belongs to shop when creating
             pass
+        duplex_surcharge = attrs.get("duplex_surcharge", getattr(self.instance, "duplex_surcharge", None))
+        duplex_surcharge_min_gsm = attrs.get(
+            "duplex_surcharge_min_gsm",
+            getattr(self.instance, "duplex_surcharge_min_gsm", None),
+        )
+        if attrs.get("duplex_surcharge_enabled") and attrs.get("duplex_surcharge") is None and not self.instance:
+            attrs["duplex_surcharge"] = "0.00"
+        if duplex_surcharge is not None and duplex_surcharge < 0:
+            raise serializers.ValidationError({"duplex_surcharge": "Duplex surcharge cannot be negative."})
+        if duplex_surcharge_min_gsm is not None and duplex_surcharge_min_gsm <= 0:
+            raise serializers.ValidationError({"duplex_surcharge_min_gsm": "Minimum gsm must be greater than zero."})
         return attrs
 
 

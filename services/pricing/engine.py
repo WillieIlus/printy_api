@@ -183,7 +183,13 @@ def select_paper_for_pricing(
             sheet_height_mm=sheet_height or 0,
             bleed_mm=product.default_bleed_mm or 3,
         )
-        _, print_rate = PrintingRate.resolve(machine, paper.sheet_size, selected_color_mode, selected_sides)
+        _, print_rate = PrintingRate.resolve(
+            machine,
+            paper.sheet_size,
+            selected_color_mode,
+            selected_sides,
+            paper=paper,
+        )
         total_per_sheet = _decimal(paper.selling_price) + _decimal(print_rate)
         return (total_per_sheet * Decimal(imposition.good_sheets), paper.id)
 
@@ -200,6 +206,7 @@ def calculate_sheet_pricing(
     color_mode: str,
     sides: str,
     finishing_selections: list[dict] | None = None,
+    apply_duplex_surcharge: bool | None = None,
     use_cost_price: bool = False,
     width_mm: int | None = None,
     height_mm: int | None = None,
@@ -213,7 +220,14 @@ def calculate_sheet_pricing(
         sheet_height_mm=sheet_height or 0,
         bleed_mm=getattr(product, "default_bleed_mm", 3) or 3,
     )
-    resolved_rate, print_rate = PrintingRate.resolve(machine, paper.sheet_size, color_mode, sides)
+    resolved_rate, print_rate = PrintingRate.resolve(
+        machine,
+        paper.sheet_size,
+        color_mode,
+        sides,
+        paper=paper,
+        apply_duplex_surcharge=apply_duplex_surcharge,
+    )
     if machine and print_rate is None:
         reason = (
             f"No active printing rate matches {getattr(machine, 'name', 'this machine')} for "
@@ -250,6 +264,22 @@ def calculate_sheet_pricing(
 
     paper_rate = _decimal(paper.buying_price if use_cost_price else paper.selling_price)
     print_rate_value = _decimal(print_rate)
+    printing_breakdown = (
+        resolved_rate.get_duplex_price_breakdown(
+            paper=paper,
+            apply_duplex_surcharge=apply_duplex_surcharge,
+        )
+        if resolved_rate and sides == Sides.DUPLEX
+        else {
+            "front_side_price": _decimal(resolved_rate.single_price if resolved_rate else print_rate_value),
+            "back_side_price": Decimal("0"),
+            "duplex_surcharge": Decimal("0"),
+            "duplex_surcharge_applied": False,
+            "duplex_override_used": False,
+            "duplex_override_price": None,
+            "total_per_sheet": print_rate_value,
+        }
+    )
     paper_cost = paper_rate * Decimal(imposition.good_sheets)
     print_cost = print_rate_value * Decimal(imposition.good_sheets)
     finishing_total, finishing_lines = compute_finishing_total(
@@ -261,11 +291,40 @@ def calculate_sheet_pricing(
     vat_summary = _resolve_vat_summary(shop, subtotal)
     grand_total = vat_summary["grand_total"]
     unit_price = grand_total / Decimal(quantity) if quantity else Decimal("0")
+    total_per_sheet = paper_rate + print_rate_value
+    per_sheet_formula = "paper_price + print_price_front"
+    if sides == Sides.DUPLEX:
+        per_sheet_formula = "paper_price + print_price_front + print_price_back"
+        if printing_breakdown["duplex_surcharge_applied"]:
+            per_sheet_formula += " + duplex_surcharge"
+    per_sheet_explanation = (
+        f"{getattr(shop, 'currency', 'KES') or 'KES'} {_format_money(paper_rate)} paper"
+        f" + {_format_money(printing_breakdown['front_side_price'])} front"
+    )
+    if sides == Sides.DUPLEX:
+        per_sheet_explanation += f" + {_format_money(printing_breakdown['back_side_price'])} back"
+        if printing_breakdown["duplex_surcharge_applied"]:
+            per_sheet_explanation += f" + {_format_money(printing_breakdown['duplex_surcharge'])} duplex surcharge"
+    per_sheet_explanation += f" = {_format_money(total_per_sheet)} per sheet"
+
+    printing_explanation_parts = [
+        f"{imposition.good_sheets} sheets",
+        f"{getattr(shop, 'currency', 'KES') or 'KES'} {_format_money(printing_breakdown['front_side_price'])}",
+    ]
+    if sides == Sides.DUPLEX:
+        printing_explanation_parts.append(f"{getattr(shop, 'currency', 'KES') or 'KES'} {_format_money(printing_breakdown['back_side_price'])}")
+        if printing_breakdown["duplex_surcharge_applied"]:
+            printing_explanation_parts.append(f"{getattr(shop, 'currency', 'KES') or 'KES'} {_format_money(printing_breakdown['duplex_surcharge'])} surcharge")
+        elif printing_breakdown["duplex_override_used"]:
+            printing_explanation_parts = [
+                f"{imposition.good_sheets} sheets",
+                f"{getattr(shop, 'currency', 'KES') or 'KES'} {_format_money(printing_breakdown['duplex_override_price'])} duplex override",
+            ]
 
     explanations = [
         imposition.explanation,
-        f"Paper: {paper_rate} x {imposition.good_sheets} sheet(s).",
-        f"Printing: {print_rate_value} x {imposition.good_sheets} sheet(s) for {color_mode} / {sides}.",
+        f"Paper: {imposition.good_sheets} sheets x {getattr(shop, 'currency', 'KES') or 'KES'} {_format_money(paper_rate)}.",
+        f"Printing: {' + '.join(printing_explanation_parts)}.",
     ]
     explanations.extend(_humanize_finishing_explanation(line, getattr(shop, "currency", "KES") or "KES") for line in finishing_lines)
 
@@ -279,6 +338,7 @@ def calculate_sheet_pricing(
             "print_cost": _format_money(print_cost),
             "material_cost": _format_money(Decimal("0")),
             "finishing_total": _format_money(finishing_total),
+            "total_per_sheet": _format_money(total_per_sheet),
             "vat_amount": _format_money(vat_summary["vat_amount"]),
             "vat": _format_money(vat_summary["vat_amount"]),
             "vat_mode": vat_summary["vat"]["mode"],
@@ -288,12 +348,24 @@ def calculate_sheet_pricing(
         breakdown={
             "pricing_mode_label": PRICING_MODE_LABELS[PricingMode.SHEET],
             "pricing_mode_explanation": PRICING_MODE_EXPLANATIONS[PricingMode.SHEET],
+            "per_sheet_pricing": {
+                "paper_price": _format_money(paper_rate),
+                "print_price_front": _format_money(printing_breakdown["front_side_price"]),
+                "print_price_back": _format_money(printing_breakdown["back_side_price"]),
+                "duplex_surcharge": _format_money(printing_breakdown["duplex_surcharge"]),
+                "print_total_per_sheet": _format_money(print_rate_value),
+                "total_per_sheet": _format_money(total_per_sheet),
+                "formula": per_sheet_formula,
+                "explanation": per_sheet_explanation,
+            },
             "imposition": imposition.to_dict(),
             "paper": {
                 "id": paper.id,
                 "label": f"{paper.sheet_size} {paper.gsm}gsm {paper.get_paper_type_display()}",
                 "sheet_size": paper.sheet_size,
                 "cost_per_sheet": _format_money(paper_rate),
+                "paper_price_per_sheet": _format_money(paper_rate),
+                "paper_price": _format_money(paper_rate),
                 "total": _format_money(paper_cost),
             },
             "printing": {
@@ -306,7 +378,22 @@ def calculate_sheet_pricing(
                     "selected_sides": sides,
                     "print_side_count": _resolve_print_side_count(sides),
                 },
+                "single_side_print_price": _format_money(_decimal(resolved_rate.single_price if resolved_rate else print_rate_value)),
+                "print_price_front": _format_money(printing_breakdown["front_side_price"]),
+                "print_price_back": _format_money(printing_breakdown["back_side_price"]),
+                "duplex_surcharge": _format_money(printing_breakdown["duplex_surcharge"]),
+                "duplex_surcharge_applied": printing_breakdown["duplex_surcharge_applied"],
+                "duplex_surcharge_enabled": bool(getattr(resolved_rate, "duplex_surcharge_enabled", False)),
+                "duplex_surcharge_min_gsm": getattr(resolved_rate, "duplex_surcharge_min_gsm", None) if resolved_rate else None,
+                "duplex_override_used": printing_breakdown["duplex_override_used"],
+                "duplex_override_price": _format_money(printing_breakdown["duplex_override_price"]) if printing_breakdown["duplex_override_price"] is not None else None,
                 "rate_per_sheet": _format_money(print_rate_value),
+                "total_per_sheet": _format_money(print_rate_value),
+                "print_total_per_sheet": _format_money(print_rate_value),
+                "paper_price": _format_money(paper_rate),
+                "total_per_sheet_including_paper": _format_money(total_per_sheet),
+                "formula": per_sheet_formula,
+                "explanation": per_sheet_explanation,
                 "total": _format_money(print_cost),
             },
             "finishings": finishing_lines,

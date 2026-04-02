@@ -65,6 +65,7 @@ class CalculatorPreviewView(APIView):
             machine=validated["machine"],
             color_mode=validated["color_mode"],
             sides=validated["sides"],
+            apply_duplex_surcharge=validated.get("apply_duplex_surcharge"),
             finishing_selections=validated.get("finishings") or [],
             width_mm=validated.get("width_mm"),
             height_mm=validated.get("height_mm"),
