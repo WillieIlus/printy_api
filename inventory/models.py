@@ -176,6 +176,13 @@ class Paper(TimeStampedModel):
         verbose_name=_("shop"),
         help_text=_("Shop that owns this paper stock."),
     )
+    name = models.CharField(
+        max_length=255,
+        blank=True,
+        default="",
+        verbose_name=_("name"),
+        help_text=_("Optional name for the paper (e.g. Art 130)."),
+    )
     production_size = models.ForeignKey(
         ProductionPaperSize,
         on_delete=models.SET_NULL,

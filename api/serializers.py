@@ -948,6 +948,7 @@ class PaperSerializer(serializers.ModelSerializer):
         model = Paper
         fields = [
             "id",
+            "name",
             "production_size",
             "production_size_detail",
             "sheet_size",

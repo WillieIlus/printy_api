@@ -37,6 +37,7 @@ class MachineAdmin(admin.ModelAdmin):
 @admin.register(Paper)
 class PaperAdmin(admin.ModelAdmin):
     list_display = [
+        "name",
         "sheet_size",
         "production_size",
         "gsm",
@@ -48,5 +49,5 @@ class PaperAdmin(admin.ModelAdmin):
         "is_default",
     ]
     list_filter = ["sheet_size", "paper_type", "is_active", "is_default"]
-    search_fields = ["sheet_size", "paper_type"]
+    search_fields = ["name", "sheet_size", "paper_type"]
     autocomplete_fields = ["production_size"]

@@ -89,6 +89,7 @@ class PrintingRate(TimeStampedModel):
     single_price = models.DecimalField(
         max_digits=12,
         decimal_places=2,
+        default=Decimal("15.00"),
         verbose_name=_("single price"),
         help_text=_("Base print charge per side. Simplex uses this once; duplex uses it twice."),
     )
@@ -103,7 +104,7 @@ class PrintingRate(TimeStampedModel):
     duplex_surcharge = models.DecimalField(
         max_digits=12,
         decimal_places=2,
-        default=Decimal("0"),
+        default=Decimal("5.00"),
         verbose_name=_("duplex surcharge"),
         help_text=_("Optional flat surcharge added once per duplex sheet when the surcharge rule applies."),
     )
@@ -175,6 +176,14 @@ class PrintingRate(TimeStampedModel):
             return True
         if not self.duplex_surcharge_enabled:
             return False
+
+        # Business rule: Art 130 may have no surcharge
+        if paper:
+            paper_name = (getattr(paper, "name", "") or "").strip().lower()
+            paper_gsm = getattr(paper, "gsm", 0)
+            if "art" in paper_name and paper_gsm == 130:
+                return False
+
         threshold = self.duplex_surcharge_min_gsm
         if threshold is None:
             return True
