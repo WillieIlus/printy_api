@@ -550,6 +550,12 @@ class QuoteEngineTests(TestCase):
         self.assertIn("finishing_plan", item.pricing_snapshot)
         self.assertIn("explanations", item.pricing_snapshot)
         self.assertIn("calculation_description", item.pricing_snapshot)
+        self.assertIn("calculation_result", item.pricing_snapshot)
+        self.assertEqual(item.pricing_snapshot["calculation_result"]["quote_type"], "flat")
+        self.assertEqual(
+            item.pricing_snapshot["calculation_result"]["grand_total"],
+            item.pricing_snapshot["line_total"],
+        )
 
     def test_preview_price_response_includes_item_explanations(self):
         qr = QuoteRequest.objects.create(
@@ -576,3 +582,8 @@ class QuoteEngineTests(TestCase):
         self.assertIn(str(item.id), resp["item_calculations"])
         self.assertTrue(resp["item_explanations"][str(item.id)])
         self.assertIn("Sheet job", resp["item_calculations"][str(item.id)])
+        self.assertIn("calculation_result", resp)
+        self.assertIn("item_calculation_results", resp)
+        self.assertEqual(resp["item_calculation_results"][str(item.id)]["quote_type"], "flat")
+        self.assertEqual(resp["calculation_result"]["quote_type"], "quote_request_preview")
+        self.assertEqual(resp["calculation_result"]["grand_total"], "25.00")

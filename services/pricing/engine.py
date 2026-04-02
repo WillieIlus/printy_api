@@ -8,6 +8,7 @@ from pricing.choices import ColorMode, Sides
 from pricing.models import Material, PrintingRate
 from services.pricing.finishings import compute_finishing_total
 from services.pricing.imposition import build_imposition_breakdown
+from services.pricing.result_contract import build_contract_from_engine_payload
 
 
 PRICING_MODE_LABELS = {
@@ -45,7 +46,9 @@ class PricingEngineResult:
     explanation_lines: list[str] | None = None
 
     def to_dict(self) -> dict:
-        return asdict(self)
+        payload = asdict(self)
+        payload["calculation_result"] = build_contract_from_engine_payload(payload)
+        return payload
 
 
 def _decimal(value, default: str = "0") -> Decimal:

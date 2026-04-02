@@ -18,6 +18,7 @@ from quotes.diagnostics import (
     build_pricing_diagnostics,
 )
 from quotes.models import QuoteItem, QuoteRequest
+from services.pricing.result_contract import build_quote_request_preview_contract
 
 
 # ---------------------------------------------------------------------------
@@ -284,84 +285,11 @@ def calculate_quote_item(item: QuoteItem, force: bool = False) -> tuple[Decimal,
             item.line_total or Decimal("0"),
         )
 
-    product = item.product
-    quantity = item.quantity or 0
-    pricing_mode = _get_effective_pricing_mode(item)
+    from quotes.pricing_service import compute_quote_item_pricing
 
-    if quantity <= 0:
-        return Decimal("0"), Decimal("0")
-    if item.item_type == "PRODUCT" and not product:
-        return Decimal("0"), Decimal("0")
-
-    total = Decimal("0")
-    area_sqm = Decimal("0")
-    sides_count = _sides_count(item.sides)
-    sheets_count = 0
-
-    if pricing_mode == PricingMode.SHEET:
-        # SHEET mode: must have paper FK
-        if not item.paper_id:
-            return Decimal("0"), Decimal("0")
-
-        paper = item.paper
-        # Imposition: pieces_per_sheet from dimensions; sheets_needed = ceil(qty / pieces_per_sheet)
-        if product and paper.width_mm and paper.height_mm:
-            pieces = product.get_copies_per_sheet(
-                paper.sheet_size, paper.width_mm, paper.height_mm
-            )
-        else:
-            pieces = 1
-        sheets_count = sheets_needed(quantity, pieces)
-        total += paper.selling_price * sheets_count
-
-        # Printing cost: resolve PrintingRate by machine+sheet_size+sides+color_mode
-        if item.machine_id and item.sides and item.color_mode:
-            _, print_price = PrintingRate.resolve(
-                item.machine, paper.sheet_size, item.color_mode, item.sides, paper=paper
-            )
-            if print_price is not None:
-                total += print_price * sheets_count
-
-        # Area for PER_SQM finishing
-        sheet_area = _sheet_area_sqm(paper)
-        area_sqm = sheet_area * sheets_count
-
-    elif pricing_mode == PricingMode.LARGE_FORMAT:
-        # LARGE_FORMAT: must have material FK and chosen dimensions
-        if not item.material_id or not item.chosen_width_mm or not item.chosen_height_mm:
-            return Decimal("0"), Decimal("0")
-
-        material = item.material
-        w_mm = item.chosen_width_mm
-        h_mm = item.chosen_height_mm
-        area_sqm = (Decimal(w_mm) / 1000) * (Decimal(h_mm) / 1000) * quantity
-
-        base = material.selling_price * area_sqm
-        total += base
-
-    else:
-        return Decimal("0"), Decimal("0")
-
-    # Apply finishing costs (from QuoteItemFinishing FK; uses sheets_count for PER_SHEET)
-    for qif in item.finishings.select_related("finishing_rate").all():
-        total += _apply_finishing_cost(
-            qif.finishing_rate,
-            quantity,
-            area_sqm,
-            sides_count,
-            qif.price_override,
-            getattr(qif, "apply_to_sides", None) or "BOTH",
-            sheets_needed_val=sheets_count,
-        )
-
-    # Apply item-level services (e.g. design)
-    for qis in item.services.select_related("service_rate").filter(is_selected=True):
-        price = _get_service_price(qis.service_rate, qis.price_override, None)
-        if price is not None:
-            total += price
-
-    unit_price = total / quantity
-    line_total = total
+    pricing = compute_quote_item_pricing(item)
+    unit_price = Decimal(str(pricing.unit_price or "0"))
+    line_total = Decimal(str(pricing.line_total or "0"))
     return unit_price, line_total
 
 
@@ -469,6 +397,9 @@ def build_preview_price_response(quote_request: QuoteRequest) -> dict:
     has_negotiable = False
     item_explanations = {}
     item_calculations = {}
+    item_calculation_results = {}
+    preview_line_items: list[dict] = []
+    finishing_total = Decimal("0")
 
     for item in quote_request.items.prefetch_related(
         "paper", "material", "machine", "product", "finishings__finishing_rate", "services__service_rate"
@@ -488,19 +419,34 @@ def build_preview_price_response(quote_request: QuoteRequest) -> dict:
             lines.append({"label": f"{item_label}: Needs review ({missing[0][1]})", "amount": ""})
             continue
 
-        unit_price, line_total = calculate_quote_item(item, force=False)
         from quotes.pricing_service import compute_quote_item_pricing
 
         pricing = compute_quote_item_pricing(item)
+        line_total = Decimal(str(pricing.line_total or "0"))
         item_explanations[str(item.id)] = pricing.explanations
         item_calculations[str(item.id)] = pricing.calculation_description
+        item_calculation_results[str(item.id)] = pricing.calculation_result
         if line_total and line_total > 0:
             total += line_total
+            finishing_total += Decimal(str(pricing.finishing_total or "0"))
             item_label = (
                 item.product.name if item.item_type == "PRODUCT" and item.product_id
                 else item.title or "Custom item"
             )
             breakdown = _build_item_breakdown_lines(item)
+            preview_line_items.append(
+                {
+                    "code": f"item_{item.id}",
+                    "label": item_label,
+                    "amount": f"{line_total:.2f}",
+                    "formula": pricing.calculation_description,
+                    "metadata": {
+                        "item_id": item.id,
+                        "pricing_mode": pricing.pricing_mode,
+                        "quote_type": pricing.quote_type,
+                    },
+                }
+            )
             if breakdown:
                 lines.append({"label": item_label, "amount": ""})
                 lines.extend(breakdown)
@@ -527,12 +473,34 @@ def build_preview_price_response(quote_request: QuoteRequest) -> dict:
         item_diagnostics=item_diagnostics,
     )
 
+    calculation_result = build_quote_request_preview_contract(
+        currency=currency,
+        quantity=sum((item.quantity or 0) for item in quote_request.items.all()),
+        line_items=preview_line_items,
+        subtotal=total,
+        finishing_total=finishing_total,
+        grand_total=total,
+        warnings=[reason] if reason else [],
+        metadata={
+            "shop": {
+                "id": quote_request.shop_id,
+                "name": quote_request.shop.name,
+                "slug": quote_request.shop.slug,
+            },
+            "item_count": quote_request.items.count(),
+        },
+        reason=reason,
+        can_calculate=can_calculate,
+    )
+
     return {
         "currency": currency,
         "total": float(total),
         "lines": lines,
         "item_explanations": item_explanations,
         "item_calculations": item_calculations,
+        "item_calculation_results": item_calculation_results,
+        "calculation_result": calculation_result,
         **diagnostics,
         "hasNegotiable": has_negotiable,
         "items_missing_fields": items_missing_fields,
