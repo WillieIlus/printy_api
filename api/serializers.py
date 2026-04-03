@@ -19,6 +19,12 @@ from pricing.choices import ChargeUnit, ColorMode, FinishingBillingBasis, Finish
 from pricing.models import FinishingCategory, FinishingRate, Material, PrintingRate, VolumeDiscount
 from quotes.choices import QuoteStatus
 from quotes.models import CustomerInquiry, QuoteItem, QuoteItemFinishing, QuoteRequest
+from quotes.turnaround import (
+    derive_product_turnaround_hours,
+    estimate_turnaround,
+    humanize_working_hours,
+    schedule_summary,
+)
 from shops.models import FavoriteShop, OpeningHours, Shop, ShopRating
 
 from .quote_serializers import (
@@ -97,6 +103,22 @@ def get_shop_status(shop):
     return "opening"
 
 
+def build_product_turnaround_payload(product, *, rush: bool = False):
+    working_hours = derive_product_turnaround_hours(product, rush=rush)
+    estimate = estimate_turnaround(
+        shop=getattr(product, "shop", None),
+        working_hours=working_hours,
+    )
+    return {
+        "turnaround_hours": working_hours,
+        "estimated_working_hours": estimate.working_hours if estimate else working_hours,
+        "estimated_ready_at": estimate.ready_at if estimate else None,
+        "human_ready_text": estimate.human_ready_text if estimate else "Ready time on request",
+        "turnaround_label": estimate.label if estimate else "On request",
+        "turnaround_text": humanize_working_hours(working_hours),
+    }
+
+
 # ---------------------------------------------------------------------------
 # Public / Read-only serializers
 # ---------------------------------------------------------------------------
@@ -140,6 +162,7 @@ class PublicShopListSerializer(serializers.ModelSerializer):
     description = serializers.CharField(read_only=True)
     logo = serializers.SerializerMethodField()
     social_links = serializers.SerializerMethodField()
+    schedule_summary = serializers.SerializerMethodField()
 
     class Meta:
         model = Shop
@@ -158,6 +181,9 @@ class PublicShopListSerializer(serializers.ModelSerializer):
             "opening_time",
             "closing_time",
             "closing_soon_minutes",
+            "timezone",
+            "same_day_cutoff_time",
+            "schedule_summary",
         ]
         read_only_fields = ["slug"]
 
@@ -173,6 +199,9 @@ class PublicShopListSerializer(serializers.ModelSerializer):
         if not profile:
             return []
         return UserSocialLinkSerializer(profile.social_links.all(), many=True).data
+
+    def get_schedule_summary(self, obj):
+        return schedule_summary(obj)
 
 
 class MatchShopsInputSerializer(serializers.Serializer):
@@ -306,6 +335,14 @@ class CatalogProductSerializer(serializers.ModelSerializer):
     finishing_summary = serializers.SerializerMethodField()
     final_size = serializers.SerializerMethodField()
     is_owner = serializers.SerializerMethodField()
+    turnaround_hours = serializers.SerializerMethodField()
+    rush_turnaround_hours = serializers.IntegerField(read_only=True)
+    rush_available = serializers.BooleanField(read_only=True)
+    estimated_working_hours = serializers.SerializerMethodField()
+    estimated_ready_at = serializers.SerializerMethodField()
+    human_ready_text = serializers.SerializerMethodField()
+    turnaround_label = serializers.SerializerMethodField()
+    turnaround_text = serializers.SerializerMethodField()
 
     class Meta:
         model = Product
@@ -321,6 +358,15 @@ class CatalogProductSerializer(serializers.ModelSerializer):
             "default_bleed_mm",
             "default_sides",
             "min_quantity",
+            "turnaround_days",
+            "turnaround_hours",
+            "rush_turnaround_hours",
+            "rush_available",
+            "estimated_working_hours",
+            "estimated_ready_at",
+            "human_ready_text",
+            "turnaround_label",
+            "turnaround_text",
             "finishing_options",
             "images",
             "primary_image",
@@ -419,6 +465,28 @@ class CatalogProductSerializer(serializers.ModelSerializer):
         if w and h:
             return f"{w}×{h}mm"
         return None
+
+
+    def _turnaround_payload(self, obj):
+        return build_product_turnaround_payload(obj)
+
+    def get_turnaround_hours(self, obj):
+        return self._turnaround_payload(obj)["turnaround_hours"]
+
+    def get_estimated_working_hours(self, obj):
+        return self._turnaround_payload(obj)["estimated_working_hours"]
+
+    def get_estimated_ready_at(self, obj):
+        return self._turnaround_payload(obj)["estimated_ready_at"]
+
+    def get_human_ready_text(self, obj):
+        return self._turnaround_payload(obj)["human_ready_text"]
+
+    def get_turnaround_label(self, obj):
+        return self._turnaround_payload(obj)["turnaround_label"]
+
+    def get_turnaround_text(self, obj):
+        return self._turnaround_payload(obj)["turnaround_text"]
 
 
 class CatalogProductWithShopSerializer(CatalogProductSerializer):
@@ -587,26 +655,36 @@ class QuoteItemWriteSerializer(serializers.ModelSerializer):
             instance.finishings.all().delete()
             for fd in finishings_data:
                 QuoteItemFinishing.objects.create(quote_item=instance, **fd)
-            if item_spec_snapshot is None:
-                instance.item_spec_snapshot = self._build_item_spec_snapshot(
+        if item_spec_snapshot is None:
+            effective_finishings = finishings_data
+            if effective_finishings is None:
+                effective_finishings = [
                     {
-                        "item_type": instance.item_type,
-                        "product": instance.product,
-                        "title": instance.title,
-                        "spec_text": instance.spec_text,
-                        "quantity": instance.quantity,
-                        "pricing_mode": instance.pricing_mode,
-                        "paper": instance.paper,
-                        "material": instance.material,
-                        "chosen_width_mm": instance.chosen_width_mm,
-                        "chosen_height_mm": instance.chosen_height_mm,
-                        "sides": instance.sides,
-                        "color_mode": instance.color_mode,
-                        "machine": instance.machine,
-                    },
-                    finishings_data,
-                )
-                instance.save(update_fields=["item_spec_snapshot", "updated_at"])
+                        "finishing_rate": finishing.finishing_rate,
+                        "apply_to_sides": finishing.apply_to_sides,
+                        "selected_side": finishing.selected_side,
+                    }
+                    for finishing in instance.finishings.select_related("finishing_rate").all()
+                ]
+            instance.item_spec_snapshot = self._build_item_spec_snapshot(
+                {
+                    "item_type": instance.item_type,
+                    "product": instance.product,
+                    "title": instance.title,
+                    "spec_text": instance.spec_text,
+                    "quantity": instance.quantity,
+                    "pricing_mode": instance.pricing_mode,
+                    "paper": instance.paper,
+                    "material": instance.material,
+                    "chosen_width_mm": instance.chosen_width_mm,
+                    "chosen_height_mm": instance.chosen_height_mm,
+                    "sides": instance.sides,
+                    "color_mode": instance.color_mode,
+                    "machine": instance.machine,
+                },
+                effective_finishings,
+            )
+            instance.save(update_fields=["item_spec_snapshot", "updated_at"])
         try:
             compute_and_store_pricing(instance)
         except Exception:
@@ -824,6 +902,8 @@ class QuoteItemAddSerializer(QuoteItemWriteSerializer):
 class ShopSerializer(serializers.ModelSerializer):
     """CRUD for seller's own shop. Owner set by view on create."""
 
+    schedule_summary = serializers.SerializerMethodField()
+
     class Meta:
         model = Shop
         fields = [
@@ -850,6 +930,9 @@ class ShopSerializer(serializers.ModelSerializer):
             "opening_time",
             "closing_time",
             "closing_soon_minutes",
+            "timezone",
+            "same_day_cutoff_time",
+            "schedule_summary",
         ]
         read_only_fields = ["slug", "owner"]
         extra_kwargs = {
@@ -905,6 +988,9 @@ class ShopSerializer(serializers.ModelSerializer):
 
     def validate_zip_code(self, value):
         return value or ""
+
+    def get_schedule_summary(self, obj):
+        return schedule_summary(obj)
 
 
 class MachineSerializer(serializers.ModelSerializer):
@@ -1160,6 +1246,7 @@ class MaterialSerializer(serializers.ModelSerializer):
             "unit",
             "buying_price",
             "selling_price",
+            "print_price_per_sqm",
             "is_active",
         ]
 
@@ -1244,6 +1331,11 @@ class ProductWriteSerializer(serializers.ModelSerializer):
             "default_sides",
             "default_machine",
             "turnaround_days",
+            "standard_turnaround_hours",
+            "rush_turnaround_hours",
+            "rush_available",
+            "buffer_hours",
+            "queue_hours",
             "min_quantity",
             "min_width_mm",
             "min_height_mm",
@@ -1266,6 +1358,10 @@ class ProductWriteSerializer(serializers.ModelSerializer):
             "default_bleed_mm": {"required": False},
             "default_sides": {"required": False},
             "min_quantity": {"required": False, "min_value": 1},
+            "standard_turnaround_hours": {"required": False, "allow_null": True, "min_value": 1},
+            "rush_turnaround_hours": {"required": False, "allow_null": True, "min_value": 1},
+            "buffer_hours": {"required": False, "min_value": 0},
+            "queue_hours": {"required": False, "min_value": 0},
             "min_width_mm": {"required": False},
             "min_height_mm": {"required": False},
             "max_width_mm": {"required": False},
@@ -1324,6 +1420,13 @@ class ProductWriteSerializer(serializers.ModelSerializer):
         category = attrs.get("category") or getattr(self.instance, "category", None)
         if category and category.shop_id and shop and category.shop_id != shop.id:
             raise serializers.ValidationError({"category": "category must be global or belong to the same shop."})
+        rush_available = attrs.get("rush_available", getattr(self.instance, "rush_available", False))
+        rush_hours = attrs.get("rush_turnaround_hours", getattr(self.instance, "rush_turnaround_hours", None))
+        standard_hours = attrs.get("standard_turnaround_hours", getattr(self.instance, "standard_turnaround_hours", None))
+        if rush_available and not rush_hours:
+            raise serializers.ValidationError({"rush_turnaround_hours": "Set rush_turnaround_hours when rush is available."})
+        if rush_hours and standard_hours and rush_hours >= standard_hours:
+            raise serializers.ValidationError({"rush_turnaround_hours": "Rush turnaround must be faster than standard turnaround."})
         return super().validate(attrs)
 
     def create(self, validated_data):
@@ -1372,6 +1475,11 @@ class ProductListSerializer(serializers.ModelSerializer):
     finishing_options = ProductFinishingOptionListSerializer(many=True, required=False, read_only=True)
     can_publish = serializers.SerializerMethodField()
     publish_block_reason = serializers.SerializerMethodField()
+    turnaround_hours = serializers.SerializerMethodField()
+    estimated_working_hours = serializers.SerializerMethodField()
+    estimated_ready_at = serializers.SerializerMethodField()
+    human_ready_text = serializers.SerializerMethodField()
+    turnaround_label = serializers.SerializerMethodField()
 
     class Meta:
         model = Product
@@ -1387,6 +1495,16 @@ class ProductListSerializer(serializers.ModelSerializer):
             "default_bleed_mm",
             "default_sides",
             "turnaround_days",
+            "turnaround_hours",
+            "standard_turnaround_hours",
+            "rush_turnaround_hours",
+            "rush_available",
+            "buffer_hours",
+            "queue_hours",
+            "estimated_working_hours",
+            "estimated_ready_at",
+            "human_ready_text",
+            "turnaround_label",
             "min_quantity",
             "min_width_mm",
             "min_height_mm",
@@ -1413,12 +1531,35 @@ class ProductListSerializer(serializers.ModelSerializer):
         check = get_product_publish_check(obj)
         return " ".join(check["block_reasons"]) if check["block_reasons"] else ""
 
+    def _turnaround_payload(self, obj):
+        return build_product_turnaround_payload(obj)
+
+    def get_turnaround_hours(self, obj):
+        return self._turnaround_payload(obj)["turnaround_hours"]
+
+    def get_estimated_working_hours(self, obj):
+        return self._turnaround_payload(obj)["estimated_working_hours"]
+
+    def get_estimated_ready_at(self, obj):
+        return self._turnaround_payload(obj)["estimated_ready_at"]
+
+    def get_human_ready_text(self, obj):
+        return self._turnaround_payload(obj)["human_ready_text"]
+
+    def get_turnaround_label(self, obj):
+        return self._turnaround_payload(obj)["turnaround_label"]
+
 
 class ProductSerializer(serializers.ModelSerializer):
     """Full product serializer with price hints (for retrieve)."""
 
     finishing_options = ProductFinishingOptionWriteSerializer(many=True, required=False)
     price_hint = serializers.SerializerMethodField()
+    turnaround_hours = serializers.SerializerMethodField()
+    estimated_working_hours = serializers.SerializerMethodField()
+    estimated_ready_at = serializers.SerializerMethodField()
+    human_ready_text = serializers.SerializerMethodField()
+    turnaround_label = serializers.SerializerMethodField()
 
     class Meta:
         model = Product
@@ -1434,6 +1575,16 @@ class ProductSerializer(serializers.ModelSerializer):
             "default_bleed_mm",
             "default_sides",
             "turnaround_days",
+            "turnaround_hours",
+            "standard_turnaround_hours",
+            "rush_turnaround_hours",
+            "rush_available",
+            "buffer_hours",
+            "queue_hours",
+            "estimated_working_hours",
+            "estimated_ready_at",
+            "human_ready_text",
+            "turnaround_label",
             "min_quantity",
             "min_width_mm",
             "min_height_mm",
@@ -1489,6 +1640,24 @@ class ProductSerializer(serializers.ModelSerializer):
         if shop:
             pass
         return attrs
+
+    def _turnaround_payload(self, obj):
+        return build_product_turnaround_payload(obj)
+
+    def get_turnaround_hours(self, obj):
+        return self._turnaround_payload(obj)["turnaround_hours"]
+
+    def get_estimated_working_hours(self, obj):
+        return self._turnaround_payload(obj)["estimated_working_hours"]
+
+    def get_estimated_ready_at(self, obj):
+        return self._turnaround_payload(obj)["estimated_ready_at"]
+
+    def get_human_ready_text(self, obj):
+        return self._turnaround_payload(obj)["human_ready_text"]
+
+    def get_turnaround_label(self, obj):
+        return self._turnaround_payload(obj)["turnaround_label"]
 
 
 # ---------------------------------------------------------------------------
@@ -1941,7 +2110,7 @@ class GalleryProductOptionsSerializer(serializers.ModelSerializer):
         materials = Material.objects.filter(shop=obj.shop, is_active=True, selling_price__gt=0)
         return [
             {"id": m.id, "material_type": m.material_type, "unit": m.unit,
-             "selling_price": str(m.selling_price)}
+             "selling_price": str(m.selling_price), "print_price_per_sqm": str(m.print_price_per_sqm)}
             for m in materials[:10]
         ]
 

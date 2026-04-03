@@ -548,6 +548,33 @@ class QuoteDraftItemTimestampAPITestCase(TestCase):
             sides=Sides.SIMPLEX,
             color_mode="COLOR",
         )
+        self.machine = Machine.objects.create(
+            shop=self.shop,
+            name="Draft Press",
+            machine_type="DIGITAL",
+            max_width_mm=320,
+            max_height_mm=450,
+            is_active=True,
+        )
+        self.paper = Paper.objects.create(
+            shop=self.shop,
+            sheet_size="SRA3",
+            gsm=300,
+            paper_type="GLOSS",
+            buying_price=Decimal("15.00"),
+            selling_price=Decimal("24.00"),
+            width_mm=320,
+            height_mm=450,
+            is_active=True,
+        )
+        PrintingRate.objects.create(
+            machine=self.machine,
+            sheet_size="SRA3",
+            color_mode="COLOR",
+            single_price=Decimal("12.00"),
+            double_price=Decimal("25.00"),
+            is_active=True,
+        )
 
     def test_active_draft_includes_item_created_at(self):
         self.client.force_authenticate(user=self.user)
@@ -574,6 +601,37 @@ class QuoteDraftItemTimestampAPITestCase(TestCase):
         self.assertFalse(QuoteItem.objects.filter(pk=self.item.id).exists())
         submitted_request = QuoteRequest.objects.get(pk=data["id"])
         self.assertEqual(submitted_request.items.count(), 1)
+
+    def test_patch_rebuilds_item_spec_snapshot_and_clears_review_flag(self):
+        self.item.item_spec_snapshot = {"quantity": 100, "sides": "SIMPLEX"}
+        self.item.needs_review = True
+        self.item.save(update_fields=["item_spec_snapshot", "needs_review", "updated_at"])
+
+        self.client.force_authenticate(user=self.user)
+        response = self.client.patch(
+            f"/api/quote-drafts/{self.draft.id}/items/{self.item.id}/",
+            {
+                "quantity": 250,
+                "paper": self.paper.id,
+                "machine": self.machine.id,
+                "sides": "DUPLEX",
+                "color_mode": "COLOR",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200, response.json())
+        self.item.refresh_from_db()
+        self.assertEqual(self.item.item_spec_snapshot["quantity"], 250)
+        self.assertEqual(self.item.item_spec_snapshot["sides"], "DUPLEX")
+        self.assertEqual(self.item.item_spec_snapshot["paper_id"], self.paper.id)
+        self.assertEqual(self.item.item_spec_snapshot["machine_id"], self.machine.id)
+        self.assertFalse(self.item.needs_review)
+        self.assertIsNotNone(self.item.pricing_snapshot)
+        self.assertEqual(
+            self.item.pricing_snapshot["calculation_result"]["grand_total"],
+            str(self.item.line_total),
+        )
 
 
 class SEOAPITestCase(TestCase):
@@ -2450,6 +2508,25 @@ class PublicCalculatorPayloadSerializerTestCase(TestCase):
         self.assertTrue(serializer.is_valid(), serializer.errors)
         self.assertEqual(serializer.validated_data["width_mm"], 85)
         self.assertEqual(serializer.validated_data["height_mm"], 55)
+
+    def test_serializer_accepts_legacy_dimension_and_colour_fields(self):
+        serializer = PublicCalculatorPayloadSerializer(
+            data={
+                "pricing_mode": "custom",
+                "quantity": 100,
+                "custom_title": "Legacy payload",
+                "finished_width_mm": 210,
+                "finished_height_mm": 297,
+                "sides": "DUPLEX",
+                "color_mode": "COLOR",
+            }
+        )
+
+        self.assertTrue(serializer.is_valid(), serializer.errors)
+        self.assertEqual(serializer.validated_data["width_mm"], 210)
+        self.assertEqual(serializer.validated_data["height_mm"], 297)
+        self.assertEqual(serializer.validated_data["print_sides"], "DUPLEX")
+        self.assertEqual(serializer.validated_data["colour_mode"], "COLOR")
 
 
 class CalculatorPreviewSerializerTestCase(TestCase):

@@ -810,5 +810,6 @@ def compute_and_store_pricing(item) -> PricingResult:
     item.unit_price = Decimal(result.unit_price)
     item.line_total = Decimal(result.line_total)
     item.pricing_snapshot = result.to_dict()
-    item.save(update_fields=["unit_price", "line_total", "pricing_snapshot", "updated_at"])
+    item.needs_review = False
+    item.save(update_fields=["unit_price", "line_total", "pricing_snapshot", "needs_review", "updated_at"])
     return result
