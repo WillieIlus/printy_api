@@ -559,6 +559,22 @@ class QuoteDraftItemTimestampAPITestCase(TestCase):
         self.assertIn("created_at", data["items"][0])
         self.assertTrue(data["items"][0]["created_at"])
 
+    def test_can_send_single_item_from_draft(self):
+        self.client.force_authenticate(user=self.user)
+        response = self.client.post(
+            f"/api/quote-drafts/{self.draft.id}/items/{self.item.id}/request-quote/",
+            {},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 201)
+        data = response.json()
+        self.assertEqual(data["status"], QuoteStatus.SUBMITTED)
+        self.assertEqual(data["shop"], self.shop.id)
+        self.assertEqual(QuoteRequest.objects.filter(created_by=self.user, status=QuoteStatus.SUBMITTED).count(), 1)
+        self.assertFalse(QuoteItem.objects.filter(pk=self.item.id).exists())
+        submitted_request = QuoteRequest.objects.get(pk=data["id"])
+        self.assertEqual(submitted_request.items.count(), 1)
+
 
 class SEOAPITestCase(TestCase):
     """Test public SEO endpoints — no auth required."""

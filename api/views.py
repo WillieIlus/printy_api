@@ -40,6 +40,7 @@ from quotes.draft_files import (
 from quotes.draft_pdf import render_dashboard_quote_file_pdf, render_quote_draft_file_pdf, render_quote_draft_pdf
 from quotes.whatsapp_formatter import format_quote_for_whatsapp
 from quotes.summary_service import get_quote_draft_file_summary_payload
+from quotes.builder_service import send_quote_request_item_to_shop
 from shops.models import FavoriteShop, OpeningHours, Shop, ShopRating
 from shops.services import can_manage_shop
 
@@ -1516,6 +1517,32 @@ class QuoteDraftItemViewSet(viewsets.ModelViewSet):
         if qr.created_by_id != request.user.id:
             return Response({"detail": "Not your quote request."}, status=status.HTTP_403_FORBIDDEN)
         return super().retrieve(request, *args, **kwargs)
+
+
+class QuoteDraftItemRequestQuoteView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, quote_draft_pk, pk):
+        draft = get_object_or_404(QuoteRequest.objects.select_related("shop"), pk=quote_draft_pk)
+        item = get_object_or_404(
+            QuoteItem.objects.select_related(
+                "quote_request",
+                "quote_request__shop",
+                "product",
+                "paper",
+                "material",
+                "machine",
+            ).prefetch_related("finishings__finishing_rate"),
+            pk=pk,
+            quote_request=draft,
+        )
+        if draft.created_by_id != request.user.id:
+            return Response({"detail": "Not your quote request."}, status=status.HTTP_403_FORBIDDEN)
+        try:
+            created_request = send_quote_request_item_to_shop(draft=draft, item=item, user=request.user)
+        except ValueError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(QuoteRequestReadSerializer(created_request).data, status=status.HTTP_201_CREATED)
 
 
 # ---------------------------------------------------------------------------

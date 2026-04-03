@@ -207,6 +207,11 @@ urlpatterns = [
         ),
         name="quote-draft-item-detail",
     ),
+    path(
+        "quote-drafts/<int:quote_draft_pk>/items/<int:pk>/request-quote/",
+        views.QuoteDraftItemRequestQuoteView.as_view(),
+        name="quote-draft-item-request-quote",
+    ),
     # Tweak-and-Add: Gallery → Tweak → Quote (creates tweaked instance with pricing)
     path(
         "quote-drafts/<int:draft_id>/tweak-and-add/",
