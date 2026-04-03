@@ -2230,6 +2230,87 @@ class CalculatorPreviewAPITestCase(TestCase):
         )
         self.assertEqual(data["totals"]["total_per_sheet"], "40.00")
 
+    def test_booklet_preview_returns_cover_insert_and_binding_breakdown(self):
+        binding = FinishingRate.objects.create(
+            shop=self.shop,
+            name="Saddle stitch binding",
+            slug="saddle-stitch-binding",
+            charge_unit=ChargeUnit.PER_PIECE,
+            billing_basis=FinishingBillingBasis.PER_PIECE,
+            side_mode=FinishingSideMode.IGNORE_SIDES,
+            price=Decimal("20.00"),
+            is_active=True,
+        )
+        response = self.client.post(
+            "/api/calculator/booklet-preview/",
+            {
+                "shop": self.shop.id,
+                "quantity": 100,
+                "total_pages": 12,
+                "binding_type": "saddle_stitch",
+                "cover_paper": self.paper.id,
+                "insert_paper": self.paper.id,
+                "cover_sides": "DUPLEX",
+                "insert_sides": "DUPLEX",
+                "cover_color_mode": "COLOR",
+                "insert_color_mode": "COLOR",
+                "cover_lamination_mode": "front",
+                "cover_lamination_finishing_rate": self.finishing.id,
+                "binding_finishing_rate": binding.id,
+                "size_mode": "standard",
+                "size_label": "A5",
+                "turnaround_hours": 24,
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(data["quote_type"], "booklet")
+        self.assertEqual(data["calculation_result"]["quote_type"], "booklet")
+        self.assertIn("cover", data["breakdown"])
+        self.assertIn("inserts", data["breakdown"])
+        self.assertIn("binding", data["breakdown"])
+        self.assertEqual(data["breakdown"]["binding"]["label"], "Saddle stitch binding")
+        self.assertEqual(data["breakdown"]["booklet"]["normalized_pages"], 12)
+
+    def test_booklet_preview_warns_when_pages_are_normalized(self):
+        binding = FinishingRate.objects.create(
+            shop=self.shop,
+            name="Wire-O binding",
+            slug="wire-o-binding",
+            charge_unit=ChargeUnit.PER_PIECE,
+            billing_basis=FinishingBillingBasis.PER_PIECE,
+            side_mode=FinishingSideMode.IGNORE_SIDES,
+            price=Decimal("25.00"),
+            is_active=True,
+        )
+        response = self.client.post(
+            "/api/calculator/booklet-preview/",
+            {
+                "shop": self.shop.id,
+                "quantity": 50,
+                "total_pages": 10,
+                "binding_type": "wire_o",
+                "cover_paper": self.paper.id,
+                "insert_paper": self.paper.id,
+                "cover_sides": "SIMPLEX",
+                "insert_sides": "DUPLEX",
+                "cover_color_mode": "COLOR",
+                "insert_color_mode": "COLOR",
+                "cover_lamination_mode": "none",
+                "binding_finishing_rate": binding.id,
+                "width_mm": 148,
+                "height_mm": 210,
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertTrue(data["warnings"])
+        self.assertEqual(data["breakdown"]["booklet"]["normalized_pages"], 12)
+
 
 class PublicCalculatorPayloadSerializerTestCase(TestCase):
     def test_serializer_maps_standard_preset_to_canonical_mm(self):

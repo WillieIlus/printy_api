@@ -79,6 +79,64 @@ class CalculatorPreviewSerializer(serializers.Serializer):
         return attrs
 
 
+class BookletCalculatorPreviewSerializer(serializers.Serializer):
+    shop = serializers.PrimaryKeyRelatedField(queryset=Shop.objects.all())
+    quantity = serializers.IntegerField(min_value=1)
+    total_pages = serializers.IntegerField(min_value=4)
+    binding_type = serializers.ChoiceField(choices=["saddle_stitch", "perfect_bind", "wire_o"], default="saddle_stitch")
+    cover_paper = serializers.PrimaryKeyRelatedField(queryset=Paper.objects.filter(is_active=True))
+    insert_paper = serializers.PrimaryKeyRelatedField(queryset=Paper.objects.filter(is_active=True))
+    cover_sides = serializers.ChoiceField(choices=["SIMPLEX", "DUPLEX"], default="DUPLEX")
+    insert_sides = serializers.ChoiceField(choices=["SIMPLEX", "DUPLEX"], default="DUPLEX")
+    cover_color_mode = serializers.ChoiceField(choices=["BW", "COLOR"], default="COLOR")
+    insert_color_mode = serializers.ChoiceField(choices=["BW", "COLOR"], default="COLOR")
+    cover_lamination_mode = serializers.ChoiceField(choices=["none", "front", "both"], default="none")
+    cover_lamination_finishing_rate = serializers.PrimaryKeyRelatedField(
+        queryset=FinishingRate.objects.filter(is_active=True),
+        required=False,
+        allow_null=True,
+    )
+    binding_finishing_rate = serializers.PrimaryKeyRelatedField(
+        queryset=FinishingRate.objects.filter(is_active=True),
+        required=False,
+        allow_null=True,
+    )
+    turnaround_hours = serializers.IntegerField(required=False, allow_null=True, min_value=1)
+    size_mode = serializers.ChoiceField(choices=["standard", "custom"], required=False, default="custom")
+    size_label = serializers.CharField(required=False, allow_blank=True, default="")
+    input_unit = serializers.ChoiceField(choices=["mm", "cm", "in"], required=False, default="mm")
+    width_input = serializers.DecimalField(required=False, allow_null=True, max_digits=10, decimal_places=3, min_value=Decimal("0.001"))
+    height_input = serializers.DecimalField(required=False, allow_null=True, max_digits=10, decimal_places=3, min_value=Decimal("0.001"))
+    width_mm = serializers.IntegerField(required=False, allow_null=True, min_value=1)
+    height_mm = serializers.IntegerField(required=False, allow_null=True, min_value=1)
+
+    def to_internal_value(self, data):
+        normalized = normalize_size_payload(
+            data,
+            legacy_width_keys=("chosen_width_mm",),
+            legacy_height_keys=("chosen_height_mm",),
+        )
+        return super().to_internal_value(normalized)
+
+    def validate(self, attrs):
+        attrs = validate_size_selection(attrs)
+        shop = attrs["shop"]
+        errors = {}
+        if not attrs.get("width_mm") or not attrs.get("height_mm"):
+            errors["non_field_errors"] = ["width_mm and height_mm are required for booklet previews."]
+        if attrs["cover_paper"].shop_id != shop.id:
+            errors["cover_paper"] = ["Cover paper must belong to the selected shop."]
+        if attrs["insert_paper"].shop_id != shop.id:
+            errors["insert_paper"] = ["Insert paper must belong to the selected shop."]
+        if attrs.get("cover_lamination_finishing_rate") and attrs["cover_lamination_finishing_rate"].shop_id != shop.id:
+            errors["cover_lamination_finishing_rate"] = ["Lamination rate must belong to the selected shop."]
+        if attrs.get("binding_finishing_rate") and attrs["binding_finishing_rate"].shop_id != shop.id:
+            errors["binding_finishing_rate"] = ["Binding rate must belong to the selected shop."]
+        if errors:
+            raise serializers.ValidationError(errors)
+        return attrs
+
+
 class QuoteDraftCreateSerializer(serializers.Serializer):
     title = serializers.CharField(required=False, allow_blank=True)
     shop = serializers.PrimaryKeyRelatedField(queryset=Shop.objects.all(), required=False, allow_null=True)

@@ -2198,12 +2198,14 @@ class ShopCustomOptionsView(APIView):
             "available_finishings": [
                 {
                     "id": f.id,
+                    "slug": f.slug,
                     "name": f.name,
                     "price": str(f.price),
                     "charge_unit": f.charge_unit,
                     "billing_basis": f.billing_basis,
                     "side_mode": f.side_mode,
                     "display_unit_label": f.display_unit_label,
+                    "category": f.category.name if f.category else None,
                 }
                 for f in finishings
             ],

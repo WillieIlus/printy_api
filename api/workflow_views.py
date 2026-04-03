@@ -15,12 +15,14 @@ from quotes.services_workflow import (
     update_quote_response,
 )
 from services.pricing.quote_builder import build_quote_preview
+from services.pricing.booklet_builder import build_booklet_preview
 from setup.services import get_setup_status_for_shop, get_setup_status_for_user
 from shops.models import Shop
 from shops.services import can_manage_quotes, can_manage_shop
 
 from .workflow_serializers import (
     CalculatorPreviewSerializer,
+    BookletCalculatorPreviewSerializer,
     DashboardQuoteRequestSummarySerializer,
     QuoteDraftCreateSerializer,
     QuoteDraftReadSerializer,
@@ -69,6 +71,34 @@ class CalculatorPreviewView(APIView):
             finishing_selections=validated.get("finishings") or [],
             width_mm=validated.get("width_mm"),
             height_mm=validated.get("height_mm"),
+        )
+        return Response(pricing)
+
+
+class BookletCalculatorPreviewView(APIView):
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        serializer = BookletCalculatorPreviewSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        validated = serializer.validated_data
+        pricing = build_booklet_preview(
+            shop=validated["shop"],
+            quantity=validated["quantity"],
+            width_mm=validated["width_mm"],
+            height_mm=validated["height_mm"],
+            total_pages=validated["total_pages"],
+            binding_type=validated["binding_type"],
+            cover_paper=validated["cover_paper"],
+            insert_paper=validated["insert_paper"],
+            cover_sides=validated["cover_sides"],
+            insert_sides=validated["insert_sides"],
+            cover_color_mode=validated["cover_color_mode"],
+            insert_color_mode=validated["insert_color_mode"],
+            cover_lamination_mode=validated["cover_lamination_mode"],
+            cover_lamination_finishing_rate=validated.get("cover_lamination_finishing_rate"),
+            binding_finishing_rate=validated.get("binding_finishing_rate"),
+            turnaround_hours=validated.get("turnaround_hours"),
         )
         return Response(pricing)
 
