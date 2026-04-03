@@ -587,3 +587,91 @@ class QuoteEngineTests(TestCase):
         self.assertEqual(resp["item_calculation_results"][str(item.id)]["quote_type"], "flat")
         self.assertEqual(resp["calculation_result"]["quote_type"], "quote_request_preview")
         self.assertEqual(resp["calculation_result"]["grand_total"], "25.00")
+
+    def test_quote_item_pricing_uses_per_side_duplex_surcharge_breakdown(self):
+        PrintingRate.objects.all().delete()
+        self.paper.selling_price = Decimal("5.00")
+        self.paper.gsm = 130
+        self.paper.save(update_fields=["selling_price", "gsm"])
+        PrintingRate.objects.create(
+            machine=self.machine,
+            sheet_size=SheetSize.A4,
+            color_mode=ColorMode.COLOR,
+            single_price=Decimal("15.00"),
+            double_price=None,
+            duplex_surcharge=Decimal("5.00"),
+            duplex_surcharge_enabled=True,
+            duplex_surcharge_min_gsm=150,
+        )
+        qr = QuoteRequest.objects.create(
+            shop=self.shop,
+            created_by=self.user,
+            customer_name="Duplex Customer",
+            customer_email="duplex@test.com",
+            status="DRAFT",
+        )
+        item = QuoteItem.objects.create(
+            quote_request=qr,
+            product=self.product_sheet,
+            quantity=100,
+            pricing_mode=PricingMode.SHEET,
+            paper=self.paper,
+            machine=self.machine,
+            sides=Sides.DUPLEX,
+            color_mode=ColorMode.COLOR,
+        )
+
+        result = compute_and_store_pricing(item)
+
+        self.assertEqual(result.breakdown["paper"]["paper_price_per_sheet"], "5.00")
+        self.assertEqual(result.breakdown["printing"]["print_price_front"], "15.00")
+        self.assertEqual(result.breakdown["printing"]["print_price_back"], "15.00")
+        self.assertEqual(result.breakdown["printing"]["duplex_surcharge"], "0.00")
+        self.assertFalse(result.breakdown["printing"]["duplex_surcharge_applied"])
+        self.assertEqual(result.breakdown["per_sheet_pricing"]["total_per_sheet"], "35.00")
+        self.assertEqual(result.breakdown["per_sheet_pricing"]["total_job_price"], "3500.00")
+        self.assertEqual(result.totals["total_job_price"], "3500.00")
+        self.assertEqual(result.line_total, "3500.00")
+
+    def test_quote_item_pricing_applies_duplex_surcharge_when_threshold_matches(self):
+        PrintingRate.objects.all().delete()
+        self.paper.selling_price = Decimal("5.00")
+        self.paper.gsm = 300
+        self.paper.save(update_fields=["selling_price", "gsm"])
+        PrintingRate.objects.create(
+            machine=self.machine,
+            sheet_size=SheetSize.A4,
+            color_mode=ColorMode.COLOR,
+            single_price=Decimal("15.00"),
+            double_price=None,
+            duplex_surcharge=Decimal("5.00"),
+            duplex_surcharge_enabled=True,
+            duplex_surcharge_min_gsm=150,
+        )
+        qr = QuoteRequest.objects.create(
+            shop=self.shop,
+            created_by=self.user,
+            customer_name="Duplex Threshold",
+            customer_email="duplex-threshold@test.com",
+            status="DRAFT",
+        )
+        item = QuoteItem.objects.create(
+            quote_request=qr,
+            product=self.product_sheet,
+            quantity=100,
+            pricing_mode=PricingMode.SHEET,
+            paper=self.paper,
+            machine=self.machine,
+            sides=Sides.DUPLEX,
+            color_mode=ColorMode.COLOR,
+        )
+
+        result = compute_and_store_pricing(item)
+
+        self.assertEqual(result.breakdown["printing"]["duplex_surcharge"], "5.00")
+        self.assertTrue(result.breakdown["printing"]["duplex_surcharge_applied"])
+        self.assertEqual(result.breakdown["per_sheet_pricing"]["formula"], "paper_price + print_price_front + print_price_back + duplex_surcharge")
+        self.assertEqual(result.breakdown["per_sheet_pricing"]["total_per_sheet"], "40.00")
+        self.assertEqual(result.breakdown["per_sheet_pricing"]["total_job_price"], "4000.00")
+        self.assertEqual(result.totals["print_cost"], "3500.00")
+        self.assertEqual(result.totals["total_job_price"], "4000.00")

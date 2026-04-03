@@ -382,16 +382,10 @@ def _compute_sheet_pricing(item, product, quantity, sides_count, result: Pricing
         getattr(layout, "total_sheets", 0)
         or compute_sheets_needed(quantity, result.copies_per_sheet or 1)
     )
-    paper_cost = Decimal(str(paper.selling_price)) * Decimal(result.sheets_needed or 0)
-    print_cost = (
-        compute_print_cost(item.machine, paper, result.sheets_needed or 0, item.sides, item.color_mode)
-        if item.machine_id and item.sides and item.color_mode
-        else Decimal("0")
-    )
     sheet_area_sqm = Decimal("0")
     if paper.width_mm and paper.height_mm:
         sheet_area_sqm = (Decimal(str(paper.width_mm)) / Decimal("1000")) * (Decimal(str(paper.height_mm)) / Decimal("1000"))
-    finishing_total, finishing_lines = compute_finishings_cost(
+    local_finishing_total, local_finishing_lines = compute_finishings_cost(
         item.finishings,
         quantity,
         sheet_area_sqm * Decimal(result.sheets_needed or 0),
@@ -399,19 +393,6 @@ def _compute_sheet_pricing(item, product, quantity, sides_count, result: Pricing
         result.sheets_needed or 0,
     )
     services_total = _compute_services_total(item)
-    line_total = paper_cost + print_cost + finishing_total + services_total
-    unit_price = line_total / Decimal(quantity) if quantity > 0 else Decimal("0")
-
-    result.paper_cost = str(paper_cost)
-    result.print_cost = str(print_cost)
-    result.finishing_total = str(finishing_total)
-    result.services_total = str(services_total)
-    result.line_total = str(line_total)
-    result.unit_price = str(unit_price)
-    result.machine_label = getattr(getattr(item, "machine", None), "name", "")
-    result.finishing_lines = [asdict(line) for line in finishing_lines]
-
-    print_rate_per_sheet = Decimal("0")
     pricing_breakdown = {}
     if item.machine_id and item.sides and item.color_mode:
         pricing_breakdown = calculate_sheet_pricing(
@@ -432,26 +413,71 @@ def _compute_sheet_pricing(item, product, quantity, sides_count, result: Pricing
             width_mm=getattr(product, "default_finished_width_mm", None) or None,
             height_mm=getattr(product, "default_finished_height_mm", None) or None,
         ).to_dict()
-        print_rate_per_sheet = Decimal(str(pricing_breakdown.get("totals", {}).get("total_per_sheet", "0"))) - Decimal(str(paper.selling_price))
+    engine_totals = pricing_breakdown.get("totals", {}) if pricing_breakdown else {}
+    result.breakdown = pricing_breakdown.get("breakdown", {}) if pricing_breakdown else {}
+
+    if pricing_breakdown:
+        paper_cost = Decimal(str(engine_totals.get("paper_cost", "0") or "0"))
+        print_cost = Decimal(str(engine_totals.get("print_cost", "0") or "0"))
+    else:
+        paper_cost = Decimal(str(paper.selling_price)) * Decimal(result.sheets_needed or 0)
+        print_cost = Decimal("0")
+    finishing_total = local_finishing_total
+    subtotal = paper_cost + print_cost + finishing_total
+    result.finishing_lines = [asdict(line) for line in local_finishing_lines]
+
+    line_total = subtotal + services_total
+    unit_price = line_total / Decimal(quantity) if quantity > 0 else Decimal("0")
+
+    result.paper_cost = str(paper_cost)
+    result.print_cost = str(print_cost)
+    result.finishing_total = str(finishing_total)
+    result.services_total = str(services_total)
+    result.line_total = str(line_total)
+    result.unit_price = str(unit_price)
+    result.machine_label = getattr(getattr(item, "machine", None), "name", "")
 
     result.totals = {
         "paper_cost": str(paper_cost),
         "print_cost": str(print_cost),
         "finishing_total": str(finishing_total),
         "services_total": str(services_total),
-        "total_per_sheet": str(Decimal(str(paper.selling_price)) + print_rate_per_sheet) if item.machine_id and item.sides and item.color_mode else str(Decimal(str(paper.selling_price))),
+        "subtotal": str(subtotal),
+        "total_per_sheet": str(engine_totals.get("total_per_sheet", "0") or "0"),
+        "total_job_price": str(line_total),
         "grand_total": str(line_total),
         "unit_price": str(unit_price),
     }
-    if pricing_breakdown.get("totals", {}).get("subtotal") is not None:
-        result.totals["subtotal"] = pricing_breakdown["totals"]["subtotal"]
-    if pricing_breakdown.get("totals", {}).get("vat_amount") is not None:
-        result.totals["vat_amount"] = pricing_breakdown["totals"]["vat_amount"]
-        result.totals["vat"] = pricing_breakdown["totals"]["vat_amount"]
-        result.totals["vat_mode"] = pricing_breakdown["totals"]["vat_mode"]
-    result.breakdown = pricing_breakdown.get("breakdown", {}) if pricing_breakdown else {}
-    if not result.breakdown:
-        total_per_sheet = Decimal(str(paper.selling_price)) + print_rate_per_sheet
+    if engine_totals.get("vat_amount") is not None:
+        result.totals["vat_amount"] = engine_totals["vat_amount"]
+        result.totals["vat"] = engine_totals["vat_amount"]
+        result.totals["vat_mode"] = engine_totals.get("vat_mode")
+    if result.breakdown:
+        per_sheet = result.breakdown.get("per_sheet_pricing", {})
+        if isinstance(per_sheet, dict):
+            per_sheet["total_job_price"] = str(line_total)
+        printing = result.breakdown.get("printing", {})
+        if isinstance(printing, dict):
+            printing["total_job_price"] = str(line_total)
+        paper_block = result.breakdown.get("paper", {})
+        if isinstance(paper_block, dict):
+            paper_block["paper_price"] = paper_block.get("paper_price") or paper_block.get("paper_price_per_sheet")
+        if result.finishing_lines:
+            result.breakdown["finishings"] = [
+                {
+                    "name": line["name"],
+                    "charge_unit": line["charge_unit"],
+                    "formula": line["charge_unit"],
+                    "total": line["computed_cost"],
+                }
+                for line in result.finishing_lines
+            ]
+        totals_block = result.breakdown.get("totals", {})
+        if isinstance(totals_block, dict):
+            totals_block["finishing_total"] = str(finishing_total)
+            totals_block["grand_total"] = str(line_total)
+    else:
+        total_per_sheet = Decimal(str(paper.selling_price))
         result.breakdown = {
             "paper": {
                 "id": paper.id,
@@ -466,9 +492,12 @@ def _compute_sheet_pricing(item, product, quantity, sides_count, result: Pricing
                 "machine_name": result.machine_label,
                 "color_mode": item.color_mode,
                 "sides": item.sides,
-                "print_price_front": str(print_rate_per_sheet if item.sides == Sides.SIMPLEX else (print_cost / Decimal(result.sheets_needed or 1) if result.sheets_needed else Decimal("0"))),
+                "single_side_print_price": "0",
+                "print_price_front": "0",
                 "print_price_back": "0",
                 "duplex_surcharge": "0",
+                "total_per_sheet": "0",
+                "total_job_price": str(line_total),
                 "formula": "paper_price + print_price_front",
                 "total": str(print_cost),
             },
@@ -479,13 +508,26 @@ def _compute_sheet_pricing(item, product, quantity, sides_count, result: Pricing
             "finishings": [],
             "per_sheet_pricing": {
                 "paper_price": str(paper.selling_price),
-                "print_price_front": str(print_rate_per_sheet),
+                "print_price_front": "0",
                 "print_price_back": "0",
                 "duplex_surcharge": "0",
+                "print_total_per_sheet": "0",
                 "total_per_sheet": str(total_per_sheet),
+                "total_job_price": str(line_total),
                 "formula": "paper_price + print_price_front",
+                "explanation": f"{paper.selling_price} paper + 0 printing = {total_per_sheet} per sheet",
             },
         }
+        if result.finishing_lines:
+            result.breakdown["finishings"] = [
+                {
+                    "name": line["name"],
+                    "charge_unit": line["charge_unit"],
+                    "formula": line["charge_unit"],
+                    "total": line["computed_cost"],
+                }
+                for line in result.finishing_lines
+            ]
     result.layout_result = serialize_result(layout) if layout else {}
     result.finishing_plan = serialize_result(engine_summary.finishing) if engine_summary and engine_summary.finishing else {}
     result.layout_notes = list(getattr(engine_summary, "notes", []) or [])
@@ -526,14 +568,14 @@ def _compute_sheet_pricing(item, product, quantity, sides_count, result: Pricing
                 {
                     "code": f"finishing_{index}",
                     "label": line["name"],
-                    "amount": line["computed_cost"],
-                    "formula": line["charge_unit"],
-                    "metadata": {"charge_unit": line["charge_unit"]},
+                    "amount": line.get("computed_cost", line.get("total")),
+                    "formula": line.get("charge_unit", line.get("formula")),
+                    "metadata": {"charge_unit": line.get("charge_unit", line.get("billing_basis"))},
                 }
                 for index, line in enumerate(result.finishing_lines)
             ],
         ],
-        subtotal=result.line_total,
+        subtotal=result.totals.get("subtotal"),
         finishing_total=result.finishing_total,
         grand_total=result.line_total,
         unit_price=result.unit_price,
