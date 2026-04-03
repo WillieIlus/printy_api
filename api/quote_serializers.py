@@ -17,6 +17,7 @@ from quotes.models import (
     ShopQuote,
     ShopQuoteAttachment,
 )
+from quotes.turnaround import estimate_turnaround, legacy_days_from_hours, humanize_working_hours
 
 
 # ---------------------------------------------------------------------------
@@ -139,6 +140,8 @@ class QuoteItemShopSerializer(serializers.ModelSerializer):
 class ShopQuoteSummarySerializer(serializers.ModelSerializer):
     """Minimal shop quote for embedding in QuoteRequest responses."""
 
+    estimated_working_hours = serializers.IntegerField(source="turnaround_hours", read_only=True)
+
     class Meta:
         model = ShopQuote
         fields = [
@@ -146,6 +149,11 @@ class ShopQuoteSummarySerializer(serializers.ModelSerializer):
             "status",
             "total",
             "turnaround_days",
+            "turnaround_hours",
+            "estimated_working_hours",
+            "estimated_ready_at",
+            "human_ready_text",
+            "turnaround_label",
             "note",
             "revision_number",
             "sent_at",
@@ -463,12 +471,15 @@ class QuoteRequestShopDetailSerializer(serializers.ModelSerializer):
 class ShopQuoteCreateSerializer(serializers.ModelSerializer):
     """Shop: create or send quote (quote_request from context)."""
 
+    turnaround_hours = serializers.IntegerField(required=False, allow_null=True, min_value=1)
+
     class Meta:
         model = ShopQuote
         fields = [
             "total",
             "note",
             "turnaround_days",
+            "turnaround_hours",
         ]
         extra_kwargs = {"total": {"required": False, "allow_null": True}}
 
@@ -477,6 +488,14 @@ class ShopQuoteCreateSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError("Total must be non-negative.")
         return value
 
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+        turnaround_hours = attrs.get("turnaround_hours")
+        turnaround_days = attrs.get("turnaround_days")
+        if turnaround_hours is None and turnaround_days:
+            attrs["turnaround_hours"] = turnaround_days * 8
+        return attrs
+
     def create(self, validated_data):
         quote_request = self.context["quote_request"]
         request = self.context["request"]
@@ -484,6 +503,14 @@ class ShopQuoteCreateSerializer(serializers.ModelSerializer):
 
         # Revision number: count existing + 1
         rev = quote_request.shop_quotes.count() + 1
+        turnaround_hours = validated_data.get("turnaround_hours")
+        if turnaround_hours:
+            estimate = estimate_turnaround(shop=shop, working_hours=turnaround_hours)
+            if estimate:
+                validated_data["turnaround_days"] = legacy_days_from_hours(estimate.working_hours)
+                validated_data["estimated_ready_at"] = estimate.ready_at
+                validated_data["human_ready_text"] = estimate.human_ready_text
+                validated_data["turnaround_label"] = estimate.label
 
         return ShopQuote.objects.create(
             quote_request=quote_request,
@@ -498,11 +525,14 @@ class ShopQuoteCreateSerializer(serializers.ModelSerializer):
 class ShopQuoteUpdateSerializer(serializers.ModelSerializer):
     """Shop: revise quote (update note, turnaround, total)."""
 
+    turnaround_hours = serializers.IntegerField(required=False, allow_null=True, min_value=1)
+
     class Meta:
         model = ShopQuote
         fields = [
             "note",
             "turnaround_days",
+            "turnaround_hours",
             "total",
         ]
 
@@ -512,6 +542,17 @@ class ShopQuoteUpdateSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError(
                 "Only sent or revised quotes can be updated."
             )
+        turnaround_hours = attrs.get("turnaround_hours")
+        turnaround_days = attrs.get("turnaround_days")
+        if turnaround_hours is None and turnaround_days:
+            attrs["turnaround_hours"] = turnaround_days * 8
+        if turnaround_hours:
+            estimate = estimate_turnaround(shop=instance.shop if instance else None, working_hours=turnaround_hours)
+            if estimate:
+                attrs["turnaround_days"] = legacy_days_from_hours(estimate.working_hours)
+                attrs["estimated_ready_at"] = estimate.ready_at
+                attrs["human_ready_text"] = estimate.human_ready_text
+                attrs["turnaround_label"] = estimate.label
         return attrs
 
 
@@ -529,6 +570,7 @@ class ShopQuoteListSerializer(serializers.ModelSerializer):
     quote_request_id = serializers.IntegerField(source="quote_request_id", read_only=True)
     shop_name = serializers.CharField(source="shop.name", read_only=True)
     customer_name = serializers.CharField(source="quote_request.customer_name", read_only=True)
+    estimated_working_hours = serializers.IntegerField(source="turnaround_hours", read_only=True)
 
     class Meta:
         model = ShopQuote
@@ -541,6 +583,11 @@ class ShopQuoteListSerializer(serializers.ModelSerializer):
             "status",
             "total",
             "turnaround_days",
+            "turnaround_hours",
+            "estimated_working_hours",
+            "estimated_ready_at",
+            "human_ready_text",
+            "turnaround_label",
             "revision_number",
             "sent_at",
             "created_at",
@@ -556,6 +603,8 @@ class ShopQuoteDetailSerializer(serializers.ModelSerializer):
     items = serializers.SerializerMethodField()
     attachments = ShopQuoteAttachmentSerializer(many=True, read_only=True)
     whatsapp_summary = serializers.SerializerMethodField()
+    estimated_working_hours = serializers.IntegerField(source="turnaround_hours", read_only=True)
+    turnaround_text = serializers.SerializerMethodField()
 
     class Meta:
         model = ShopQuote
@@ -570,6 +619,12 @@ class ShopQuoteDetailSerializer(serializers.ModelSerializer):
             "total",
             "note",
             "turnaround_days",
+            "turnaround_hours",
+            "estimated_working_hours",
+            "estimated_ready_at",
+            "human_ready_text",
+            "turnaround_label",
+            "turnaround_text",
             "revision_number",
             "pricing_locked_at",
             "sent_at",
@@ -601,6 +656,9 @@ class ShopQuoteDetailSerializer(serializers.ModelSerializer):
             "finishings__finishing_rate"
         )
         return QuoteItemCustomerSerializer(items, many=True).data
+
+    def get_turnaround_text(self, obj):
+        return humanize_working_hours(obj.turnaround_hours)
 
 
 # ---------------------------------------------------------------------------
@@ -657,6 +715,10 @@ class QuoteSharePublicSerializer(serializers.Serializer):
             "status": instance.status,
             "total": instance.total,
             "turnaround_days": instance.turnaround_days,
+            "turnaround_hours": instance.turnaround_hours,
+            "estimated_ready_at": instance.estimated_ready_at,
+            "human_ready_text": instance.human_ready_text,
+            "turnaround_label": instance.turnaround_label,
             "note": instance.note or "",
             "items": QuoteShareItemPublicSerializer(items, many=True).data,
         }

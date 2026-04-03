@@ -192,6 +192,18 @@ class Shop(AutoSlugMixin, models.Model):
         verbose_name=_("closing soon minutes"),
         help_text=_("Minutes before closing to show 'Closing soon' status (e.g. 30)."),
     )
+    timezone = models.CharField(
+        max_length=64,
+        default="Africa/Nairobi",
+        verbose_name=_("timezone"),
+        help_text=_("IANA timezone used for ready-time projections (e.g. Africa/Nairobi)."),
+    )
+    same_day_cutoff_time = models.TimeField(
+        null=True,
+        blank=True,
+        verbose_name=_("same-day cutoff time"),
+        help_text=_("Optional cutoff after which new work starts on the next working slot."),
+    )
     owner = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.CASCADE,

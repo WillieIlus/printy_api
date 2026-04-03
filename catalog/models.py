@@ -288,6 +288,33 @@ class Product(TimeStampedModel, AutoSlugMixin):
         verbose_name=_("delivery time (days)"),
         help_text=_("Typical delivery or turnaround time for this product in business days."),
     )
+    standard_turnaround_hours = models.PositiveIntegerField(
+        null=True,
+        blank=True,
+        verbose_name=_("standard turnaround hours"),
+        help_text=_("Production turnaround in working hours for standard service."),
+    )
+    rush_turnaround_hours = models.PositiveIntegerField(
+        null=True,
+        blank=True,
+        verbose_name=_("rush turnaround hours"),
+        help_text=_("Optional faster turnaround in working hours when rush service is available."),
+    )
+    rush_available = models.BooleanField(
+        default=False,
+        verbose_name=_("rush available"),
+        help_text=_("Whether this product can be produced on a rush turnaround."),
+    )
+    buffer_hours = models.PositiveIntegerField(
+        default=0,
+        verbose_name=_("buffer hours"),
+        help_text=_("Safety buffer added on top of production time."),
+    )
+    queue_hours = models.PositiveIntegerField(
+        default=0,
+        verbose_name=_("queue hours"),
+        help_text=_("Current queue delay in working hours. Safe default for future dynamic queueing."),
+    )
     is_popular = models.BooleanField(default=False, verbose_name=_("is popular"))
     is_best_value = models.BooleanField(default=False, verbose_name=_("is best value"))
     is_new = models.BooleanField(default=False, verbose_name=_("is new"))

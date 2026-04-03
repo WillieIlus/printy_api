@@ -316,8 +316,11 @@ def _assert_response_transition(current_status: str | None, next_status: str):
         raise ValueError(f"Cannot change quote response from {current_status or 'new'} to {next_status}.")
 
 
-def create_quote_response(*, quote_request: QuoteRequest, shop, user, status: str, response_snapshot: dict, revised_pricing_snapshot: dict | None = None, total=None, note: str = "", turnaround_days=None) -> ShopQuote:
+def create_quote_response(*, quote_request: QuoteRequest, shop, user, status: str, response_snapshot: dict, revised_pricing_snapshot: dict | None = None, total=None, note: str = "", turnaround_days=None, turnaround_hours=None) -> ShopQuote:
     _assert_response_transition(None, status)
+    if turnaround_hours is None and turnaround_days is not None:
+        turnaround_hours = turnaround_days * 8
+    turnaround_estimate = estimate_turnaround(shop=shop, working_hours=turnaround_hours)
     response = ShopQuote.objects.create(
         quote_request=quote_request,
         shop=shop,
@@ -326,7 +329,11 @@ def create_quote_response(*, quote_request: QuoteRequest, shop, user, status: st
         total=total,
         sent_at=timezone.now() if status != ShopQuoteStatus.PENDING else None,
         note=note,
-        turnaround_days=turnaround_days,
+        turnaround_days=legacy_days_from_hours(turnaround_hours) if turnaround_hours else turnaround_days,
+        turnaround_hours=turnaround_hours,
+        estimated_ready_at=turnaround_estimate.ready_at if turnaround_estimate else None,
+        human_ready_text=turnaround_estimate.human_ready_text if turnaround_estimate else "",
+        turnaround_label=turnaround_estimate.label if turnaround_estimate else "",
         revision_number=quote_request.shop_quotes.count() + 1,
         response_snapshot=response_snapshot,
         revised_pricing_snapshot=revised_pricing_snapshot,
@@ -347,6 +354,7 @@ def update_quote_response(
     total=None,
     note: str | None = None,
     turnaround_days=None,
+    turnaround_hours=None,
 ) -> ShopQuote:
     _assert_response_transition(response.status, status)
 
@@ -359,8 +367,17 @@ def update_quote_response(
         response.total = total
     if note is not None:
         response.note = note
+    if turnaround_hours is None and turnaround_days is not None:
+        turnaround_hours = turnaround_days * 8
     if turnaround_days is not None:
         response.turnaround_days = turnaround_days
+    if turnaround_hours is not None:
+        turnaround_estimate = estimate_turnaround(shop=response.shop, working_hours=turnaround_hours)
+        response.turnaround_hours = turnaround_hours
+        response.turnaround_days = legacy_days_from_hours(turnaround_hours)
+        response.estimated_ready_at = turnaround_estimate.ready_at if turnaround_estimate else None
+        response.human_ready_text = turnaround_estimate.human_ready_text if turnaround_estimate else ""
+        response.turnaround_label = turnaround_estimate.label if turnaround_estimate else ""
     if status != ShopQuoteStatus.PENDING and response.sent_at is None:
         response.sent_at = timezone.now()
     response.save()

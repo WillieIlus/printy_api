@@ -105,7 +105,7 @@ def _draft_group_story(group: dict, styles) -> list:
     story.append(table)
     latest_sent_quote = group.get("latest_sent_quote")
     if latest_sent_quote:
-        turnaround = latest_sent_quote.get("turnaround_days")
+        turnaround = latest_sent_quote.get("turnaround_hours")
         note = latest_sent_quote.get("note")
         story.append(Spacer(1, 3 * mm))
         story.append(
@@ -115,7 +115,9 @@ def _draft_group_story(group: dict, styles) -> list:
             )
         )
         if turnaround:
-            story.append(Paragraph(f"Turnaround: {turnaround} business day(s)", styles["PrintyMeta"]))
+            story.append(Paragraph(f"Turnaround: {turnaround} working hour(s)", styles["PrintyMeta"]))
+        if latest_sent_quote.get("human_ready_text"):
+            story.append(Paragraph(latest_sent_quote["human_ready_text"], styles["PrintyMeta"]))
         if note:
             story.append(Paragraph(f"Note: {note}", styles["PrintyMeta"]))
     story.append(Spacer(1, 6 * mm))

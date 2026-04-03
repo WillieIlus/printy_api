@@ -383,6 +383,32 @@ class ShopQuote(TimeStampedModel):
         verbose_name=_("turnaround (days)"),
         help_text=_("Expected turnaround in days (e.g. ready in 3 days)."),
     )
+    turnaround_hours = models.PositiveIntegerField(
+        null=True,
+        blank=True,
+        verbose_name=_("turnaround (hours)"),
+        help_text=_("Expected turnaround in working hours."),
+    )
+    estimated_ready_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        verbose_name=_("estimated ready at"),
+        help_text=_("Projected ready datetime based on working hours."),
+    )
+    human_ready_text = models.CharField(
+        max_length=255,
+        blank=True,
+        default="",
+        verbose_name=_("human ready text"),
+        help_text=_("Human-friendly ready promise shown to customers."),
+    )
+    turnaround_label = models.CharField(
+        max_length=50,
+        blank=True,
+        default="",
+        verbose_name=_("turnaround label"),
+        help_text=_("Centralized turnaround label such as Same day or Standard."),
+    )
     revision_number = models.PositiveIntegerField(
         default=1,
         verbose_name=_("revision number"),

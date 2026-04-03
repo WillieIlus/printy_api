@@ -214,7 +214,7 @@ class ShopQuoteAttachmentInline(admin.TabularInline):
 
 @admin.register(ShopQuote)
 class ShopQuoteAdmin(admin.ModelAdmin):
-    list_display = ["id", "quote_request", "shop", "status", "total", "turnaround_days", "revision_number", "sent_at", "created_at"]
+    list_display = ["id", "quote_request", "shop", "status", "total", "turnaround_hours", "turnaround_days", "turnaround_label", "revision_number", "sent_at", "created_at"]
     list_filter = ["shop", "status"]
     readonly_fields = ["created_at", "updated_at"]
     inlines = [ShopQuoteAttachmentInline]

@@ -31,6 +31,8 @@ class ProductAdmin(admin.ModelAdmin):
         "name",
         "shop",
         "pricing_mode",
+        "standard_turnaround_hours",
+        "rush_available",
         "min_gsm",
         "max_gsm",
         "lowest_price",
@@ -73,6 +75,19 @@ class ProductAdmin(admin.ModelAdmin):
         (
             "Price range (est.)",
             {"fields": ("lowest_price", "highest_price")},
+        ),
+        (
+            "Turnaround",
+            {
+                "fields": (
+                    "turnaround_days",
+                    "standard_turnaround_hours",
+                    "rush_available",
+                    "rush_turnaround_hours",
+                    "queue_hours",
+                    "buffer_hours",
+                ),
+            },
         ),
         (
             "Gallery display",

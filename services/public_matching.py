@@ -8,6 +8,7 @@ from common.geo import haversine_km
 from inventory.models import Machine, Paper
 from pricing.models import FinishingRate, Material, PrintingRate
 from services.pricing.engine import calculate_large_format_pricing, calculate_sheet_pricing
+from quotes.turnaround import derive_product_turnaround_hours, estimate_turnaround, humanize_working_hours
 from shops.models import Shop
 
 
@@ -128,6 +129,38 @@ def try_preview_for_shop(shop: Shop, payload: dict[str, Any]) -> dict[str, Any] 
     return _preview_custom_for_shop(shop, payload)
 
 
+def _turnaround_hours_for_payload(shop: Shop, payload: dict[str, Any], product: Product | None = None) -> int | None:
+    if product is not None:
+        return derive_product_turnaround_hours(
+            product,
+            rush=(payload.get("turnaround_mode") == "rush"),
+        )
+    if payload.get("turnaround_hours"):
+        return int(payload["turnaround_hours"])
+    if payload.get("turnaround_days"):
+        return int(payload["turnaround_days"]) * 8
+    return None
+
+
+def _attach_turnaround(shop: Shop, row: dict[str, Any], payload: dict[str, Any], product: Product | None = None) -> dict[str, Any]:
+    turnaround_hours = _turnaround_hours_for_payload(shop, payload, product=product)
+    estimate = estimate_turnaround(shop=shop, working_hours=turnaround_hours)
+    row["turnaround_hours"] = turnaround_hours
+    row["estimated_working_hours"] = turnaround_hours
+    row["estimated_ready_at"] = estimate.ready_at if estimate else None
+    row["human_ready_text"] = estimate.human_ready_text if estimate else "Ready time on request"
+    row["turnaround_label"] = estimate.label if estimate else "On request"
+    row_preview = row.get("preview") or {}
+    row_preview["turnaround_hours"] = turnaround_hours
+    row_preview["estimated_working_hours"] = turnaround_hours
+    row_preview["estimated_ready_at"] = estimate.ready_at if estimate else None
+    row_preview["human_ready_text"] = estimate.human_ready_text if estimate else "Ready time on request"
+    row_preview["turnaround_label"] = estimate.label if estimate else "On request"
+    row_preview["turnaround_text"] = humanize_working_hours(turnaround_hours)
+    row["preview"] = row_preview
+    return row
+
+
 def _preview_catalog_for_shop(shop: Shop, product: Product, payload: dict[str, Any]) -> dict[str, Any]:
     finishing_selections, missing_finishings = _resolve_finishings(shop, payload)
     product_pricing_mode = product.pricing_mode
@@ -163,7 +196,7 @@ def _preview_catalog_for_shop(shop: Shop, product: Product, payload: dict[str, A
             height_mm=height_mm,
             finishing_selections=finishing_selections,
         ).to_dict()
-        return _build_shop_row(
+        return _attach_turnaround(shop, _build_shop_row(
             shop,
             can_calculate=True,
             total=result["totals"]["grand_total"],
@@ -173,7 +206,7 @@ def _preview_catalog_for_shop(shop: Shop, product: Product, payload: dict[str, A
             selection={"material_id": material.id, "material_label": f"{material.material_type} ({material.unit})"},
             similarity_score=_shop_similarity_score(shop, payload, True, material=material),
             exact_or_estimated=True,
-        )
+        ), payload, product)
 
     paper = _pick_paper(shop, payload, product=product)
     if not paper:
@@ -210,7 +243,7 @@ def _preview_catalog_for_shop(shop: Shop, product: Product, payload: dict[str, A
         height_mm=int(payload.get("height_mm") or product.default_finished_height_mm or 0),
     ).to_dict()
 
-    return _build_shop_row(
+    return _attach_turnaround(shop, _build_shop_row(
         shop,
         can_calculate=True,
         total=result["totals"]["grand_total"],
@@ -225,7 +258,7 @@ def _preview_catalog_for_shop(shop: Shop, product: Product, payload: dict[str, A
         },
         similarity_score=_shop_similarity_score(shop, payload, True, paper=paper),
         exact_or_estimated=True,
-    )
+    ), payload, product)
 
 
 def _preview_custom_for_shop(shop: Shop, payload: dict[str, Any]) -> dict[str, Any]:
@@ -262,7 +295,7 @@ def _preview_custom_for_shop(shop: Shop, payload: dict[str, Any]) -> dict[str, A
             height_mm=height_mm,
             finishing_selections=finishing_selections,
         ).to_dict()
-        return _build_shop_row(
+        return _attach_turnaround(shop, _build_shop_row(
             shop,
             can_calculate=True,
             total=result["totals"]["grand_total"],
@@ -272,7 +305,7 @@ def _preview_custom_for_shop(shop: Shop, payload: dict[str, Any]) -> dict[str, A
             selection={"material_id": material.id, "material_label": f"{material.material_type} ({material.unit})"},
             similarity_score=_shop_similarity_score(shop, payload, True, material=material),
             exact_or_estimated=True,
-        )
+        ), payload, None)
 
     paper = _pick_paper(shop, payload)
     machine = _pick_machine(shop, paper=paper, payload=payload) if paper else None
@@ -319,7 +352,7 @@ def _preview_custom_for_shop(shop: Shop, payload: dict[str, Any]) -> dict[str, A
         height_mm=height_mm,
     ).to_dict()
 
-    return _build_shop_row(
+    return _attach_turnaround(shop, _build_shop_row(
         shop,
         can_calculate=True,
         total=result["totals"]["grand_total"],
@@ -334,7 +367,7 @@ def _preview_custom_for_shop(shop: Shop, payload: dict[str, Any]) -> dict[str, A
         },
         similarity_score=_shop_similarity_score(shop, payload, True, paper=paper),
         exact_or_estimated=True,
-    )
+    ), payload, None)
 
 
 def _resolve_finishings(shop: Shop, payload: dict[str, Any]) -> tuple[list[dict[str, Any]], list[str]]:

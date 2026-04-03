@@ -19,6 +19,7 @@ _PRESET_NAME_MAP = {label.lower(): label for label in SIZE_PRESETS}
 _UNIT_FACTORS = {
     "mm": Decimal("1"),
     "cm": Decimal("10"),
+    "m": Decimal("1000"),
     "in": Decimal("25.4"),
 }
 

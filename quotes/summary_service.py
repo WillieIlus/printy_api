@@ -214,11 +214,15 @@ def format_shop_quote_summary(
         lines.append(f"Total: KES {_format_price(total)}")
     lines.append("")
 
-    turnaround = "2-3 business days"
-    if shop_quote.turnaround_days is not None:
+    turnaround = "Turnaround on request"
+    if shop_quote.turnaround_hours is not None:
+        turnaround = f"{shop_quote.turnaround_hours} working hour(s)"
+    elif shop_quote.turnaround_days is not None:
         d = shop_quote.turnaround_days
         turnaround = f"{d} business day(s)" if d == 1 else f"{d} business days"
     lines.append(f"Turnaround: {turnaround}")
+    if shop_quote.human_ready_text:
+        lines.append(shop_quote.human_ready_text)
     lines.append("")
 
     if shop_quote.note:
@@ -297,8 +301,12 @@ def get_quote_draft_file_summary_text(draft_file: QuoteDraftFile) -> str:
         latest_sent_quote = group.get("latest_sent_quote")
         if latest_sent_quote and latest_sent_quote.get("total"):
             lines.append(f"Shop total: {group['shop_currency']} {latest_sent_quote['total']}")
-            if latest_sent_quote.get("turnaround_days"):
+            if latest_sent_quote.get("turnaround_hours"):
+                lines.append(f"Turnaround: {latest_sent_quote['turnaround_hours']} working hour(s)")
+            elif latest_sent_quote.get("turnaround_days"):
                 lines.append(f"Turnaround: {latest_sent_quote['turnaround_days']} business day(s)")
+            if latest_sent_quote.get("human_ready_text"):
+                lines.append(latest_sent_quote["human_ready_text"])
         else:
             lines.append(f"Shop subtotal: {group['shop_currency']} {group['subtotal']}")
 

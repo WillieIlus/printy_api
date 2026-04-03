@@ -62,7 +62,7 @@ class FinishingRateInline(admin.TabularInline):
 class MaterialInline(admin.TabularInline):
     model = Material
     extra = 1
-    fields = ["material_type", "unit", "buying_price", "selling_price", "is_active"]
+    fields = ["material_type", "unit", "buying_price", "selling_price", "print_price_per_sqm", "is_active"]
     show_change_link = True
     verbose_name_plural = "Materials (large-format)"
 
@@ -85,6 +85,7 @@ class ProductInline(admin.TabularInline):
         "default_finished_height_mm",
         "default_sides",
         "min_quantity",
+        "standard_turnaround_hours",
         "lowest_price",
         "highest_price",
         "is_active",
@@ -95,7 +96,7 @@ class ProductInline(admin.TabularInline):
 
 @admin.register(Shop)
 class ShopAdmin(admin.ModelAdmin):
-    list_display = ["name", "slug", "owner", "currency", "is_active", "opening_time", "closing_time", "created_at"]
+    list_display = ["name", "slug", "owner", "currency", "is_active", "timezone", "opening_time", "closing_time", "same_day_cutoff_time", "created_at"]
     list_filter = ["is_active"]
     search_fields = ["name", "slug", "owner__email"]
     inlines = [OpeningHoursInline, MachineInline, PaperInline, FinishingRateInline, MaterialInline, ServiceRateInline, ProductInline]

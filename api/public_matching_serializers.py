@@ -28,7 +28,7 @@ class PublicCalculatorPayloadSerializer(serializers.Serializer):
     quantity = serializers.IntegerField(min_value=1, default=1)
     size_mode = serializers.ChoiceField(choices=["standard", "custom"], required=False, default="custom")
     size_label = serializers.CharField(required=False, allow_blank=True, default="")
-    input_unit = serializers.ChoiceField(choices=["mm", "cm", "in"], required=False, default="mm")
+    input_unit = serializers.ChoiceField(choices=["mm", "cm", "m", "in"], required=False, default="mm")
     width_input = serializers.DecimalField(required=False, allow_null=True, max_digits=10, decimal_places=3, min_value=Decimal("0.001"))
     height_input = serializers.DecimalField(required=False, allow_null=True, max_digits=10, decimal_places=3, min_value=Decimal("0.001"))
     width_mm = serializers.IntegerField(required=False, allow_null=True, min_value=1)

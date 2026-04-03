@@ -454,6 +454,9 @@ class IncomingRequestViewSet(viewsets.ReadOnlyModelViewSet):
                     "quote_status": shop_quote.status,
                     "total": str(total),
                     "turnaround_days": shop_quote.turnaround_days,
+                    "turnaround_hours": shop_quote.turnaround_hours,
+                    "estimated_ready_at": shop_quote.estimated_ready_at.isoformat() if shop_quote.estimated_ready_at else None,
+                    "human_ready_text": shop_quote.human_ready_text,
                 },
             )
         if qr.created_by_id and qr.created_by_id != request.user.id:
@@ -551,6 +554,9 @@ class ShopQuoteViewSet(viewsets.ModelViewSet):
                 "quote_status": quote.status,
                 "total": str(quote.total or ""),
                 "turnaround_days": quote.turnaround_days,
+                "turnaround_hours": quote.turnaround_hours,
+                "estimated_ready_at": quote.estimated_ready_at.isoformat() if quote.estimated_ready_at else None,
+                "human_ready_text": quote.human_ready_text,
             },
         )
         qr = quote.quote_request
