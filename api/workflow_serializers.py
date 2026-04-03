@@ -1,10 +1,13 @@
 from rest_framework import serializers
+from decimal import Decimal
 
 from catalog.models import Product
 from inventory.models import Machine, Paper
 from pricing.models import FinishingRate
+from api.size_utils import normalize_size_payload, validate_size_selection
 from quotes.choices import QuoteDraftStatus, QuoteStatus, ShopQuoteStatus
 from quotes.models import QuoteDraft, QuoteRequest, ShopQuote
+from quotes.turnaround import estimate_turnaround, legacy_days_from_hours
 from shops.models import Shop
 
 
@@ -27,21 +30,25 @@ class CalculatorPreviewSerializer(serializers.Serializer):
     color_mode = serializers.ChoiceField(choices=["BW", "COLOR"], default="COLOR")
     sides = serializers.ChoiceField(choices=["SIMPLEX", "DUPLEX"], default="SIMPLEX")
     apply_duplex_surcharge = serializers.BooleanField(required=False, allow_null=True, default=None)
+    size_mode = serializers.ChoiceField(choices=["standard", "custom"], required=False, default="custom")
+    size_label = serializers.CharField(required=False, allow_blank=True, default="")
+    input_unit = serializers.ChoiceField(choices=["mm", "cm", "in"], required=False, default="mm")
+    width_input = serializers.DecimalField(required=False, allow_null=True, max_digits=10, decimal_places=3, min_value=Decimal("0.001"))
+    height_input = serializers.DecimalField(required=False, allow_null=True, max_digits=10, decimal_places=3, min_value=Decimal("0.001"))
     width_mm = serializers.IntegerField(required=False, allow_null=True, min_value=1)
     height_mm = serializers.IntegerField(required=False, allow_null=True, min_value=1)
     finishings = FinishingSelectionSerializer(many=True, required=False)
 
     def to_internal_value(self, data):
-        if isinstance(data, dict):
-            normalized = dict(data)
-            if "chosen_width_mm" in normalized and "width_mm" not in normalized:
-                normalized["width_mm"] = normalized["chosen_width_mm"]
-            if "chosen_height_mm" in normalized and "height_mm" not in normalized:
-                normalized["height_mm"] = normalized["chosen_height_mm"]
-            data = normalized
-        return super().to_internal_value(data)
+        normalized = normalize_size_payload(
+            data,
+            legacy_width_keys=("chosen_width_mm",),
+            legacy_height_keys=("chosen_height_mm",),
+        )
+        return super().to_internal_value(normalized)
 
     def validate(self, attrs):
+        attrs = validate_size_selection(attrs)
         shop = attrs["shop"]
         product = attrs.get("product")
         errors = {}
@@ -162,6 +169,11 @@ class QuoteRequestReadSerializer(serializers.ModelSerializer):
             "quote_reference": latest.quote_reference,
             "status": latest.status,
             "total": latest.total,
+            "turnaround_days": latest.turnaround_days,
+            "turnaround_hours": latest.turnaround_hours,
+            "estimated_ready_at": latest.estimated_ready_at,
+            "human_ready_text": latest.human_ready_text,
+            "turnaround_label": latest.turnaround_label,
             "created_at": latest.created_at,
             "sent_at": latest.sent_at,
         }
@@ -210,6 +222,7 @@ class QuoteResponseCreateSerializer(serializers.Serializer):
     total = serializers.DecimalField(max_digits=12, decimal_places=2, required=False)
     note = serializers.CharField(required=False, allow_blank=True)
     turnaround_days = serializers.IntegerField(required=False, min_value=0)
+    turnaround_hours = serializers.IntegerField(required=False, min_value=1)
 
     def validate_status(self, value):
         if value not in {
@@ -229,6 +242,7 @@ class QuoteResponseUpdateSerializer(serializers.Serializer):
     total = serializers.DecimalField(max_digits=12, decimal_places=2, required=False)
     note = serializers.CharField(required=False, allow_blank=True)
     turnaround_days = serializers.IntegerField(required=False, min_value=0)
+    turnaround_hours = serializers.IntegerField(required=False, min_value=1)
 
     def validate_status(self, value):
         if value not in {
@@ -256,6 +270,10 @@ class QuoteResponseReadSerializer(serializers.ModelSerializer):
             "total",
             "note",
             "turnaround_days",
+            "turnaround_hours",
+            "estimated_ready_at",
+            "human_ready_text",
+            "turnaround_label",
             "response_snapshot",
             "revised_pricing_snapshot",
             "revision_number",

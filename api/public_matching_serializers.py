@@ -1,4 +1,6 @@
 from rest_framework import serializers
+from decimal import Decimal
+from api.size_utils import normalize_size_payload, validate_size_selection
 
 
 class PublicFinishingSelectionSerializer(serializers.Serializer):
@@ -24,6 +26,11 @@ class PublicCalculatorPayloadSerializer(serializers.Serializer):
     product_id = serializers.IntegerField(required=False, allow_null=True)
     template_id = serializers.IntegerField(required=False, allow_null=True)
     quantity = serializers.IntegerField(min_value=1, default=1)
+    size_mode = serializers.ChoiceField(choices=["standard", "custom"], required=False, default="custom")
+    size_label = serializers.CharField(required=False, allow_blank=True, default="")
+    input_unit = serializers.ChoiceField(choices=["mm", "cm", "in"], required=False, default="mm")
+    width_input = serializers.DecimalField(required=False, allow_null=True, max_digits=10, decimal_places=3, min_value=Decimal("0.001"))
+    height_input = serializers.DecimalField(required=False, allow_null=True, max_digits=10, decimal_places=3, min_value=Decimal("0.001"))
     width_mm = serializers.IntegerField(required=False, allow_null=True, min_value=1)
     height_mm = serializers.IntegerField(required=False, allow_null=True, min_value=1)
     normalized_size = serializers.CharField(required=False, allow_blank=True, default="")
@@ -39,6 +46,8 @@ class PublicCalculatorPayloadSerializer(serializers.Serializer):
     finishing_slugs = serializers.ListField(child=serializers.CharField(), required=False, default=list)
     finishings = PublicFinishingSelectionSerializer(many=True, required=False, default=list)
     turnaround_days = serializers.IntegerField(required=False, allow_null=True, min_value=1)
+    turnaround_hours = serializers.IntegerField(required=False, allow_null=True, min_value=1)
+    turnaround_mode = serializers.ChoiceField(choices=["standard", "rush"], required=False, default="standard")
     custom_title = serializers.CharField(required=False, allow_blank=True, default="")
     custom_brief = serializers.CharField(required=False, allow_blank=True, default="")
     fixed_shop_slug = serializers.CharField(required=False, allow_blank=True, default="")
@@ -48,7 +57,11 @@ class PublicCalculatorPayloadSerializer(serializers.Serializer):
 
     def to_internal_value(self, data):
         if isinstance(data, dict):
-            normalized = dict(data)
+            normalized = normalize_size_payload(
+                data,
+                legacy_width_keys=("finished_width_mm",),
+                legacy_height_keys=("finished_height_mm",),
+            )
 
             legacy_path = normalized.get("mode")
             legacy_product_mode = normalized.get("pricing_mode")
@@ -57,10 +70,6 @@ class PublicCalculatorPayloadSerializer(serializers.Serializer):
             if legacy_product_mode in {"SHEET", "LARGE_FORMAT"}:
                 normalized["product_pricing_mode"] = legacy_product_mode
 
-            if "finished_width_mm" in normalized and "width_mm" not in normalized:
-                normalized["width_mm"] = normalized["finished_width_mm"]
-            if "finished_height_mm" in normalized and "height_mm" not in normalized:
-                normalized["height_mm"] = normalized["finished_height_mm"]
             if "sides" in normalized and "print_sides" not in normalized:
                 normalized["print_sides"] = normalized["sides"]
             if "color_mode" in normalized and "colour_mode" not in normalized:
@@ -82,6 +91,7 @@ class PublicCalculatorPayloadSerializer(serializers.Serializer):
 
     def validate(self, attrs):
         attrs = super().validate(attrs)
+        attrs = validate_size_selection(attrs)
 
         if attrs["pricing_mode"] == "catalog" and not attrs.get("product_id"):
             raise serializers.ValidationError({"product_id": ["product_id is required for catalog previews."]})
@@ -132,6 +142,11 @@ class PublicMatchShopSerializer(serializers.Serializer):
     similarity_score = serializers.FloatField(required=False)
     total = serializers.CharField(required=False, allow_null=True)
     preview = serializers.JSONField(required=False, allow_null=True)
+    turnaround_hours = serializers.IntegerField(required=False, allow_null=True)
+    estimated_working_hours = serializers.IntegerField(required=False, allow_null=True)
+    estimated_ready_at = serializers.DateTimeField(required=False, allow_null=True)
+    human_ready_text = serializers.CharField(required=False, allow_blank=True)
+    turnaround_label = serializers.CharField(required=False, allow_blank=True)
     selection = PublicPreviewSelectionSerializer(required=False)
     exact_or_estimated = serializers.BooleanField(required=False, default=False)
 

@@ -6,6 +6,8 @@ from django.test import TestCase
 from django.utils import timezone
 from rest_framework.test import APIClient
 
+from api.public_matching_serializers import PublicCalculatorPayloadSerializer
+from api.workflow_serializers import CalculatorPreviewSerializer
 from accounts.models import User, UserProfile
 from common.models import AnalyticsEvent
 from catalog.choices import PricingMode, ProductStatus
@@ -2060,6 +2062,45 @@ class CalculatorPreviewAPITestCase(TestCase):
         self.assertIn("KES", data["explanations"][3])
         self.assertIn("Printing:", data["explanations"][2])
 
+    def test_preview_accepts_standard_size_contract_for_custom_jobs(self):
+        response = self.client.post(
+            "/api/calculator/preview/",
+            {
+                "shop": self.shop.id,
+                "quantity": 100,
+                "paper": self.paper.id,
+                "machine": self.machine.id,
+                "color_mode": "COLOR",
+                "sides": "SIMPLEX",
+                "size_mode": "standard",
+                "size_label": "A5",
+                "input_unit": "cm",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+
+    def test_preview_converts_custom_unit_inputs_to_canonical_mm(self):
+        response = self.client.post(
+            "/api/calculator/preview/",
+            {
+                "shop": self.shop.id,
+                "quantity": 100,
+                "paper": self.paper.id,
+                "machine": self.machine.id,
+                "color_mode": "COLOR",
+                "sides": "SIMPLEX",
+                "size_mode": "custom",
+                "input_unit": "in",
+                "width_input": "3.5",
+                "height_input": "2.0",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+
     def test_tweaked_item_response_exposes_calculation_fields(self):
         self.owner.is_staff = True
         self.owner.save(update_fields=["is_staff"])
@@ -2188,6 +2229,109 @@ class CalculatorPreviewAPITestCase(TestCase):
             "paper_price + print_price_front + print_price_back + duplex_surcharge",
         )
         self.assertEqual(data["totals"]["total_per_sheet"], "40.00")
+
+
+class PublicCalculatorPayloadSerializerTestCase(TestCase):
+    def test_serializer_maps_standard_preset_to_canonical_mm(self):
+        serializer = PublicCalculatorPayloadSerializer(
+            data={
+                "pricing_mode": "custom",
+                "product_pricing_mode": "SHEET",
+                "quantity": 100,
+                "custom_title": "Posters",
+                "size_mode": "standard",
+                "size_label": "Letter",
+                "input_unit": "in",
+            }
+        )
+
+        self.assertTrue(serializer.is_valid(), serializer.errors)
+        self.assertEqual(serializer.validated_data["width_mm"], 216)
+        self.assertEqual(serializer.validated_data["height_mm"], 279)
+
+    def test_serializer_converts_custom_dimensions_from_centimetres(self):
+        serializer = PublicCalculatorPayloadSerializer(
+            data={
+                "pricing_mode": "custom",
+                "product_pricing_mode": "SHEET",
+                "quantity": 100,
+                "custom_title": "Flyers",
+                "size_mode": "custom",
+                "input_unit": "cm",
+                "width_input": "8.5",
+                "height_input": "5.5",
+            }
+        )
+
+        self.assertTrue(serializer.is_valid(), serializer.errors)
+        self.assertEqual(serializer.validated_data["width_mm"], 85)
+        self.assertEqual(serializer.validated_data["height_mm"], 55)
+
+
+class CalculatorPreviewSerializerTestCase(TestCase):
+    def setUp(self):
+        self.owner = User.objects.create_user(email="serializer-owner@test.com", password="pass12345", role="shop_owner")
+        self.shop = Shop.objects.create(owner=self.owner, name="Serializer Shop", slug="serializer-shop", is_active=True)
+        self.product = Product.objects.create(
+            shop=self.shop,
+            name="Serializer Product",
+            pricing_mode=PricingMode.SHEET,
+            default_finished_width_mm=90,
+            default_finished_height_mm=55,
+            is_active=True,
+        )
+        self.machine = Machine.objects.create(
+            shop=self.shop,
+            name="Serializer Press",
+            max_width_mm=320,
+            max_height_mm=450,
+            is_active=True,
+        )
+        self.paper = Paper.objects.create(
+            shop=self.shop,
+            sheet_size="SRA3",
+            gsm=300,
+            paper_type="GLOSS",
+            buying_price=Decimal("15.00"),
+            selling_price=Decimal("24.00"),
+            width_mm=320,
+            height_mm=450,
+            is_active=True,
+        )
+
+    def test_serializer_maps_standard_size_to_mm(self):
+        serializer = CalculatorPreviewSerializer(
+            data={
+                "shop": self.shop.id,
+                "quantity": 100,
+                "paper": self.paper.id,
+                "machine": self.machine.id,
+                "size_mode": "standard",
+                "size_label": "A4",
+            }
+        )
+
+        self.assertTrue(serializer.is_valid(), serializer.errors)
+        self.assertEqual(serializer.validated_data["width_mm"], 210)
+        self.assertEqual(serializer.validated_data["height_mm"], 297)
+
+    def test_serializer_converts_custom_inches_to_mm(self):
+        serializer = CalculatorPreviewSerializer(
+            data={
+                "shop": self.shop.id,
+                "quantity": 100,
+                "paper": self.paper.id,
+                "machine": self.machine.id,
+                "size_mode": "custom",
+                "input_unit": "in",
+                "width_input": "3.5",
+                "height_input": "2",
+            }
+        )
+
+        self.assertTrue(serializer.is_valid(), serializer.errors)
+        self.assertEqual(serializer.validated_data["width_mm"], 89)
+        self.assertEqual(serializer.validated_data["height_mm"], 51)
 
 
 class ShopDashboardSummaryAPITestCase(TestCase):
