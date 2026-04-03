@@ -125,7 +125,7 @@ class FinishingRateAdmin(admin.ModelAdmin):
 
 @admin.register(Material)
 class MaterialAdmin(admin.ModelAdmin):
-    list_display = ["material_type", "shop", "production_size", "unit", "selling_price", "is_active"]
+    list_display = ["material_type", "shop", "production_size", "unit", "selling_price", "print_price_per_sqm", "is_active"]
     list_filter = ["is_active"]
     search_fields = ["material_type"]
     autocomplete_fields = ["production_size"]

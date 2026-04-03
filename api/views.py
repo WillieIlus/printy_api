@@ -2192,6 +2192,7 @@ class ShopCustomOptionsView(APIView):
                     "material_type": m.material_type,
                     "unit": m.unit,
                     "selling_price": str(m.selling_price),
+                    "print_price_per_sqm": str(m.print_price_per_sqm),
                 }
                 for m in materials
             ],

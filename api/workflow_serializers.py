@@ -3,7 +3,7 @@ from decimal import Decimal
 
 from catalog.models import Product
 from inventory.models import Machine, Paper
-from pricing.models import FinishingRate
+from pricing.models import FinishingRate, Material
 from api.size_utils import normalize_size_payload, validate_size_selection
 from quotes.choices import QuoteDraftStatus, QuoteStatus, ShopQuoteStatus
 from quotes.models import QuoteDraft, QuoteRequest, ShopQuote
@@ -132,6 +132,64 @@ class BookletCalculatorPreviewSerializer(serializers.Serializer):
             errors["cover_lamination_finishing_rate"] = ["Lamination rate must belong to the selected shop."]
         if attrs.get("binding_finishing_rate") and attrs["binding_finishing_rate"].shop_id != shop.id:
             errors["binding_finishing_rate"] = ["Binding rate must belong to the selected shop."]
+        if errors:
+            raise serializers.ValidationError(errors)
+        return attrs
+
+
+class LargeFormatCalculatorPreviewSerializer(serializers.Serializer):
+    shop = serializers.PrimaryKeyRelatedField(queryset=Shop.objects.all())
+    product_subtype = serializers.ChoiceField(
+        choices=["banner", "sticker", "roll_up_banner", "poster", "mounted_board"],
+        default="banner",
+    )
+    quantity = serializers.IntegerField(min_value=1)
+    material = serializers.PrimaryKeyRelatedField(queryset=Material.objects.filter(is_active=True))
+    finishings = FinishingSelectionSerializer(many=True, required=False)
+    hardware_finishing_rate = serializers.PrimaryKeyRelatedField(
+        queryset=FinishingRate.objects.filter(is_active=True),
+        required=False,
+        allow_null=True,
+    )
+    turnaround_hours = serializers.IntegerField(required=False, allow_null=True, min_value=1)
+    size_mode = serializers.ChoiceField(choices=["standard", "custom"], required=False, default="custom")
+    size_label = serializers.CharField(required=False, allow_blank=True, default="")
+    input_unit = serializers.ChoiceField(choices=["mm", "cm", "in"], required=False, default="mm")
+    width_input = serializers.DecimalField(required=False, allow_null=True, max_digits=10, decimal_places=3, min_value=Decimal("0.001"))
+    height_input = serializers.DecimalField(required=False, allow_null=True, max_digits=10, decimal_places=3, min_value=Decimal("0.001"))
+    width_mm = serializers.IntegerField(required=False, allow_null=True, min_value=1)
+    height_mm = serializers.IntegerField(required=False, allow_null=True, min_value=1)
+
+    def to_internal_value(self, data):
+        normalized = normalize_size_payload(
+            data,
+            legacy_width_keys=("chosen_width_mm",),
+            legacy_height_keys=("chosen_height_mm",),
+        )
+        return super().to_internal_value(normalized)
+
+    def validate(self, attrs):
+        attrs = validate_size_selection(attrs)
+        shop = attrs["shop"]
+        errors = {}
+        if not attrs.get("width_mm") or not attrs.get("height_mm"):
+            errors["non_field_errors"] = ["width_mm and height_mm are required for large-format previews."]
+        if attrs["material"].shop_id != shop.id:
+            errors["material"] = ["Material must belong to the selected shop."]
+
+        finishing_errors = []
+        for selection in attrs.get("finishings") or []:
+            if selection["finishing_rate"].shop_id != shop.id:
+                finishing_errors.append({"finishing_rate": ["Finishing rate must belong to the selected shop."]})
+            else:
+                finishing_errors.append({})
+        if any(item for item in finishing_errors):
+            errors["finishings"] = finishing_errors
+
+        hardware_rate = attrs.get("hardware_finishing_rate")
+        if hardware_rate and hardware_rate.shop_id != shop.id:
+            errors["hardware_finishing_rate"] = ["Hardware finishing rate must belong to the selected shop."]
+
         if errors:
             raise serializers.ValidationError(errors)
         return attrs

@@ -16,6 +16,7 @@ from quotes.services_workflow import (
 )
 from services.pricing.quote_builder import build_quote_preview
 from services.pricing.booklet_builder import build_booklet_preview
+from services.pricing.large_format_builder import build_large_format_preview
 from setup.services import get_setup_status_for_shop, get_setup_status_for_user
 from shops.models import Shop
 from shops.services import can_manage_quotes, can_manage_shop
@@ -24,6 +25,7 @@ from .workflow_serializers import (
     CalculatorPreviewSerializer,
     BookletCalculatorPreviewSerializer,
     DashboardQuoteRequestSummarySerializer,
+    LargeFormatCalculatorPreviewSerializer,
     QuoteDraftCreateSerializer,
     QuoteDraftReadSerializer,
     QuoteDraftSendSerializer,
@@ -98,6 +100,27 @@ class BookletCalculatorPreviewView(APIView):
             cover_lamination_mode=validated["cover_lamination_mode"],
             cover_lamination_finishing_rate=validated.get("cover_lamination_finishing_rate"),
             binding_finishing_rate=validated.get("binding_finishing_rate"),
+            turnaround_hours=validated.get("turnaround_hours"),
+        )
+        return Response(pricing)
+
+
+class LargeFormatCalculatorPreviewView(APIView):
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        serializer = LargeFormatCalculatorPreviewSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        validated = serializer.validated_data
+        pricing = build_large_format_preview(
+            shop=validated["shop"],
+            product_subtype=validated["product_subtype"],
+            quantity=validated["quantity"],
+            width_mm=validated["width_mm"],
+            height_mm=validated["height_mm"],
+            material=validated["material"],
+            finishing_selections=validated.get("finishings") or [],
+            hardware_finishing_rate=validated.get("hardware_finishing_rate"),
             turnaround_hours=validated.get("turnaround_hours"),
         )
         return Response(pricing)

@@ -72,6 +72,7 @@ urlpatterns = [
     path("shops/<slug:shop_slug>/setup-status/", workflow_views.ShopSetupStatusCompatView.as_view(), name="shop-setup-status-compat"),
     path("calculator/preview/", workflow_views.CalculatorPreviewView.as_view(), name="calculator-preview"),
     path("calculator/booklet-preview/", workflow_views.BookletCalculatorPreviewView.as_view(), name="calculator-booklet-preview"),
+    path("calculator/large-format-preview/", workflow_views.LargeFormatCalculatorPreviewView.as_view(), name="calculator-large-format-preview"),
     path("calculator/drafts/", workflow_views.QuoteDraftListCreateView.as_view(), name="calculator-drafts"),
     path("calculator/drafts/<int:pk>/", workflow_views.QuoteDraftDetailView.as_view(), name="calculator-draft-detail"),
     path("calculator/drafts/<int:pk>/send/", workflow_views.QuoteDraftSendView.as_view(), name="calculator-draft-send"),

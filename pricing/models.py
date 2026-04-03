@@ -525,6 +525,13 @@ class Material(TimeStampedModel):
         verbose_name=_("selling price"),
         help_text=_("Selling price per unit."),
     )
+    print_price_per_sqm = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        default=Decimal("0.00"),
+        verbose_name=_("print price per sqm"),
+        help_text=_("Optional area-based print charge per square meter for large-format work."),
+    )
     is_active = models.BooleanField(
         default=True,
         verbose_name=_("is active"),

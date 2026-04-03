@@ -12,7 +12,7 @@ from accounts.models import User, UserProfile
 from common.models import AnalyticsEvent
 from catalog.choices import PricingMode, ProductStatus
 from catalog.models import Product, ProductCategory
-from inventory.models import Machine, Paper
+from inventory.models import Machine, Paper, ProductionPaperSize
 from locations.models import Location
 from notifications.models import Notification
 from pricing.choices import ChargeUnit, FinishingBillingBasis, FinishingSideMode, Sides
@@ -2310,6 +2310,93 @@ class CalculatorPreviewAPITestCase(TestCase):
         data = response.json()
         self.assertTrue(data["warnings"])
         self.assertEqual(data["breakdown"]["booklet"]["normalized_pages"], 12)
+
+    def test_large_format_preview_returns_area_printing_and_hardware_breakdown(self):
+        roll = ProductionPaperSize.objects.create(name="1.2m Roll", code="ROLL1200", width_mm=1200, height_mm=1)
+        material = Material.objects.create(
+            shop=self.shop,
+            production_size=roll,
+            material_type="Banner",
+            unit="SQM",
+            buying_price=Decimal("180.00"),
+            selling_price=Decimal("380.00"),
+            print_price_per_sqm=Decimal("120.00"),
+            is_active=True,
+        )
+        eyelets = FinishingRate.objects.create(
+            shop=self.shop,
+            name="Eyelets",
+            slug="eyelets",
+            charge_unit=ChargeUnit.PER_PIECE,
+            billing_basis=FinishingBillingBasis.PER_PIECE,
+            side_mode=FinishingSideMode.IGNORE_SIDES,
+            price=Decimal("15.00"),
+            is_active=True,
+        )
+        stand = FinishingRate.objects.create(
+            shop=self.shop,
+            name="Roll-up Stand",
+            slug="roll-up-stand",
+            charge_unit=ChargeUnit.PER_PIECE,
+            billing_basis=FinishingBillingBasis.PER_PIECE,
+            side_mode=FinishingSideMode.IGNORE_SIDES,
+            price=Decimal("850.00"),
+            is_active=True,
+        )
+        response = self.client.post(
+            "/api/calculator/large-format-preview/",
+            {
+                "shop": self.shop.id,
+                "product_subtype": "roll_up_banner",
+                "quantity": 2,
+                "material": material.id,
+                "width_mm": 850,
+                "height_mm": 2000,
+                "finishings": [{"finishing_rate": eyelets.id, "selected_side": "both"}],
+                "hardware_finishing_rate": stand.id,
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(data["quote_type"], "large_format")
+        self.assertEqual(data["calculation_result"]["quote_type"], "large_format")
+        self.assertEqual(data["breakdown"]["material"]["rate_per_sqm"], "380.00")
+        self.assertEqual(data["breakdown"]["printing"]["rate_per_sqm"], "120.00")
+        self.assertEqual(data["breakdown"]["hardware"]["name"], "Roll-up Stand")
+        self.assertEqual(data["breakdown"]["dimensions"]["area_sqm"], "3.4000")
+
+    def test_large_format_preview_warns_when_roll_job_tiles(self):
+        roll = ProductionPaperSize.objects.create(name="90cm Roll", code="ROLL900", width_mm=900, height_mm=1)
+        material = Material.objects.create(
+            shop=self.shop,
+            production_size=roll,
+            material_type="Vinyl",
+            unit="SQM",
+            buying_price=Decimal("220.00"),
+            selling_price=Decimal("450.00"),
+            print_price_per_sqm=Decimal("150.00"),
+            is_active=True,
+        )
+        response = self.client.post(
+            "/api/calculator/large-format-preview/",
+            {
+                "shop": self.shop.id,
+                "product_subtype": "banner",
+                "quantity": 1,
+                "material": material.id,
+                "width_mm": 1500,
+                "height_mm": 5000,
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertTrue(data["warnings"])
+        self.assertEqual(data["tiles_x"], 2)
+        self.assertEqual(data["tiles_y"], 3)
 
 
 class PublicCalculatorPayloadSerializerTestCase(TestCase):
