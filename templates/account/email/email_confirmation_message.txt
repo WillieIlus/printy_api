@@ -1,0 +1,13 @@
+{% load i18n %}{% autoescape off %}Hello from Printy!
+
+{% blocktranslate with user_display=user_display %}Hi {{ user_display }},{% endblocktranslate %}
+
+{% blocktranslate %}Please confirm your email address by clicking the link below:{% endblocktranslate %}
+
+{{ activate_url }}
+
+{% blocktranslate %}This link expires in a few days. If you did not sign up for Printy, you can safely ignore this email.{% endblocktranslate %}
+
+- The Printy Team
+hello.printyke@gmail.com
+{% endautoescape %}

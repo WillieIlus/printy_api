@@ -1,0 +1,75 @@
+
+You are working on the Printy project.
+
+NON-NEGOTIABLE RULES
+- First inspect the existing codebase before making changes.
+- Do not invent parallel systems if one already exists.
+- Reuse and extend the current architecture wherever possible.
+- Do not break existing flat calculators, quote draft flows, pricing flows, shop flows, or public calculators.
+- The backend is the single source of truth for pricing, imposition, finishing, turnaround, and quote totals.
+- Frontend must never become the source of truth for pricing or calculation rules.
+- Keep all pricing logic centralized in backend services, not duplicated across views/serializers/components.
+- Reuse current billing type logic, imposition services, finishing services, pricing services, and quote draft logic where possible.
+- If calculation logic currently exists in more than one place, consolidate toward one backend source of truth instead of adding more duplication.
+- Preserve backwards compatibility where practical.
+- Add safe defaults for older records so existing data does not crash.
+- Frontend uses yarn only.
+- Every Vue/Nuxt component/page/composable changed must use <script setup>.
+- Keep UI changes consistent with the current Printy design language.
+- Do not remove working features.
+- Make incremental changes that can be tested and committed safely.
+
+IMPLEMENTATION DISCIPLINE
+- Before coding, inspect the relevant backend and frontend files.
+- Explain the existing architecture briefly before changing it.
+- Prefer small focused commits.
+- Run migrations only when model changes are actually needed.
+- Run checks/build/tests after each task.
+- If a better architecture choice exists than the one implied in this prompt, choose it, but explain why and keep compatibility.
+
+DELIVERY FORMAT
+At the end of each task provide:
+1. What you inspected
+2. Architecture decision made
+3. Files changed
+4. Migrations created, if any
+5. Commands run
+6. Risks / follow-up notes
+7. Commit hash after commit and push
+
+
+[PASTE THE SHARED CONTEXT BLOCK ABOVE FIRST]
+
+Task:
+Perform a regression and integration hardening pass across the expanded Printy calculator and quote system.
+
+Scope:
+- flat calculator still default everywhere
+- size presets and unit switching
+- duplex surcharge pricing
+- turnaround in working hours
+- booklet calculator
+- large-format calculator
+- quote builder
+- customer workspace vs shop dashboard
+
+Goals:
+- verify nothing broke across old and new flows
+- reduce duplication
+- ensure backend remains the single source of truth
+- remove accidental inconsistencies introduced during incremental implementation
+
+Requirements:
+1. Audit all calculator entry points and quote-related flows.
+2. Ensure all totals shown in frontend come from backend-calculated results.
+3. Ensure old payloads and older records do not crash due to missing fields.
+4. Ensure each calculator type returns a normalized result contract.
+5. Ensure quote-builder supports item editing and total updates safely.
+6. Ensure role-based account/dashboard navigation is coherent.
+7. Ensure all changed Vue/Nuxt files use <script setup>.
+8. Ensure frontend uses yarn.
+9. Run builds/checks/tests where available.
+10. Fix small integration issues, naming mismatches, stale assumptions, and duplicated helpers.
+
+Suggested commit message:
+chore(integration): harden calculator, quote, and account flows after incremental rollout
