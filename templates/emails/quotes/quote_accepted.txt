@@ -1,0 +1,13 @@
+{{ subject }}
+
+{{ greeting }}
+{{ intro }}
+
+Client: {{ client_name }}
+Job: {{ summary_rows.1.value }}
+Accepted quote: {{ summary_rows.2.value }}
+Turnaround: {{ summary_rows.3.value }}
+Next step: {{ summary_rows.4.value }}
+
+{{ support_copy }}
+{{ cta_label }}: {{ cta_url }}
