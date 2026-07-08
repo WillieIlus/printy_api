@@ -52,17 +52,17 @@ class ShopAsManagerAccessTestCase(TestCase):
             broker=self.shop_owner,
             suffix="direct",
             client_total=Decimal("1500.00"),
-            printy_fee=Decimal("200.00"),
-            broker_payout=Decimal("300.00"),
-            shop_payout=Decimal("1000.00"),
+            printy_fee=Decimal("225.00"),
+            broker_payout=Decimal("225.00"),
+            shop_payout=Decimal("1050.00"),
         )
         self.shop_only_job = self._managed_job(
             broker=self.other_broker,
             suffix="shop-only",
             client_total=Decimal("1400.00"),
-            printy_fee=Decimal("200.00"),
-            broker_payout=Decimal("200.00"),
-            shop_payout=Decimal("1000.00"),
+            printy_fee=Decimal("170.00"),
+            broker_payout=Decimal("180.00"),
+            shop_payout=Decimal("1050.00"),
         )
 
     def _managed_job(
@@ -172,9 +172,9 @@ class ShopAsManagerAccessTestCase(TestCase):
 
         self.assertEqual(direct_response.status_code, 200)
         self.assertEqual(shop_only_response.status_code, 200)
-        self.assertEqual(direct_response.json()["broker_payout"], "300.00")
-        self.assertEqual(direct_response.json()["printy_fee"], "200.00")
-        self.assertEqual(shop_only_response.json()["shop_payout"], "1000.00")
+        self.assertEqual(direct_response.json()["broker_payout"], "225.00")
+        self.assertEqual(direct_response.json()["printy_fee"], "225.00")
+        self.assertEqual(shop_only_response.json()["shop_payout"], "1050.00")
         self.assertNotIn("broker_payout", shop_only_response.json())
 
     def test_broker_of_record_arithmetic_matches_margin_after_printy_fee(self):

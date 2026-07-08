@@ -66,19 +66,19 @@ class CanonicalPaymentFlowTestCase(TestCase):
             production_option=self.production_option,
             created_by=self.broker,
             status=QuoteOfferStatus.SENT,
-            total=Decimal("4000.00"),
+            total=Decimal("1750.00"),
             sent_at=timezone.now(),
             expires_at=timezone.now() + timedelta(days=7),
         )
         self.split = create_quote_financial_split(
             quote=self.quote,
             production_cost=Decimal("1000.00"),
-            broker_client_price=Decimal("4000.00"),
+            broker_client_price=Decimal("1750.00"),
             production_option=self.production_option,
             policy=self.policy,
         )
 
-    def _success_callback(self, stk, amount="4000.00", receipt="QGH7XXX"):
+    def _success_callback(self, stk, amount="1750.00", receipt="QGH7XXX"):
         return {
             "Body": {
                 "stkCallback": {
@@ -134,7 +134,7 @@ class CanonicalPaymentFlowTestCase(TestCase):
             production_option=self.production_option,
             created_by=self.broker,
             status=QuoteOfferStatus.SENT,
-            total=Decimal("4000.00"),
+            total=Decimal("1750.00"),
             sent_at=timezone.now(),
             expires_at=timezone.now() + timedelta(days=7),
         )
@@ -346,7 +346,7 @@ class CanonicalPaymentFlowTestCase(TestCase):
         MockClient.assert_called_once_with()
         mock_instance.initiate_stk_push.assert_called_once_with(
             phone_number="+254700000000",
-            amount=4000,
+            amount=1750,
             account_reference=payment.account_reference,
             transaction_desc="Printy payment",
         )
@@ -541,7 +541,7 @@ class CanonicalPaymentFlowTestCase(TestCase):
         self.assertNotIn("released", payload["message"].lower())
         self.assertNotIn("shop_payout", payload)
         self.assertNotIn("expected_production_payout", payload)
-        self.assertNotIn("printy_fee", payload)
+        self.assertEqual(payload["printy_fee"], str(self.split.printy_fee))
         self.assertNotIn("production_cost", payload)
 
     def test_shop_settlement_shows_expected_production_payout_only(self):

@@ -54,9 +54,34 @@ class PlatformFeePolicy(models.Model):
     """Central platform fee and markup cap policy."""
 
     name = models.CharField(max_length=120, default="Default Printy Fee Policy")
+    policy_version = models.CharField(max_length=40, default="printy-fees-v1")
+    currency = models.CharField(max_length=3, default="KES")
     is_active = models.BooleanField(default=True)
-    printer_fee_rate = models.DecimalField(max_digits=5, decimal_places=4, default=Decimal("0.0000"))
-    broker_margin_fee_rate = models.DecimalField(max_digits=5, decimal_places=4, default=Decimal("0.0000"))
+    under_production_threshold = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal("1000.00"))
+    under_production_fee_rate = models.DecimalField(max_digits=5, decimal_places=4, default=Decimal("0.3000"))
+    standard_production_fee_rate = models.DecimalField(max_digits=5, decimal_places=4, default=Decimal("0.2000"))
+    standard_markup_fee_rate = models.DecimalField(max_digits=5, decimal_places=4, default=Decimal("0.2000"))
+    high_markup_threshold = models.DecimalField(max_digits=5, decimal_places=4, default=Decimal("0.8000"))
+    high_markup_fee_rate = models.DecimalField(max_digits=5, decimal_places=4, default=Decimal("0.3000"))
+    high_production_threshold = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal("10000.00"))
+    high_production_fee_rate = models.DecimalField(max_digits=5, decimal_places=4, default=Decimal("0.3000"))
+    high_production_markup_fee_rate = models.DecimalField(max_digits=5, decimal_places=4, default=Decimal("0.4000"))
+    maximum_manager_markup_multiple = models.DecimalField(max_digits=5, decimal_places=2, default=Decimal("2.00"))
+    effective_from = models.DateTimeField(null=True, blank=True)
+    printer_fee_rate = models.DecimalField(
+        max_digits=5,
+        decimal_places=4,
+        default=Decimal("0.2000"),
+        editable=False,
+        help_text=_("DEPRECATED historical field. Active quote pricing must not read this value."),
+    )
+    broker_margin_fee_rate = models.DecimalField(
+        max_digits=5,
+        decimal_places=4,
+        default=Decimal("0.2000"),
+        editable=False,
+        help_text=_("DEPRECATED historical field. Active quote pricing must not read this value."),
+    )
     small_job_limit = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal("2000.00"))
     medium_job_limit = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal("10000.00"))
     small_job_max_multiple = models.DecimalField(max_digits=5, decimal_places=2, default=Decimal("4.00"))
@@ -70,6 +95,13 @@ class PlatformFeePolicy(models.Model):
         ordering = ["-updated_at", "-created_at"]
         verbose_name = _("platform fee policy")
         verbose_name_plural = _("platform fee policies")
+        constraints = [
+            models.UniqueConstraint(
+                fields=["is_active"],
+                condition=models.Q(is_active=True),
+                name="unique_active_platform_fee_policy",
+            ),
+        ]
 
     def __str__(self):
         return self.name
@@ -77,30 +109,37 @@ class PlatformFeePolicy(models.Model):
     def clean(self):
         super().clean()
         errors = {}
-        for field in ("printer_fee_rate", "broker_margin_fee_rate"):
+        positive_money_fields = ("under_production_threshold", "high_production_threshold")
+        for field in positive_money_fields:
+            if getattr(self, field) <= 0:
+                errors[field] = _("Threshold must be greater than zero.")
+        if self.high_production_threshold <= self.under_production_threshold:
+            errors["high_production_threshold"] = _("High production threshold must be greater than the small-production threshold.")
+        non_negative_rate_fields = (
+            "under_production_fee_rate",
+            "standard_production_fee_rate",
+            "standard_markup_fee_rate",
+            "high_markup_threshold",
+            "high_markup_fee_rate",
+            "high_production_fee_rate",
+            "high_production_markup_fee_rate",
+        )
+        for field in non_negative_rate_fields:
             if getattr(self, field) < 0:
                 errors[field] = _("Rate cannot be negative.")
-        if self.small_job_limit <= 0:
-            errors["small_job_limit"] = _("Small job limit must be greater than zero.")
-        if self.medium_job_limit <= self.small_job_limit:
-            errors["medium_job_limit"] = _("Medium job limit must be greater than the small job limit.")
-        for field in ("small_job_max_multiple", "medium_job_max_multiple", "bulk_job_max_multiple"):
-            if getattr(self, field) < 1:
-                errors[field] = _("Maximum markup multiple must be at least 1.")
+        if self.high_markup_threshold <= 0:
+            errors["high_markup_threshold"] = _("Markup threshold must be greater than zero.")
+        if self.maximum_manager_markup_multiple < 1:
+            errors["maximum_manager_markup_multiple"] = _("Maximum manager markup multiple must be at least 1.")
         if errors:
             raise ValidationError(errors)
 
     def get_max_markup_multiple(self, production_cost):
-        production_cost = Decimal(str(production_cost))
-        if production_cost < self.small_job_limit:
-            return self.small_job_max_multiple
-        if production_cost < self.medium_job_limit:
-            return self.medium_job_max_multiple
-        return self.bulk_job_max_multiple
+        return self.maximum_manager_markup_multiple
 
     def get_max_client_price(self, production_cost):
         production_cost = Decimal(str(production_cost))
-        return production_cost * self.get_max_markup_multiple(production_cost)
+        return production_cost + (production_cost * self.get_max_markup_multiple(production_cost))
 
 
 class WastePolicy(models.Model):

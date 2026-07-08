@@ -147,16 +147,16 @@ class Step9BackendWorkflowTestCase(TestCase):
         )
 
         self.assertEqual(split["printer_side_fee"], Decimal("50.00"))
-        self.assertEqual(split["broker_margin_fee"], Decimal("75.00"))
-        self.assertEqual(split["printy_fee"], Decimal("125.00"))
-        self.assertEqual(split["shop_payout"], Decimal("1000.00"))
-        self.assertEqual(split["broker_payout"], Decimal("375.00"))
+        self.assertEqual(split["broker_margin_fee"], Decimal("225.00"))
+        self.assertEqual(split["printy_fee"], Decimal("225.00"))
+        self.assertEqual(split["shop_payout"], Decimal("1050.00"))
+        self.assertEqual(split["broker_payout"], Decimal("225.00"))
         self.assertEqual(split["client_total"], Decimal("1500.00"))
 
         with self.assertRaises(ValidationError):
             calculate_financial_split(
                 production_cost=Decimal("1000.00"),
-                broker_client_price=Decimal("5000.00"),
+                broker_client_price=Decimal("2500.01"),
                 policy=self.policy,
             )
 
@@ -165,9 +165,9 @@ class Step9BackendWorkflowTestCase(TestCase):
 
         self.assertEqual(split.policy_used, self.policy)
         self.assertEqual(split.production_option, self.production_option)
-        self.assertEqual(split.max_allowed_client_price, Decimal("4000.00"))
+        self.assertEqual(split.max_allowed_client_price, Decimal("2500.00"))
         self.assertEqual(QuoteFinancialSplitClientSerializer(split).data, {})
-        self.assertEqual(set(QuoteFinancialSplitShopSerializer(split).data.keys()), {"id", "shop_payout"})
+        self.assertEqual(set(QuoteFinancialSplitShopSerializer(split).data.keys()), {"id", "production_cost", "shop_payout", "currency"})
 
         broker_payload = QuoteFinancialSplitBrokerSerializer(split).data
         for key in ("production_cost", "printy_fee", "shop_payout", "broker_payout", "client_total"):
@@ -488,7 +488,7 @@ class Step9BackendWorkflowTestCase(TestCase):
             broker_client_price=Decimal("1500.00"),
             policy=self.policy,
         )
-        self.assertEqual(split.shop_payout, Decimal("1000.00"))
+        self.assertEqual(split.shop_payout, Decimal("1050.00"))
         self.assertEqual(split.client_total, Decimal("1500.00"))
 
         accepted_quote, payment = accept_quote_for_payment(quote=quote, accepted_by=signed_up_client)
@@ -530,7 +530,7 @@ class Step9BackendWorkflowTestCase(TestCase):
         self.assertEqual(assignments_response.status_code, 200)
         assignment_payload = assignments_response.json()[0]
         self.assertEqual(assignment_payload["id"], assignment.id)
-        self.assertEqual(assignment_payload["payout_amount"], "1000.00")
+        self.assertEqual(assignment_payload["payout_amount"], "1050.00")
         self.assertNotIn("broker_payout", assignment_payload)
         self.assertNotIn("printy_fee", assignment_payload)
         self.assertNotIn("client_total", assignment_payload)
@@ -597,7 +597,7 @@ class Step9BackendWorkflowTestCase(TestCase):
         shop_response = api_client.get(reverse("shop-assignments"))
         self.assertEqual(shop_response.status_code, 200)
         shop_payload = shop_response.json()[0]
-        self.assertEqual(shop_payload["payout_amount"], "1000.00")
+        self.assertEqual(shop_payload["payout_amount"], "1050.00")
         for key in ("client_total", "broker_margin", "printy_fee"):
             self.assertNotIn(key, shop_payload)
 

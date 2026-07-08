@@ -4,6 +4,8 @@ from django.test import TestCase
 from rest_framework.test import APIClient
 
 from accounts.models import User
+from catalog.choices import ProductStatus
+from catalog.models import Product
 from inventory.choices import MachineType, PaperCategory, PaperType, SheetSize
 from inventory.models import Machine, Paper
 from pricing.choices import ColorMode
@@ -295,3 +297,45 @@ class PricingSetupMigrationTests(TestCase):
         self.assertEqual(response.status_code, 200)
         for forbidden in ("production_cost", "shop_payout", "broker_payout", "printy_fee", "gross_margin", "pricing_snapshot"):
             self.assertNotIn(forbidden, payload_text)
+
+    def test_public_products_endpoint_returns_global_catalog_products_without_private_fields(self):
+        public_product = Product.objects.create(
+            name="Public Business Cards",
+            description="Public catalog product",
+            status=ProductStatus.PUBLISHED,
+            is_active=True,
+            is_public=True,
+            default_finished_width_mm=90,
+            default_finished_height_mm=55,
+            min_quantity=100,
+        )
+        Product.objects.create(
+            name="Draft Business Cards",
+            status=ProductStatus.DRAFT,
+            is_active=True,
+            is_public=True,
+        )
+        Product.objects.create(
+            name="Private Business Cards",
+            status=ProductStatus.PUBLISHED,
+            is_active=True,
+            is_public=False,
+        )
+
+        response = self.client.get("/api/public/products/")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        rows = payload["products"]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["id"], public_product.id)
+        for forbidden in (
+            "shop",
+            "production_cost",
+            "shop_payout",
+            "broker_payout",
+            "printy_fee",
+            "gross_margin",
+            "pricing_snapshot",
+        ):
+            self.assertNotIn(forbidden, rows[0])

@@ -140,13 +140,13 @@ class AdminPaymentConfirmationRegressionTestCase(TestCase):
             production_option=self.production_option,
             created_by=self.manager,
             status=QuoteOfferStatus.SENT,
-            total=Decimal("4000.00"),
+            total=Decimal("2500.00"),
             sent_at=timezone.now(),
         )
         create_quote_financial_split(
             quote=self.quote,
             production_cost=Decimal("1000.00"),
-            broker_client_price=Decimal("4000.00"),
+            broker_client_price=Decimal("2500.00"),
             production_option=self.production_option,
             policy=self.policy,
         )

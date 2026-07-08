@@ -352,14 +352,14 @@ class ShopRateCardForCalculatorView(APIView):
 
 
 class PublicAllProductsView(APIView):
-    """GET /api/public/products/ — active public products from active public shops."""
+    """GET /api/public/products/ — active public catalog products."""
 
     permission_classes = [AllowAny]
 
     def get(self, request):
         products = (
             public_products_queryset()
-            .select_related("shop", "category")
+            .select_related("category")
             .prefetch_related(
                 "finishing_options__finishing_rate",
                 "images",
@@ -1965,7 +1965,7 @@ class GalleryProductDetailView(APIView):
 
     def get(self, request, pk):
         product = get_object_or_404(
-            public_products_queryset().select_related("shop")
+            public_products_queryset().select_related("category")
                 .prefetch_related("finishing_options__finishing_rate", "images"),
             pk=pk,
         )

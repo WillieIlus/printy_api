@@ -213,7 +213,7 @@ class WastagePricingTestCase(TestCase):
         option = ProductionOption.objects.create(
             quote_request=quote_request,
             shop=shop,
-            production_cost=Decimal("480.33"),
+            production_cost=Decimal("4724.33"),
             created_by=user,
         )
         quote = Quote.objects.create(
@@ -222,14 +222,14 @@ class WastagePricingTestCase(TestCase):
             production_option=option,
             created_by=user,
             status=QuoteOfferStatus.SENT,
-            total=Decimal("2881.98"),
+            total=Decimal("9448.66"),
         )
         pricing = calculate_penalized_financial_split(
             {
-                "quantity": 1,
-                "yield_per_sheet": 1,
-                "paper_cost_per_sheet": Decimal("18.00"),
-                "click_charge_per_sheet": Decimal("25.00"),
+                "quantity": 1000,
+                "yield_per_sheet": 18,
+                "paper_cost_per_sheet": Decimal("24.00"),
+                "click_charge_per_sheet": Decimal("45.00"),
                 "finishing_cost": Decimal("50.00"),
             },
             waste_policy=self.waste_policy,
@@ -243,11 +243,11 @@ class WastagePricingTestCase(TestCase):
             broker_client_price=pricing["final_client_price"],
             policy=self.platform_policy,
         )
-        self.assertEqual(split.production_cost, Decimal("480.33"))
-        self.assertEqual(split.broker_client_price, Decimal("2881.98"))
-        self.assertEqual(split.client_total, Decimal("2881.98"))
-        self.assertEqual(split.shop_payout, Decimal("480.33"))
-        self.assertEqual(split.printy_fee, Decimal("384.27"))
+        self.assertEqual(split.production_cost, Decimal("4724.33"))
+        self.assertEqual(split.broker_client_price, Decimal("9448.66"))
+        self.assertEqual(split.client_total, Decimal("9448.66"))
+        self.assertEqual(split.shop_payout, Decimal("4960.55"))
+        self.assertEqual(split.printy_fee, Decimal("2362.16"))
 
     def test_payment_does_not_calculate_pricing(self):
         user = User.objects.create_user(email="payment-no-pricing@test.com", password="pass")

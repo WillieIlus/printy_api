@@ -38,13 +38,11 @@ def apply_public_product_visibility(queryset):
     """Apply the canonical backend-owned public visibility rules for products.
 
     All public product surfaces must reuse this helper rather than duplicating
-    the five guards below in views or serializers. This keeps `/api/public/products/`,
+    the guards below in views or serializers. This keeps `/api/public/products/`,
     `/api/products/gallery/`, SEO surfaces, and any future public listings from
     drifting apart.
     """
     return queryset.filter(
-        shop__is_active=True,
-        shop__is_public=True,
         is_active=True,
         is_public=True,
         status=ProductStatus.PUBLISHED,
@@ -58,8 +56,10 @@ def public_products_queryset():
       - status=PUBLISHED   (not draft or unavailable)
       - is_active=True     (not soft-deleted)
       - is_public=True     (not manually hidden)
-      - shop__is_active=True
-      - shop__is_public=True
+
+    Product is a global catalog model. Shop-specific availability and pricing
+    are evaluated through shop rate tables by matching/preview endpoints, not
+    through a direct Product.shop relation.
     """
     return apply_public_product_visibility(Product.objects.all())
 

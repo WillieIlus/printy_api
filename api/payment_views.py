@@ -157,11 +157,13 @@ def _serialize_managed_job_settlement(managed_job: ManagedJob, user) -> dict:
             getattr(managed_job, "broker_payout", None)
             or getattr(split, "broker_payout", None)
         )
+        printy_fee = getattr(managed_job, "printy_fee", None) or getattr(split, "printy_fee", None)
         return {
             **_settlement_payload(managed_job, settlement_status),
             "role": "manager",
             "expected_manager_payout": str(broker_payout) if broker_payout is not None else None,
             "broker_payout": str(broker_payout) if broker_payout is not None else None,
+            "printy_fee": str(printy_fee) if printy_fee is not None else None,
             "message": (
                 "Expected payout. This amount has been disbursed by manual Printy release."
                 if settlement_status == "paid"
