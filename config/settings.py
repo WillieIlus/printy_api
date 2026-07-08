@@ -434,7 +434,7 @@ TEMPLATES = [
 DATABASES = {
     "default": {
         "ENGINE": "django.db.backends.postgresql",
-        "NAME": _get_env("DB_NAME", default="printy_db"),
+        "NAME": _get_env("DB_NAME", default="printy_dev"),
         "USER": _get_env("DB_USER", default="printy_user"),
         "PASSWORD": _get_env("DB_PASSWORD", default=""),
         "HOST": _get_env("DB_HOST", default="127.0.0.1"),

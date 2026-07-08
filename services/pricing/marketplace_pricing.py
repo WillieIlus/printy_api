@@ -4,7 +4,7 @@ from copy import deepcopy
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from typing import Any
 
-from pricing.services.platform_fee_policy import calculate_financial_split, get_active_platform_fee_policy
+from pricing.services.platform_fee_policy import calculate_financial_split
 
 
 MONEY_QUANTIZER = Decimal("0.01")
@@ -29,9 +29,8 @@ def quantize_percent(value: Decimal) -> Decimal:
 
 
 def get_marketplace_margin_settings(shop=None) -> dict[str, Any]:
-    policy = get_active_platform_fee_policy()
-    default_gross_margin_percent = quantize_percent(policy.broker_margin_fee_rate * Decimal("100"))
-    default_printer_fee_percent = quantize_percent(policy.printer_fee_rate * Decimal("100"))
+    default_gross_margin_percent = Decimal("75.00")
+    default_printer_fee_percent = Decimal("0.00")
     return {
         "gross_margin_percent": default_gross_margin_percent,
         "printer_side_fee_percent": default_printer_fee_percent,
@@ -49,9 +48,8 @@ def calculate_client_price(
     gross_margin_percent: Any = None,
     printer_side_fee_percent: Any = None,
 ) -> dict[str, Decimal]:
-    policy = get_active_platform_fee_policy()
-    default_gross_margin_percent = quantize_percent(policy.broker_margin_fee_rate * Decimal("100"))
-    default_printer_fee_percent = quantize_percent(policy.printer_fee_rate * Decimal("100"))
+    default_gross_margin_percent = Decimal("75.00")
+    default_printer_fee_percent = Decimal("0.00")
     base_amount = quantize_money(_decimal(base_price))
     gross_margin_percent = quantize_percent(_decimal(gross_margin_percent, default_gross_margin_percent))
     printer_side_fee_percent = quantize_percent(_decimal(printer_side_fee_percent, default_printer_fee_percent))
@@ -59,7 +57,6 @@ def calculate_client_price(
     split = calculate_financial_split(
         production_cost=base_amount,
         broker_client_price=base_amount + gross_margin,
-        policy=policy,
     )
     multiplier = quantize_percent(split["applied_markup_multiple"])
     return {

@@ -12,4 +12,4 @@ class Command(BaseCommand):
         action = "Created" if created else "Updated"
         self.stdout.write(self.style.SUCCESS(f"{action} Printy manager user #{user.id} ({user.email})."))
         self.stdout.write(f"PRINTY_MANAGER_USER_ID={user.id}")
-        self.stdout.write(f"policy_broker_margin_fee_rate={get_active_platform_fee_policy().broker_margin_fee_rate}")
+        self.stdout.write(f"policy_maximum_manager_markup_multiple={get_active_platform_fee_policy().maximum_manager_markup_multiple}")

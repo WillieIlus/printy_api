@@ -14,7 +14,6 @@ from rest_framework.exceptions import PermissionDenied
 from inventory.models import Machine, Paper
 from notifications.models import Notification
 from notifications.services import notify_quote_event
-from pricing.services.platform_fee_policy import get_active_platform_fee_policy
 from api.visibility import (
     CLIENT_ACTOR,
     TOPOLOGY_MANAGED,
@@ -121,7 +120,7 @@ def _build_assignment_snapshot(*, assigned_manager: User | None, merged_request_
         snapshot.update(
             {
                 "is_printy_fallback": True,
-                "default_markup_rate": str(get_active_platform_fee_policy().broker_margin_fee_rate),
+                "default_markup_rate": "0.75",
                 "escalation_status": snapshot["escalation_status"] or "printy_handled",
                 "support_email": "support@printy.ke",
             }

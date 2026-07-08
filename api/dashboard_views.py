@@ -36,7 +36,7 @@ from notifications.models import Notification
 from notifications.services import notify_quote_event
 from jobs.file_services import managed_job_artwork_state, managed_job_has_artwork, notify_missing_artwork
 from pricing.models import FinishingRate, PrintingRate
-from pricing.services.platform_fee_policy import calculate_financial_split, create_quote_financial_split, get_active_platform_fee_policy
+from pricing.services.platform_fee_policy import calculate_financial_split, create_quote_financial_split
 from pricing.services.production_cost_calculator import calculate_client_price_with_waste_setup_and_quantity_tier
 from jobs.settlement_compat import get_financial_split_for_job
 from payments.models import Payment
@@ -378,7 +378,7 @@ class PartnerDashboardProfileView(BaseDashboardHomeView):
     def _get_profile(self, user):
         profile, _ = UserProfile.objects.get_or_create(
             user=user,
-            defaults={"default_markup_rate": get_active_platform_fee_policy().broker_margin_fee_rate},
+            defaults={"default_markup_rate": Decimal("0.75")},
         )
         return profile
 
@@ -990,7 +990,7 @@ class PartnerQuoteSendToClientView(ManagerCapablePartnerQuoteView):
             }
         else:
             gross_margin_type = str(request.data.get("broker_margin_type") or "percent").strip().lower()
-            default_broker_percent = (get_active_platform_fee_policy().broker_margin_fee_rate * Decimal("100")).quantize(Decimal("0.01"))
+            default_broker_percent = Decimal("75.00")
             gross_margin_value = Decimal(str(request.data.get("broker_margin_value") or default_broker_percent))
             base_price = Decimal(str(latest_response.total))
 

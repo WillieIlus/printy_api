@@ -64,14 +64,18 @@ class Command(BaseCommand):
             name="Default Printy Fee Policy",
             defaults={
                 "is_active": True,
-                "printer_fee_rate": Decimal("0.0500"),
-                "broker_margin_fee_rate": Decimal("0.1500"),
-                "small_job_limit": Decimal("2000.00"),
-                "medium_job_limit": Decimal("10000.00"),
-                "small_job_max_multiple": Decimal("8.00"),
-                "medium_job_max_multiple": Decimal("3.00"),
-                "bulk_job_max_multiple": Decimal("2.00"),
-                "add_platform_fee_on_top": False,
+                "policy_version": "printy-fees-v1",
+                "currency": "KES",
+                "under_production_threshold": Decimal("1000.00"),
+                "under_production_fee_rate": Decimal("0.3000"),
+                "standard_production_fee_rate": Decimal("0.2000"),
+                "standard_markup_fee_rate": Decimal("0.2000"),
+                "high_markup_threshold": Decimal("0.8000"),
+                "high_markup_fee_rate": Decimal("0.3000"),
+                "high_production_threshold": Decimal("10000.00"),
+                "high_production_fee_rate": Decimal("0.3000"),
+                "high_production_markup_fee_rate": Decimal("0.4000"),
+                "maximum_manager_markup_multiple": Decimal("2.00"),
             },
         )
         waste_policy, _ = WastePolicy.objects.update_or_create(
@@ -316,7 +320,7 @@ class Command(BaseCommand):
         self.stdout.write(
             self.style.SUCCESS(
                 "Seeded Step 8 data: "
-                f"policy={policy.id} rates=({policy.printer_fee_rate}, {policy.broker_margin_fee_rate}); "
+                f"policy={policy.id} version={policy.policy_version}; "
                 f"waste_policy={waste_policy.id}; setup_policy={setup_policy.id}; "
                 f"quantity_tiers={','.join(str(tier.id) for tier in tiers)}; "
                 f"shop={shop.slug}; broker={broker.email}; machines={digital.id},{offset.id}; "

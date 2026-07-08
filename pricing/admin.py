@@ -26,18 +26,23 @@ class ShopPricingSettingsAdmin(admin.ModelAdmin):
 class PlatformFeePolicyAdmin(admin.ModelAdmin):
     list_display = [
         "name",
+        "policy_version",
+        "currency",
         "is_active",
-        "printer_fee_rate",
-        "broker_margin_fee_rate",
-        "small_job_limit",
-        "medium_job_limit",
-        "small_job_max_multiple",
-        "medium_job_max_multiple",
-        "bulk_job_max_multiple",
-        "add_platform_fee_on_top",
+        "under_production_threshold",
+        "under_production_fee_rate",
+        "standard_production_fee_rate",
+        "standard_markup_fee_rate",
+        "high_markup_threshold",
+        "high_markup_fee_rate",
+        "high_production_threshold",
+        "high_production_fee_rate",
+        "high_production_markup_fee_rate",
+        "maximum_manager_markup_multiple",
+        "effective_from",
         "updated_at",
     ]
-    list_filter = ["is_active", "add_platform_fee_on_top"]
+    list_filter = ["is_active", "currency", "policy_version"]
     search_fields = ["name"]
 
 

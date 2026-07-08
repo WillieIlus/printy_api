@@ -4,7 +4,6 @@ from decimal import Decimal
 from typing import Any
 
 from accounts.models import UserProfile
-from pricing.services.platform_fee_policy import get_active_platform_fee_policy
 from shops.models import Shop
 from services.pricing.mvp_rate_card import (
     DEFAULT_PAPER_DEFINITIONS,
@@ -115,7 +114,7 @@ def build_partner_market_rate_payload(*, user) -> dict[str, Any]:
     rows_by_key = _active_shop_rows()
     profile, _ = UserProfile.objects.get_or_create(user=user)
     # TODO(batch-6): preview-only partner guidance, not authoritative split.
-    default_markup_rate = get_active_platform_fee_policy().broker_margin_fee_rate
+    default_markup_rate = Decimal("0.75")
     results: list[dict[str, Any]] = []
 
     for definition in DEFAULT_PAPER_DEFINITIONS:

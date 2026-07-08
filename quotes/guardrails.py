@@ -44,11 +44,11 @@ def get_partner_markup_min_rate() -> Decimal:
 
 def get_partner_markup_max_rate() -> Decimal:
     policy = get_active_platform_fee_policy()
-    return (policy.bulk_job_max_multiple - Decimal("1.00")).quantize(Decimal("0.0001"))
+    return (policy.maximum_manager_markup_multiple - Decimal("1.00")).quantize(Decimal("0.0001"))
 
 
 def get_partner_markup_default_rate() -> Decimal:
-    return Decimal(get_active_platform_fee_policy().broker_margin_fee_rate).quantize(Decimal("0.0001"))
+    return Decimal("0.7500")
 
 
 def get_partner_markup_warning_rate() -> Decimal:

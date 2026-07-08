@@ -7,7 +7,6 @@ from typing import Any
 
 from jobs.choices import ManagedJobPaymentStatus
 from jobs.models import ManagedJob
-from pricing.services.platform_fee_policy import get_active_platform_fee_policy
 
 MPESA_DISABLED_MESSAGE = "Managed-job payment records are postponed for MVP; use canonical Payment records."
 
@@ -17,7 +16,7 @@ def _rate_to_percent(rate: Decimal) -> Decimal:
 
 
 def get_default_printer_side_fee_rate() -> Decimal:
-    return Decimal(get_active_platform_fee_policy().printer_fee_rate).quantize(Decimal("0.01"))
+    return Decimal("0.00")
 
 
 def get_default_printer_side_fee_percent() -> Decimal:
@@ -25,7 +24,7 @@ def get_default_printer_side_fee_percent() -> Decimal:
 
 
 def get_default_partner_markup_rate(*, partner_user=None, partner_profile=None) -> Decimal:
-    return Decimal(get_active_platform_fee_policy().broker_margin_fee_rate).quantize(Decimal("0.01"))
+    return Decimal("0.75")
 
 
 def get_default_partner_markup_percent(*, partner_user=None, partner_profile=None) -> Decimal:

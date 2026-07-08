@@ -469,17 +469,25 @@ class QuoteFinancialSplit(models.Model):
         related_name="financial_splits",
     )
     production_cost = models.DecimalField(max_digits=12, decimal_places=2)
+    manager_markup = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal("0.00"))
+    production_fee_component = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal("0.00"))
+    markup_fee_component = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal("0.00"))
     broker_client_price = models.DecimalField(max_digits=12, decimal_places=2)
     gross_margin = models.DecimalField(max_digits=12, decimal_places=2)
     printer_side_fee = models.DecimalField(max_digits=12, decimal_places=2)
     broker_margin_fee = models.DecimalField(max_digits=12, decimal_places=2)
     printy_fee = models.DecimalField(max_digits=12, decimal_places=2)
     shop_payout = models.DecimalField(max_digits=12, decimal_places=2)
+    manager_payout = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal("0.00"))
     broker_payout = models.DecimalField(max_digits=12, decimal_places=2)
     client_total = models.DecimalField(max_digits=12, decimal_places=2)
+    currency = models.CharField(max_length=3, default="KES")
+    pricing_tier = models.CharField(max_length=40, default="legacy")
+    applied_policy_version = models.CharField(max_length=40, default="printy-fees-v1")
     max_allowed_client_price = models.DecimalField(max_digits=12, decimal_places=2)
     applied_markup_multiple = models.DecimalField(max_digits=8, decimal_places=4)
     calculated_at = models.DateTimeField(auto_now_add=True)
+    locked = models.BooleanField(default=False)
 
     class Meta:
         ordering = ["-calculated_at"]
@@ -492,8 +500,10 @@ class QuoteFinancialSplit(models.Model):
     def clean(self):
         super().clean()
         errors = {}
-        if self.production_cost <= 0:
-            errors["production_cost"] = _("Production cost must be greater than zero.")
+        if self.production_cost < 0:
+            errors["production_cost"] = _("Production cost cannot be negative.")
+        if self.manager_markup < 0:
+            errors["manager_markup"] = _("Manager markup cannot be negative.")
         if self.broker_client_price < self.production_cost:
             errors["broker_client_price"] = _("Broker client price cannot be below production cost.")
         if self.broker_client_price > self.max_allowed_client_price:
