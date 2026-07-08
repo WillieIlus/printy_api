@@ -451,6 +451,7 @@ def project_public_marketplace_response(payload: dict[str, Any] | None) -> dict[
 
     min_price = response.get("estimate_min") or response.get("min_price")
     max_price = response.get("estimate_max") or response.get("max_price")
+    median_price = response.get("estimate_median") or response.get("median_price") or response.get("median")
     currency = response.get("currency") or "KES"
     display_price_text = response.get("display_price_text")
     display_mode = response.get("display_mode")
@@ -516,6 +517,7 @@ def project_public_marketplace_response(payload: dict[str, Any] | None) -> dict[
     market_range = {
         "min": min_price,
         "max": max_price,
+        "median": median_price,
         "currency": currency,
         "label": display_price_text or (
             f"{currency} {min_price} - {max_price}" if min_price and max_price and min_price != max_price else f"{currency} {min_price or max_price or '0.00'}"
@@ -543,6 +545,8 @@ def project_public_marketplace_response(payload: dict[str, Any] | None) -> dict[
         "max_price": max_price,
         "estimate_min": min_price,
         "estimate_max": max_price,
+        "estimate_median": median_price,
+        "median_price": median_price,
         "display_price_text": display_price_text or market_range["label"],
         "display_mode": display_mode,
         "confidence_label": confidence_label,

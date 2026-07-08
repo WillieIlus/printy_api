@@ -221,3 +221,110 @@ class PublicShopQuotePreviewTestCase(TestCase):
         fixed = payload.get("fixed_shop_preview")
         if isinstance(fixed, dict):
             self.assertTrue(forbidden.isdisjoint(fixed.keys()))
+
+
+class PublicCalculatorMarketRangeTestCase(TestCase):
+    def _walk_keys(self, value):
+        if isinstance(value, dict):
+            for key, child in value.items():
+                yield key
+                yield from self._walk_keys(child)
+        elif isinstance(value, list):
+            for child in value:
+                yield from self._walk_keys(child)
+
+    def _create_shop_with_sheet_total(self, index, per_sheet_total):
+        owner = User.objects.create_user(
+            email=f"market-range-owner-{index}@test.com",
+            password="pass12345",
+            role=User.Role.PRODUCTION,
+        )
+        shop = Shop.objects.create(
+            owner=owner,
+            name=f"Market Range Shop {index}",
+            slug=f"market-range-shop-{index}",
+            is_active=True,
+            is_public=True,
+            city="Nairobi",
+            service_area="Westlands",
+        )
+        machine = Machine.objects.create(
+            shop=shop,
+            name=f"Market Range Press {index}",
+            max_width_mm=320,
+            max_height_mm=450,
+            is_active=True,
+        )
+        Paper.objects.create(
+            shop=shop,
+            name="300gsm Gloss",
+            sheet_size="SRA3",
+            gsm=300,
+            paper_type="GLOSS",
+            category="gloss",
+            buying_price=Decimal("1.00"),
+            selling_price=Decimal(per_sheet_total),
+            width_mm=320,
+            height_mm=450,
+            is_active=True,
+            is_default=True,
+        )
+        PrintingRate.objects.create(
+            machine=machine,
+            sheet_size="SRA3",
+            color_mode="COLOR",
+            single_price=Decimal("0.00"),
+            double_price=Decimal("0.00"),
+            is_active=True,
+            is_default=True,
+        )
+        return shop
+
+    def test_public_calculator_market_range_exposes_anonymized_min_max_and_median(self):
+        PlatformFeePolicy.objects.update(is_active=False)
+        PlatformFeePolicy.objects.create(
+            name="Market range verification policy",
+            is_active=True,
+            printer_fee_rate=Decimal("0.05"),
+            broker_margin_fee_rate=Decimal("0.15"),
+            add_platform_fee_on_top=False,
+        )
+        shops = [
+            self._create_shop_with_sheet_total(1, "274.29"),
+            self._create_shop_with_sheet_total(2, "308.57"),
+            self._create_shop_with_sheet_total(3, "365.71"),
+        ]
+
+        response = APIClient().post(
+            "/api/calculator/public-preview/",
+            {
+                "product_type": "business_card",
+                "quantity": 100,
+                "finished_size": "90x55mm",
+                "paper_stock": "300gsm",
+                "requested_paper_category": "gloss",
+                "requested_gsm": 300,
+                "print_sides": "SIMPLEX",
+                "color_mode": "COLOR",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["matches_count"], 3)
+        self.assertEqual(payload["display_mode"], "range_with_median")
+        self.assertEqual(payload["market_range"]["display_mode"], "range_with_median")
+        self.assertEqual(payload["market_range"]["min"], "2400.04")
+        self.assertEqual(payload["market_range"]["max"], "3199.96")
+        self.assertEqual(payload["market_range"]["median"], "2699.99")
+        self.assertEqual(payload["estimate_median"], "2699.99")
+        self.assertNotEqual(payload["market_range"]["min"], payload["market_range"]["max"])
+
+        payload_text = str(payload)
+        for shop in shops:
+            self.assertNotIn(shop.name, payload_text)
+            self.assertNotIn(shop.slug, payload_text)
+            self.assertNotIn(shop.owner.email, payload_text)
+        forbidden_keys = {"shop_id", "shop_name", "shop_slug", "production_cost", "shop_payout", "printy_fee"}
+        self.assertTrue(forbidden_keys.isdisjoint(set(self._walk_keys(payload))))

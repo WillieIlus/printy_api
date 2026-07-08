@@ -97,6 +97,12 @@ def _format_whole_display_amount(value: Decimal, currency: str) -> str:
     return f"{currency} {int(rounded):,}"
 
 
+def _format_range_with_median_text(*, minimum: Decimal, maximum: Decimal, median: Decimal, currency: str) -> str:
+    if minimum == maximum:
+        return _format_whole_display_amount(median, currency)
+    return f"From {_format_whole_display_amount(minimum, currency)} to {_format_whole_display_amount(maximum, currency)}"
+
+
 def _extract_request_spec(payload: dict[str, Any]) -> dict[str, Any]:
     return {
         "product_type": _normalize_text(payload.get("product_type")),
@@ -380,13 +386,25 @@ def _attach_public_estimate(response: dict[str, Any], payload: dict[str, Any]) -
 
     currency = updated.get("currency") or "KES"
     selected_total_text = _stringify_money(selected_total)
+    band_estimate = _build_shop_band_estimate(updated)
+    range_min = band_estimate["estimate_min"] if band_estimate else selected_total
+    range_max = band_estimate["estimate_max"] if band_estimate else selected_total
+    if range_max < range_min:
+        range_min, range_max = range_max, range_min
     updated["total"] = selected_total_text
-    updated["estimate_min"] = selected_total_text
-    updated["estimate_max"] = selected_total_text
-    updated["min_price"] = selected_total_text
-    updated["max_price"] = selected_total_text
-    updated["display_mode"] = "fixed"
-    updated["display_price_text"] = _format_whole_display_amount(selected_total, currency)
+    updated["median_price"] = selected_total_text
+    updated["estimate_median"] = selected_total_text
+    updated["estimate_min"] = _stringify_money(range_min)
+    updated["estimate_max"] = _stringify_money(range_max)
+    updated["min_price"] = updated["estimate_min"]
+    updated["max_price"] = updated["estimate_max"]
+    updated["display_mode"] = "range_with_median"
+    updated["display_price_text"] = _format_range_with_median_text(
+        minimum=range_min,
+        maximum=range_max,
+        median=selected_total,
+        currency=currency,
+    )
     updated["confidence_label"] = "configured"
     updated["source_label"] = "Estimated from market median"
     updated["exact_or_estimated"] = True
