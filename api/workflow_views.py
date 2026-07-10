@@ -317,12 +317,25 @@ def _manager_active_recently(user: User) -> bool:
     return False
 
 
+def _has_explicit_manager_signal(user: User) -> bool:
+    roles = set(resolve_user_roles(user))
+    overrides = getattr(user, "capability_overrides", {}) or {}
+    return bool(
+        "partner" in roles
+        or getattr(user, "partner_profile_enabled", False)
+        or overrides.get("can_manage_clients") is True
+        or overrides.get("can_source_jobs") is True
+    )
+
+
 def _eligible_manager_candidate(user: User, *, current_user=None, product_type: str = "") -> bool:
     if not user or not getattr(user, "is_active", False):
         return False
     if is_system_account(user):
         return False
     if current_user is not None and getattr(current_user, "id", None) == user.id:
+        return False
+    if not _has_explicit_manager_signal(user):
         return False
     can_manage = bool(
         has_capability(user, "can_manage_clients")
@@ -333,8 +346,7 @@ def _eligible_manager_candidate(user: User, *, current_user=None, product_type: 
         return False
     product_types = _quoted_product_types_for_manager(user)
     return bool(
-        _has_active_shop_relationship(user)
-        or getattr(user, "partner_profile_enabled", False)
+        getattr(user, "partner_profile_enabled", False)
         or (product_type and product_type in product_types)
         or not product_type
     )
