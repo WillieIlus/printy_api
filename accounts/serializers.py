@@ -8,8 +8,8 @@ from .services.roles import (
     assign_role,
     build_auth_role_payload,
     get_public_assignable_roles,
+    get_request_active_role,
     normalize_role_value,
-    resolve_dashboard_role,
     set_account_role,
 )
 
@@ -45,6 +45,8 @@ class UserSerializer(serializers.ModelSerializer):
     dashboard_role = serializers.SerializerMethodField()
     roles = serializers.SerializerMethodField()
     primary_role = serializers.SerializerMethodField()
+    active_role = serializers.SerializerMethodField()
+    active_dashboard_role = serializers.SerializerMethodField()
     home_route = serializers.SerializerMethodField()
     can_access_admin_dashboard = serializers.SerializerMethodField()
     can_access_client_dashboard = serializers.SerializerMethodField()
@@ -70,6 +72,8 @@ class UserSerializer(serializers.ModelSerializer):
             "role",
             "roles",
             "primary_role",
+            "active_role",
+            "active_dashboard_role",
             "partner_profile_enabled",
             "capability_overrides",
             "capabilities",
@@ -110,33 +114,43 @@ class UserSerializer(serializers.ModelSerializer):
     def get_capabilities(self, instance):
         return get_account_capabilities(instance)
 
+    def _role_payload(self, instance):
+        request = self.context.get("request")
+        return build_auth_role_payload(instance, get_request_active_role(request))
+
     def get_dashboard_role(self, instance):
-        return resolve_dashboard_role(instance)
+        return self._role_payload(instance)["dashboard_role"]
 
     def get_roles(self, instance):
-        return build_auth_role_payload(instance)["roles"]
+        return self._role_payload(instance)["roles"]
 
     def get_primary_role(self, instance):
-        return build_auth_role_payload(instance)["primary_role"]
+        return self._role_payload(instance)["primary_role"]
+
+    def get_active_role(self, instance):
+        return self._role_payload(instance)["active_role"]
+
+    def get_active_dashboard_role(self, instance):
+        return self._role_payload(instance)["active_dashboard_role"]
 
     def get_home_route(self, instance):
-        return build_auth_role_payload(instance)["home_route"]
+        return self._role_payload(instance)["home_route"]
 
     def get_can_access_client_dashboard(self, instance):
-        return build_auth_role_payload(instance)["can_access_client_dashboard"]
+        return self._role_payload(instance)["can_access_client_dashboard"]
 
     def get_can_access_admin_dashboard(self, instance):
-        return build_auth_role_payload(instance)["can_access_admin_dashboard"]
+        return self._role_payload(instance)["can_access_admin_dashboard"]
 
     def get_can_access_partner_dashboard(self, instance):
-        return build_auth_role_payload(instance)["can_access_partner_dashboard"]
+        return self._role_payload(instance)["can_access_partner_dashboard"]
 
     def get_can_access_production_dashboard(self, instance):
-        return build_auth_role_payload(instance)["can_access_production_dashboard"]
+        return self._role_payload(instance)["can_access_production_dashboard"]
 
     def to_representation(self, instance):
         data = super().to_representation(instance)
-        role_payload = build_auth_role_payload(instance)
+        role_payload = self._role_payload(instance)
         data["role"] = role_payload["primary_role"]
         profile = get_or_create_profile(instance)
         for field in PROFILE_FIELDS:

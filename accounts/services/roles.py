@@ -22,6 +22,8 @@ ROLE_ROUTE_MAP = {
     CANONICAL_PARTNER_ROLE: "/dashboard/partner",
     CANONICAL_PRODUCTION_ROLE: "/dashboard/production",
 }
+ACTIVE_ROLE_HEADER = "X-Printy-Active-Role"
+ACTIVE_ROLE_META_KEY = "HTTP_X_PRINTY_ACTIVE_ROLE"
 
 
 class ActorRole:
@@ -163,11 +165,35 @@ def resolve_primary_role(user: User) -> str:
     return roles[0] if roles else CANONICAL_CLIENT_ROLE
 
 
-def get_actor_role(user: User) -> str | None:
+def resolve_active_role(user: User, requested_role: str | None = None) -> str:
+    roles = resolve_user_roles(user)
+    primary_role = roles[0] if roles else CANONICAL_CLIENT_ROLE
+    normalized_role = normalize_role_value(requested_role)
+    if normalized_role and (normalized_role in roles or CANONICAL_SUPER_ADMIN_ROLE in roles):
+        return normalized_role
+    return primary_role
+
+
+def get_request_active_role(request) -> str | None:
+    if not request:
+        return None
+    raw_role = None
+    headers = getattr(request, "headers", None)
+    if headers is not None:
+        raw_role = headers.get(ACTIVE_ROLE_HEADER)
+    if not raw_role:
+        raw_role = getattr(request, "META", {}).get(ACTIVE_ROLE_META_KEY)
+    return normalize_role_value(raw_role)
+
+
+def get_actor_role(user: User, active_role: str | None = None) -> str | None:
     """Resolve an authenticated user to the Batch 6 actor role vocabulary."""
     if not user or not getattr(user, "is_authenticated", False):
         return None
     roles = set(resolve_user_roles(user))
+    requested_role = normalize_role_value(active_role)
+    if requested_role and (requested_role in roles or CANONICAL_SUPER_ADMIN_ROLE in roles):
+        roles = {requested_role}
     if CANONICAL_SUPER_ADMIN_ROLE in roles:
         return ActorRole.ADMIN
     if CANONICAL_PRODUCTION_ROLE in roles:
@@ -181,6 +207,10 @@ def get_actor_role(user: User) -> str | None:
 
 def resolve_home_route(user: User) -> str:
     return ROLE_ROUTE_MAP.get(resolve_primary_role(user), ROLE_ROUTE_MAP[CANONICAL_CLIENT_ROLE])
+
+
+def resolve_role_home_route(role: str | None) -> str:
+    return ROLE_ROUTE_MAP.get(normalize_role_value(role), ROLE_ROUTE_MAP[CANONICAL_CLIENT_ROLE])
 
 
 def role_flags_for_user(user: User) -> dict[str, bool]:
@@ -284,15 +314,18 @@ def resolve_dashboard_role(user: User) -> str:
     return resolve_primary_role(user)
 
 
-def build_auth_role_payload(user: User) -> dict[str, object]:
+def build_auth_role_payload(user: User, requested_role: str | None = None) -> dict[str, object]:
     flags = role_flags_for_user(user)
     roles = resolve_user_roles(user)
     primary_role = resolve_primary_role(user)
+    active_role = resolve_active_role(user, requested_role)
     return {
         "roles": roles,
         "primary_role": primary_role,
-        "dashboard_role": primary_role,
-        "home_route": resolve_home_route(user),
+        "active_role": active_role,
+        "active_dashboard_role": active_role,
+        "dashboard_role": active_role,
+        "home_route": resolve_role_home_route(active_role),
         **flags,
     }
 
