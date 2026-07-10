@@ -5,11 +5,18 @@ from .models import (
     PlatformFeePolicy,
     PrintingRate,
     QuantityPricingTier,
+    ShopRateCardSetup,
     ShopPricingSettings,
     SetupCostPolicy,
     VolumeDiscount,
     WastePolicy,
 )
+
+
+@admin.register(ShopRateCardSetup)
+class ShopRateCardSetupAdmin(admin.ModelAdmin):
+    list_display = ["shop", "completed", "updated_at"]
+    search_fields = ["shop__name", "shop__slug"]
 
 
 @admin.register(ShopPricingSettings)

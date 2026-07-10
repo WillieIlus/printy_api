@@ -50,6 +50,29 @@ class ShopPricingSettings(TimeStampedModel):
         return f"Pricing settings for {self.shop.name}"
 
 
+class ShopRateCardSetup(TimeStampedModel):
+    """Exact production onboarding formset values for a shop."""
+
+    shop = models.OneToOneField(
+        Shop,
+        on_delete=models.CASCADE,
+        related_name="rate_card_setup",
+        verbose_name=_("shop"),
+    )
+    paper_rows = models.JSONField(default=list, blank=True)
+    finishing_rows = models.JSONField(default=list, blank=True)
+    shop_details = models.JSONField(default=dict, blank=True)
+    completed = models.BooleanField(default=False)
+
+    class Meta:
+        ordering = ["shop__name"]
+        verbose_name = _("shop rate card setup")
+        verbose_name_plural = _("shop rate card setups")
+
+    def __str__(self):
+        return f"Rate card setup for {self.shop.name}"
+
+
 class PlatformFeePolicy(models.Model):
     """Central platform fee and markup cap policy."""
 

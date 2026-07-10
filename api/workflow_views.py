@@ -875,7 +875,7 @@ class ShopMvpRateCardSetupView(APIView):
         shop = _resolve_wizard_shop(request=request, shop_slug=request.query_params.get("shop_slug"))
         if shop is None:
             return Response({"detail": "No manageable shop was found for this user."}, status=status.HTTP_404_NOT_FOUND)
-        return Response(build_shop_rate_card_setup(shop))
+        return Response(build_shop_rate_card_setup(shop, activate_defaults=request.query_params.get("activate_defaults") in {"1", "true", "yes"}))
 
     def patch(self, request):
         serializer = MvpRateCardSetupSerializer(data=request.data)

@@ -12,21 +12,23 @@ from rest_framework.exceptions import ValidationError
 from inventory.choices import MachineType, PaperCategory, PaperType, SheetSize
 from inventory.models import Machine, Paper
 from pricing.choices import ChargeUnit, ColorMode, FinishingBillingBasis, FinishingSideMode
-from pricing.models import FinishingRate, PrintingRate
+from pricing.models import FinishingRate, PrintingRate, ShopRateCardSetup
 from services.pricing.imposition import build_imposition_breakdown
 from services.pricing.marketplace_pricing import build_marketplace_pricing_summary, get_marketplace_margin_settings
 
 
 DEFAULT_PAPER_DEFINITIONS: list[dict[str, Any]] = [
-    {"key": "130gsm_matte_art", "id": "paper-130gsm-matte-art", "label": "130gsm Matte/Art", "paper_name": "130gsm", "gsm": 130, "paper_type": "Matte/Art", "category": "Matte/Art", "size": "SRA3", "supports_double_side": True, "paper_base_price": "10.00", "single_print_base": "15.00", "double_print_base": "30.00", "heavy_paper_surcharge": "10.00", "surcharge_threshold_gsm": 250, "single_side_price": "25.00", "double_side_price": "40.00", "active": False},
-    {"key": "150gsm_matte_art", "id": "paper-150gsm-matte-art", "label": "150gsm Matte/Art", "paper_name": "150gsm", "gsm": 150, "paper_type": "Matte/Art", "category": "Matte/Art", "size": "SRA3", "supports_double_side": True, "paper_base_price": "15.00", "single_print_base": "15.00", "double_print_base": "30.00", "heavy_paper_surcharge": "10.00", "surcharge_threshold_gsm": 250, "single_side_price": "30.00", "double_side_price": "45.00", "active": False},
-    {"key": "170gsm_matte_art", "id": "paper-170gsm-matte-art", "label": "170gsm Matte/Art", "paper_name": "170gsm", "gsm": 170, "paper_type": "Matte/Art", "category": "Matte/Art", "size": "SRA3", "supports_double_side": True, "paper_base_price": "18.00", "single_print_base": "15.00", "double_print_base": "30.00", "heavy_paper_surcharge": "10.00", "surcharge_threshold_gsm": 250, "single_side_price": "33.00", "double_side_price": "48.00", "active": False},
-    {"key": "200gsm_matte", "id": "paper-200gsm-matte", "label": "200gsm Matte", "paper_name": "200gsm", "gsm": 200, "paper_type": "Matte", "category": "Matte", "size": "SRA3", "supports_double_side": True, "paper_base_price": "20.00", "single_print_base": "15.00", "double_print_base": "30.00", "heavy_paper_surcharge": "10.00", "surcharge_threshold_gsm": 250, "single_side_price": "35.00", "double_side_price": "50.00", "active": False},
-    {"key": "250gsm_matte", "id": "paper-250gsm-matte", "label": "250gsm Matte", "paper_name": "250gsm", "gsm": 250, "paper_type": "Matte", "category": "Matte", "size": "SRA3", "supports_double_side": True, "paper_base_price": "30.00", "single_print_base": "15.00", "double_print_base": "30.00", "heavy_paper_surcharge": "10.00", "surcharge_threshold_gsm": 250, "single_side_price": "55.00", "double_side_price": "70.00", "active": False},
-    {"key": "300gsm_matte_art_card", "id": "paper-300gsm-matte-art-card", "label": "300gsm Matte/Art Card", "paper_name": "300gsm", "gsm": 300, "paper_type": "Matte/Art Card", "category": "Matte/Art Card", "size": "SRA3", "supports_double_side": True, "paper_base_price": "35.00", "single_print_base": "15.00", "double_print_base": "30.00", "heavy_paper_surcharge": "10.00", "surcharge_threshold_gsm": 250, "single_side_price": "60.00", "double_side_price": "75.00", "active": False},
-    {"key": "350gsm_matte_art_card", "id": "paper-350gsm-matte-art-card", "label": "350gsm Matte/Art Card", "paper_name": "350gsm", "gsm": 350, "paper_type": "Matte/Art Card", "category": "Matte/Art Card", "size": "SRA3", "supports_double_side": True, "paper_base_price": "40.00", "single_print_base": "15.00", "double_print_base": "30.00", "heavy_paper_surcharge": "10.00", "surcharge_threshold_gsm": 250, "single_side_price": "65.00", "double_side_price": "80.00", "active": False},
-    {"key": "300gsm_ivory", "id": "paper-300gsm-ivory", "label": "300gsm Ivory", "paper_name": "300 Ivory", "gsm": 300, "paper_type": "Ivory", "category": "Ivory", "size": "SRA3", "supports_double_side": True, "paper_base_price": "50.00", "single_print_base": "15.00", "double_print_base": "30.00", "heavy_paper_surcharge": "10.00", "surcharge_threshold_gsm": 250, "single_side_price": "75.00", "double_side_price": "90.00", "active": False},
-    {"key": "150gsm_tictac_sticker", "id": "paper-150gsm-tictac-sticker", "label": "Tic Tac Sticker", "paper_name": "Tic Tac Sticker", "gsm": 150, "paper_type": "Sticker", "category": "Sticker", "size": "SRA3", "supports_double_side": False, "paper_base_price": "25.00", "single_print_base": "15.00", "double_print_base": "30.00", "heavy_paper_surcharge": "10.00", "surcharge_threshold_gsm": 250, "single_side_price": "40.00", "double_side_price": None, "active": False},
+    {"key": "350gsm_matte_art_card", "id": "paper-350gsm-matte-art-card", "label": "Art Paper 350gsm", "paper_name": "Art Paper", "gsm": 350, "paper_type": "Matte", "category": "Art Card", "size": "SRA3", "supports_double_side": True, "paper_base_price": "0.00", "single_print_base": "45.00", "double_print_base": "75.00", "heavy_paper_surcharge": "0.00", "surcharge_threshold_gsm": 999, "single_side_price": "45.00", "double_side_price": "75.00", "quantity_in_stock": 500, "active": False},
+    {"key": "300gsm_matte_art_card", "id": "paper-300gsm-matte-art-card", "label": "Art Paper 300gsm", "paper_name": "Art Paper", "gsm": 300, "paper_type": "Matte", "category": "Art Card", "size": "SRA3", "supports_double_side": True, "paper_base_price": "0.00", "single_print_base": "30.00", "double_print_base": "50.00", "heavy_paper_surcharge": "0.00", "surcharge_threshold_gsm": 999, "single_side_price": "30.00", "double_side_price": "50.00", "quantity_in_stock": 500, "active": False},
+    {"key": "250gsm_matte_art_card", "id": "paper-250gsm-matte-art-card", "label": "Art Paper 250gsm", "paper_name": "Art Paper", "gsm": 250, "paper_type": "Matte", "category": "Art Card", "size": "SRA3", "supports_double_side": True, "paper_base_price": "0.00", "single_print_base": "25.00", "double_print_base": "45.00", "heavy_paper_surcharge": "0.00", "surcharge_threshold_gsm": 999, "single_side_price": "25.00", "double_side_price": "45.00", "quantity_in_stock": 500, "active": False},
+    {"key": "art_paper_200gsm", "id": "paper-art-paper-200gsm", "label": "Art Paper 200gsm", "paper_name": "Art Paper", "gsm": 200, "paper_type": "Matte", "category": "Matt", "size": "SRA3", "supports_double_side": True, "paper_base_price": "0.00", "single_print_base": "25.00", "double_print_base": "43.00", "heavy_paper_surcharge": "0.00", "surcharge_threshold_gsm": 999, "single_side_price": "25.00", "double_side_price": "43.00", "quantity_in_stock": 500, "active": False},
+    {"key": "art_paper_170gsm", "id": "paper-art-paper-170gsm", "label": "Art Paper 170gsm", "paper_name": "Art Paper", "gsm": 170, "paper_type": "Matte", "category": "Matt", "size": "SRA3", "supports_double_side": True, "paper_base_price": "0.00", "single_print_base": "23.00", "double_print_base": "43.00", "heavy_paper_surcharge": "0.00", "surcharge_threshold_gsm": 999, "single_side_price": "23.00", "double_side_price": "43.00", "quantity_in_stock": 2000, "active": False},
+    {"key": "art_paper_150gsm", "id": "paper-art-paper-150gsm", "label": "Art Paper 150gsm", "paper_name": "Art Paper", "gsm": 150, "paper_type": "Matte", "category": "Matt", "size": "SRA3", "supports_double_side": True, "paper_base_price": "0.00", "single_print_base": "22.00", "double_print_base": "42.00", "heavy_paper_surcharge": "0.00", "surcharge_threshold_gsm": 999, "single_side_price": "22.00", "double_side_price": "42.00", "quantity_in_stock": 2000, "active": False},
+    {"key": "art_paper_130gsm", "id": "paper-art-paper-130gsm", "label": "Art Paper 130gsm", "paper_name": "Art Paper", "gsm": 130, "paper_type": "Matte", "category": "Matt", "size": "SRA3", "supports_double_side": True, "paper_base_price": "0.00", "single_print_base": "20.00", "double_print_base": "38.00", "heavy_paper_surcharge": "0.00", "surcharge_threshold_gsm": 999, "single_side_price": "20.00", "double_side_price": "38.00", "quantity_in_stock": 2000, "active": False},
+    {"key": "art_paper_115gsm", "id": "paper-art-paper-115gsm", "label": "Art Paper 115gsm", "paper_name": "Art Paper", "gsm": 115, "paper_type": "Matte", "category": "Matt", "size": "SRA3", "supports_double_side": True, "paper_base_price": "0.00", "single_print_base": "18.00", "double_print_base": "35.00", "heavy_paper_surcharge": "0.00", "surcharge_threshold_gsm": 999, "single_side_price": "18.00", "double_side_price": "35.00", "quantity_in_stock": 2000, "active": False},
+    {"key": "art_paper_100gsm", "id": "paper-art-paper-100gsm", "label": "Art Paper 100gsm", "paper_name": "Art Paper", "gsm": 100, "paper_type": "Matte", "category": "Matt", "size": "SRA3", "supports_double_side": True, "paper_base_price": "0.00", "single_print_base": "15.00", "double_print_base": "35.00", "heavy_paper_surcharge": "0.00", "surcharge_threshold_gsm": 999, "single_side_price": "15.00", "double_side_price": "35.00", "quantity_in_stock": 2000, "active": False},
+    {"key": "tic_tac", "id": "paper-tic-tac", "label": "Tic Tac", "paper_name": "Tic Tac", "gsm": 150, "paper_type": "Sticker", "category": "Tictac", "size": "SRA3", "supports_double_side": False, "paper_base_price": "0.00", "single_print_base": "35.00", "double_print_base": None, "heavy_paper_surcharge": "0.00", "surcharge_threshold_gsm": 999, "single_side_price": "35.00", "double_side_price": None, "quantity_in_stock": 1000, "active": False},
+    {"key": "ivory_300gsm", "id": "paper-ivory-300gsm", "label": "Ivory 300gsm", "paper_name": "Ivory", "gsm": 300, "paper_type": "Matte", "category": "Ivory", "size": "SRA3", "supports_double_side": True, "paper_base_price": "0.00", "single_print_base": "45.00", "double_print_base": "80.00", "heavy_paper_surcharge": "0.00", "surcharge_threshold_gsm": 999, "single_side_price": "45.00", "double_side_price": "80.00", "quantity_in_stock": 500, "active": False},
 ]
 
 DEFAULT_FINISHING_DEFINITIONS: list[dict[str, Any]] = [
@@ -59,6 +61,13 @@ def _build_default_paper_rows() -> list[dict[str, Any]]:
 
 def _build_default_finishing_rows() -> list[dict[str, Any]]:
     return deepcopy(DEFAULT_FINISHING_DEFINITIONS)
+
+
+def _activated_default_paper_rows() -> list[dict[str, Any]]:
+    rows = _build_default_paper_rows()
+    for row in rows:
+        row["active"] = True
+    return rows
 
 
 PAPER_DEFINITION_BY_KEY = {row["key"]: row for row in DEFAULT_PAPER_DEFINITIONS}
@@ -570,6 +579,13 @@ def _safe_saved_rate_cards() -> list[Any]:
         return []
 
 
+def _stored_rate_card_setup(shop) -> ShopRateCardSetup | None:
+    try:
+        return ShopRateCardSetup.objects.filter(shop=shop).first()
+    except (ProgrammingError, OperationalError):
+        return None
+
+
 def _definition_for_canonical_paper(paper: Paper) -> dict[str, Any] | None:
     label = " ".join(
         [
@@ -722,7 +738,9 @@ def _paper_category_from_row(row: dict[str, Any]) -> str:
 
 
 def _paper_type_from_row(row: dict[str, Any]) -> str:
-    text = " ".join([_normalize_text(row.get("paper_type")), _normalize_text(row.get("label"))]).lower()
+    text = " ".join([_normalize_text(row.get("paper_type")), _normalize_text(row.get("label")), _normalize_text(row.get("category"))]).lower()
+    if "ivory" in text or "sticker" in text or "tictac" in text or "tic tac" in text:
+        return PaperType.OTHER
     if "gloss" in text:
         return PaperType.GLOSS
     if "matt" in text or "matte" in text:
@@ -1089,17 +1107,22 @@ def preview_public_rate_card_builder(*, paper_rows: list[dict[str, Any]], finish
     }
 
 
-def build_shop_rate_card_setup(shop) -> dict[str, Any]:
-    paper_rows = _normalize_paper_rows(_canonical_paper_rows_for_shop(shop) or _build_default_paper_rows())
-    finishing_rows = _normalize_finishing_rows(_canonical_finishing_rows_for_shop(shop) or _build_default_finishing_rows())
+def build_shop_rate_card_setup(shop, *, activate_defaults: bool = False) -> dict[str, Any]:
+    stored_setup = _stored_rate_card_setup(shop)
+    stored_paper_rows = stored_setup.paper_rows if stored_setup and stored_setup.paper_rows else None
+    stored_finishing_rows = stored_setup.finishing_rows if stored_setup and stored_setup.finishing_rows else None
+    canonical_paper_rows = _canonical_paper_rows_for_shop(shop)
+    default_paper_rows = _activated_default_paper_rows() if activate_defaults and not stored_paper_rows and not any(row.get("active") for row in canonical_paper_rows) else _build_default_paper_rows()
+    paper_rows = _normalize_paper_rows(stored_paper_rows or canonical_paper_rows or default_paper_rows)
+    finishing_rows = _normalize_finishing_rows(stored_finishing_rows or _canonical_finishing_rows_for_shop(shop) or _build_default_finishing_rows())
     paper_rows, finishing_rows = _decorate_rate_card_rows(paper_rows, finishing_rows)
-    shop_details = _normalize_shop_details(
-        {
-            "shop_name": getattr(shop, "name", ""),
-            "whatsapp_number": getattr(shop, "public_whatsapp_number", "") or getattr(shop, "phone_number", ""),
-            "location_area": getattr(shop, "service_area", "") or getattr(shop, "city", ""),
-        }
-    )
+    default_shop_details = {
+        "shop_name": getattr(shop, "name", ""),
+        "whatsapp_number": getattr(shop, "public_whatsapp_number", "") or getattr(shop, "phone_number", ""),
+        "location_area": getattr(shop, "service_area", "") or getattr(shop, "city", ""),
+    }
+    saved_shop_details = stored_setup.shop_details if stored_setup and stored_setup.shop_details else {}
+    shop_details = _normalize_shop_details({**default_shop_details, **saved_shop_details})
     pricing_settings = get_marketplace_margin_settings(shop)
     return {
         "paper_rows": paper_rows,
@@ -1109,7 +1132,7 @@ def build_shop_rate_card_setup(shop) -> dict[str, Any]:
         "market_guides": build_market_guides(paper_rows, finishing_rows),
         "example_quote": build_business_card_example(paper_rows, finishing_rows),
         "market_label": "Nairobi Market Guide",
-        "completed": bool(getattr(shop, "pricing_ready", False)),
+        "completed": bool(stored_setup.completed if stored_setup else getattr(shop, "pricing_ready", False)),
         "pricing_settings": _pricing_settings_payload(pricing_settings),
     }
 
@@ -1146,11 +1169,24 @@ def save_shop_rate_card_setup(shop, *, paper_rows: list[dict[str, Any]], finishi
             shop.city = normalized_details["location_area"]
 
     if completed is not None:
-        shop.pricing_ready = bool(completed)
-        shop.public_match_ready = bool(completed)
+        completed_value = bool(completed)
+        shop.pricing_ready = completed_value
+        shop.public_match_ready = completed_value
+        if completed_value:
+            shop.is_active = True
+            shop.is_public = True
 
     with transaction.atomic():
-        shop.save(update_fields=["name", "public_whatsapp_number", "phone_number", "service_area", "city", "pricing_ready", "public_match_ready", "updated_at"])
+        shop.save(update_fields=["name", "public_whatsapp_number", "phone_number", "service_area", "city", "pricing_ready", "public_match_ready", "is_active", "is_public", "updated_at"])
+        ShopRateCardSetup.objects.update_or_create(
+            shop=shop,
+            defaults={
+                "paper_rows": normalized_papers,
+                "finishing_rows": normalized_finishings,
+                "shop_details": normalized_details,
+                "completed": bool(completed),
+            },
+        )
         _persist_paper_rows(shop, normalized_papers)
         _persist_finishing_rows(shop, normalized_finishings)
     return payload

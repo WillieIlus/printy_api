@@ -105,7 +105,7 @@ class ConfirmEmailView(APIView):
     permission_classes = [AllowAny]
 
     def post(self, request):
-        key = request.data.get("key", "").strip()
+        key = (request.data.get("key") or request.data.get("token") or "").strip()
         if not key:
             return Response(
                 {"detail": "key is required."}, status=status.HTTP_400_BAD_REQUEST
