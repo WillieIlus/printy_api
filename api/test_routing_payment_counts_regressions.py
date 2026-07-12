@@ -99,6 +99,51 @@ class ManagerSelectionRegressionTestCase(TestCase):
         self.assertEqual(quote_request.assigned_manager_id, self.manager.id)
         self.assertEqual(quote_request.manager_selection_mode, QuoteRequest.MANAGER_SELECTION_CLIENT_SELECTED)
 
+    def test_manager_requests_endpoint_includes_every_assigned_request_status(self):
+        status_cases = [
+            ("new", QuoteStatus.SUBMITTED),
+            ("draft", QuoteStatus.DRAFT),
+            ("submitted", QuoteStatus.SUBMITTED),
+            ("quoted", QuoteStatus.QUOTED),
+            ("paid", QuoteStatus.CLOSED),
+            ("cancelled", QuoteStatus.CANCELLED),
+        ]
+        created_ids = {}
+        for label, quote_status in status_cases:
+            quote_request = QuoteRequest.objects.create(
+                created_by=self.client_user,
+                assigned_manager=self.manager,
+                customer_name=f"{label.title()} Client",
+                customer_email=f"{label}@example.com",
+                status=quote_status,
+                request_snapshot={"phase3_status_case": label},
+            )
+            created_ids[label] = quote_request.id
+            if label == "paid":
+                ManagedJob.objects.create(
+                    title="Paid manager request",
+                    source_quote_request=quote_request,
+                    client=self.client_user,
+                    broker=self.manager,
+                    created_by=self.manager,
+                    payment_status=ManagedJobPaymentStatus.CONFIRMED,
+                )
+
+        self.client.force_authenticate(user=self.manager)
+        response = self.client.get("/api/dashboard/manager/requests/")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        rows_by_id = {row["id"]: row for row in payload["results"]}
+        self.assertEqual(set(created_ids.values()) - set(rows_by_id.keys()), set())
+        self.assertEqual(rows_by_id[created_ids["new"]]["raw_status"], QuoteStatus.SUBMITTED)
+        self.assertEqual(rows_by_id[created_ids["draft"]]["raw_status"], QuoteStatus.DRAFT)
+        self.assertEqual(rows_by_id[created_ids["submitted"]]["raw_status"], QuoteStatus.SUBMITTED)
+        self.assertEqual(rows_by_id[created_ids["quoted"]]["raw_status"], QuoteStatus.QUOTED)
+        self.assertEqual(rows_by_id[created_ids["paid"]]["raw_status"], QuoteStatus.CLOSED)
+        self.assertEqual(rows_by_id[created_ids["paid"]]["managed_job"]["payment_status"], ManagedJobPaymentStatus.CONFIRMED)
+        self.assertEqual(rows_by_id[created_ids["cancelled"]]["raw_status"], QuoteStatus.CANCELLED)
+
 
 @override_settings(MPESA_ENV="sandbox", MPESA_ENVIRONMENT="test", PASSWORD_HASHERS=["django.contrib.auth.hashers.MD5PasswordHasher"])
 class AdminPaymentConfirmationRegressionTestCase(TestCase):

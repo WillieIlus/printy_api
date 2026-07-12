@@ -760,6 +760,7 @@ class BaseRoleDetailView(BaseDashboardHomeView):
             "quote_request_reference": _quote_request_reference(quote_request),
             "quote_reference": _quote_reference(latest_response),
             "status": serialized.get("status") or quote_request.status,
+            "raw_status": serialized.get("raw_status") or quote_request.status,
             "status_label": serialized.get("status_label") or quote_request.status,
             "customer_name": quote_request.customer_name or "Client",
             "shop_name": getattr(quote_request.shop, "name", "") or "Awaiting production match",
@@ -777,6 +778,10 @@ class BaseRoleDetailView(BaseDashboardHomeView):
             "job_reference": managed_job.managed_reference,
             "quote_request_reference": _quote_request_reference(quote_request),
             "quote_reference": _quote_reference(getattr(managed_job, "source_quote", None)),
+            "status": managed_job.status,
+            "payment_status": managed_job.payment_status,
+            "assignment_status": managed_job.assignment_status,
+            "dispatched_at": managed_job.dispatched_at,
             **self._client_tracking_payload(managed_job),
         } if managed_job else None
         return row
