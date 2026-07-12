@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import secrets
 import re
 from decimal import Decimal
 
@@ -40,6 +41,7 @@ from pricing.services.platform_fee_policy import calculate_financial_split, crea
 from pricing.services.production_cost_calculator import calculate_client_price_with_waste_setup_and_quantity_tier
 from jobs.settlement_compat import get_financial_split_for_job
 from payments.models import Payment
+from payments.services import create_payment_for_quote, initiate_stk_push
 from quotes.guardrails import calculate_quote_expiry, validate_partner_markup_amount
 from quotes.models import QuoteRequest, Quote
 from quotes.partner_services import respond_to_assigned_quote_request
@@ -73,6 +75,46 @@ class PartnerClientCreateSerializer(serializers.Serializer):
             raise serializers.ValidationError("Email or phone is required to create a partner client.")
         return attrs
 
+
+class OfflineQuoteClaimSerializer(serializers.Serializer):
+    claim_token = serializers.CharField(max_length=128)
+
+
+def _new_offline_claim_token() -> str:
+    return secrets.token_urlsafe(24)
+
+
+def _pending_client_has_offline_contact(pending_client: dict[str, object], quote_request: QuoteRequest) -> bool:
+    return bool(
+        str(pending_client.get("phone") or quote_request.customer_phone or "").strip()
+        or str(pending_client.get("email") or quote_request.customer_email or "").strip()
+        or str(pending_client.get("name") or quote_request.customer_name or "").strip()
+    )
+
+
+def _partner_client_payload(
+    *,
+    client_user=None,
+    name: str = "",
+    phone: str = "",
+    email: str = "",
+    company: str = "",
+    is_new: bool = False,
+    is_offline: bool = False,
+) -> dict[str, object]:
+    display_name = name or getattr(client_user, "name", "") or getattr(client_user, "email", "") or phone or "Client"
+    client_email = email or getattr(client_user, "email", "") or ""
+    client_phone = phone or getattr(client_user, "username", "") or ""
+    return {
+        "id": getattr(client_user, "id", None),
+        "client_id": getattr(client_user, "id", None),
+        "name": display_name,
+        "phone": client_phone,
+        "email": client_email,
+        "company": company,
+        "is_new": is_new,
+        "is_offline": is_offline,
+    }
 
 def _normalize_phone(value: str) -> str:
     return str(value or "").strip()
@@ -151,67 +193,35 @@ def _resolve_or_create_partner_client(
     company = str(client_company or "").strip()
 
     resolved_user = client_user
-    if resolved_user is None and phone:
-        resolved_user = User.objects.filter(username=phone).first()
     if resolved_user is None and email:
         resolved_user = User.objects.filter(email__iexact=email).first()
+    if resolved_user is None and phone:
+        resolved_user = User.objects.filter(username=phone).first()
 
-    if resolved_user is not None and getattr(resolved_user, "role", "") != User.Role.CLIENT:
-        raise ValueError("Existing account cannot be linked as a partner client.")
-
-    created_user = False
-    if resolved_user is None:
-        fallback_email = email or _fallback_partner_client_email(partner_id=partner_user.id, phone=phone)
-        resolved_user = User.objects.create_user(
-            email=fallback_email,
-            password=None,
-            username=_partner_client_username(phone=phone, email=fallback_email, partner_id=partner_user.id),
-            name=name or fallback_email or phone or "Client",
-            role=User.Role.CLIENT,
-            is_active=True,
+    if resolved_user is not None:
+        if getattr(resolved_user, "role", "") != User.Role.CLIENT:
+            raise ValueError("Existing account cannot be linked as a partner client.")
+        return _partner_client_payload(
+            client_user=resolved_user,
+            name=name,
+            phone=phone,
+            email=email,
+            company=company,
+            is_new=False,
+            is_offline=False,
         )
-        created_user = True
 
-    record, created_record = PartnerClient.objects.get_or_create(
-        partner=partner_user,
-        client_user=resolved_user,
-        defaults={
-            "name": name or getattr(resolved_user, "name", "") or getattr(resolved_user, "email", "") or "Client",
-            "phone": phone,
-            "email": email or getattr(resolved_user, "email", "") or "",
-            "company": company,
-        },
+    return _partner_client_payload(
+        client_user=None,
+        name=name,
+        phone=phone,
+        email=email,
+        company=company,
+        is_new=True,
+        is_offline=True,
     )
-    update_fields: list[str] = []
-    desired_name = name or record.name or getattr(resolved_user, "name", "") or getattr(resolved_user, "email", "") or "Client"
-    if desired_name and record.name != desired_name:
-        record.name = desired_name
-        update_fields.append("name")
-    if phone and record.phone != phone:
-        record.phone = phone
-        update_fields.append("phone")
-    if email and record.email != email:
-        record.email = email
-        update_fields.append("email")
-    if company != record.company:
-        record.company = company
-        update_fields.append("company")
-    if update_fields:
-        update_fields.append("updated_at")
-        record.save(update_fields=update_fields)
 
-    return {
-        "client_user": resolved_user,
-        "client_id": resolved_user.id,
-        "name": record.name,
-        "phone": record.phone,
-        "email": record.email,
-        "company": record.company,
-        "is_new": created_user and created_record,
-    }
-
-
-def _partner_client_row(record: PartnerClient) -> dict[str, object]:
+def _partner_client_row(record) -> dict[str, object]:
     client_user = getattr(record, "client_user", None)
     return {
         "id": record.id,
@@ -745,7 +755,9 @@ class BaseRoleDetailView(BaseDashboardHomeView):
         serialized = QuoteRequestReadSerializer(quote_request, context={"request": request}).data
         latest_response = quote_request.quotes.exclude(status=Quote.PENDING).select_related("financial_split").order_by("-created_at", "-id").first()
         latest_response_payload = serialized.get("latest_response")
-        customer_pricing = _quote_customer_pricing_payload(latest_response)
+        roles = set(resolve_user_roles(request.user)) if request is not None and getattr(request, "user", None) else set()
+        can_view_internal_pricing = bool(roles.intersection({CANONICAL_PARTNER_ROLE, CANONICAL_SUPER_ADMIN_ROLE}))
+        customer_pricing = _quote_customer_pricing_payload(latest_response) if can_view_internal_pricing else {}
         if latest_response_payload and customer_pricing:
             latest_response_payload = dict(latest_response_payload)
             response_snapshot = dict(latest_response_payload.get("response_snapshot") or {})
@@ -958,8 +970,22 @@ class PartnerQuoteSendToClientView(ManagerCapablePartnerQuoteView):
             quote_request.save(
                 update_fields=["on_behalf_of", "customer_name", "customer_email", "customer_phone", "request_snapshot", "updated_at"]
             )
-        if quote_request.on_behalf_of_id is None:
-            return Response({"detail": "client_id is required for partner quote requests."}, status=400)
+        is_offline_quote = quote_request.on_behalf_of_id is None
+        if is_offline_quote and not _pending_client_has_offline_contact(pending_client, quote_request):
+            return Response({"detail": "Client phone, email, or name is required for offline partner quote requests."}, status=400)
+        if is_offline_quote:
+            pending_client["offline_client"] = True
+            pending_client["name"] = pending_client.get("name") or quote_request.customer_name
+            pending_client["email"] = pending_client.get("email") or quote_request.customer_email
+            pending_client["phone"] = pending_client.get("phone") or quote_request.customer_phone
+            pending_client["company"] = pending_client.get("company") or ""
+            request_snapshot["pending_client"] = pending_client
+            request_snapshot.setdefault("offline_claim_token", _new_offline_claim_token())
+            quote_request.customer_name = pending_client.get("name") or quote_request.customer_name
+            quote_request.customer_email = pending_client.get("email") or quote_request.customer_email
+            quote_request.customer_phone = pending_client.get("phone") or quote_request.customer_phone
+            quote_request.request_snapshot = request_snapshot
+            quote_request.save(update_fields=["customer_name", "customer_email", "customer_phone", "request_snapshot", "updated_at"])
         latest_response = quote_request.quotes.order_by("-created_at", "-id").first()
         if latest_response is None or latest_response.total is None:
             return Response({"detail": "A production base quote is required before sending to the client."}, status=400)
@@ -997,7 +1023,8 @@ class PartnerQuoteSendToClientView(ManagerCapablePartnerQuoteView):
             gross_margin_type = str(request.data.get("broker_margin_type") or "percent").strip().lower()
             default_broker_percent = Decimal("75.00")
             gross_margin_value = Decimal(str(request.data.get("broker_margin_value") or default_broker_percent))
-            base_price = Decimal(str(latest_response.total))
+            existing_split = getattr(latest_response, "financial_split", None)
+            base_price = Decimal(str(existing_split.production_cost if existing_split is not None else latest_response.total))
 
             if gross_margin_type == "fixed":
                 try:
@@ -1023,7 +1050,7 @@ class PartnerQuoteSendToClientView(ManagerCapablePartnerQuoteView):
         gross_margin_percent = ((financial_split["gross_margin"] / base_price) * Decimal("100")).quantize(Decimal("0.01")) if base_price > 0 else Decimal("0.00")
 
         response_snapshot = dict(latest_response.response_snapshot or {})
-        response_snapshot["customer_pricing"] = {
+        internal_pricing_snapshot = {
             "production_cost": str(financial_split["production_cost"]),
             "gross_margin_type": gross_margin_type,
             "gross_margin_percent": str(gross_margin_percent),
@@ -1035,6 +1062,13 @@ class PartnerQuoteSendToClientView(ManagerCapablePartnerQuoteView):
             "shop_payout": str(financial_split["shop_payout"]),
             "broker_payout": str(financial_split["broker_payout"]),
             "final_client_price": str(financial_split["client_total"]),
+        }
+        response_snapshot["internal_pricing_snapshot"] = internal_pricing_snapshot
+        response_snapshot["customer_pricing"] = {
+            "currency": response_snapshot.get("currency") or "KES",
+            "final_client_price": str(financial_split["client_total"]),
+            "estimated_total": str(financial_split["client_total"]),
+            "gross_margin_type": gross_margin_type,
         }
         if quantity_pricing_snapshot:
             response_snapshot["quantity_pricing_snapshot"] = quantity_pricing_snapshot
@@ -1066,17 +1100,20 @@ class PartnerQuoteSendToClientView(ManagerCapablePartnerQuoteView):
                 "updated_at",
             ]
         )
-        if not getattr(latest_response, "financial_split", None):
-            create_quote_financial_split(
-                quote=latest_response,
-                production_cost=financial_split["production_cost"],
-                broker_client_price=financial_split["broker_client_price"],
-                policy=financial_split["policy"],
-            )
+        create_quote_financial_split(
+            quote=latest_response,
+            production_cost=financial_split["production_cost"],
+            broker_client_price=financial_split["broker_client_price"],
+            policy=financial_split["policy"],
+        )
 
         request_snapshot["customer_pricing"] = response_snapshot["customer_pricing"]
         quote_request.request_snapshot = request_snapshot
-        quote_request.save(update_fields=["request_snapshot", "updated_at"])
+        update_fields = ["request_snapshot", "updated_at"]
+        if quote_request.status == QuoteRequest.DRAFT:
+            quote_request.status = QuoteRequest.QUOTED
+            update_fields.append("status")
+        quote_request.save(update_fields=update_fields)
         client_recipient = quote_request.on_behalf_of or quote_request.created_by
         if client_recipient and getattr(client_recipient, "id", None) != request.user.id:
             notify_quote_event(
@@ -1088,11 +1125,42 @@ class PartnerQuoteSendToClientView(ManagerCapablePartnerQuoteView):
                 actor=request.user,
             )
 
+        payment_payload = None
+        if is_offline_quote:
+            payment_phone = str(request.data.get("phone_number") or pending_client.get("phone") or quote_request.customer_phone or "").strip()
+            if payment_phone:
+                try:
+                    payment = create_payment_for_quote(
+                        quote=latest_response,
+                        payer=None,
+                        method=Payment.METHOD_MPESA,
+                        payer_phone=payment_phone,
+                    )
+                    stk_request = initiate_stk_push(payment=payment, phone_number=payment_phone)
+                except ValidationError as exc:
+                    return Response({"detail": str(exc)}, status=400)
+                payment.refresh_from_db()
+                payment_payload = {
+                    "id": payment.id,
+                    "status": payment.status,
+                    "amount": str(payment.amount),
+                    "currency": payment.currency,
+                    "method": payment.method,
+                    "payer_phone": payment.payer_phone,
+                    "checkout_request_id": payment.checkout_request_id,
+                    "merchant_request_id": payment.merchant_request_id,
+                    "stk_request_id": stk_request.id,
+                    "stk_status": stk_request.status,
+                }
+
         return Response(
             {
                 "quote_request_id": quote_request.id,
                 "quote_id": latest_response.id,
                 "pricing": response_snapshot["customer_pricing"],
+                "offline_client": is_offline_quote,
+                "claim_token": request_snapshot.get("offline_claim_token") if is_offline_quote else None,
+                "payment": payment_payload,
             }
         )
 
@@ -1516,17 +1584,111 @@ class PartnerJobDispatchView(BaseRoleDetailView):
         )
 
 
+class OfflineQuoteClaimView(BaseRoleDetailView):
+    dashboard_role = "client"
+    allowed_roles = (CANONICAL_CLIENT_ROLE,)
+
+    @transaction.atomic
+    def post(self, request):
+        serializer = OfflineQuoteClaimSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        token = serializer.validated_data["claim_token"].strip()
+        quote_request = None
+        for candidate in QuoteRequest.objects.select_for_update().filter(on_behalf_of__isnull=True).order_by("-created_at"):
+            snapshot = candidate.request_snapshot if isinstance(candidate.request_snapshot, dict) else {}
+            if snapshot.get("offline_claim_token") == token:
+                quote_request = candidate
+                break
+        if quote_request is None:
+            return Response({"detail": "Offline quote claim token was not found."}, status=404)
+
+        request_snapshot = dict(quote_request.request_snapshot or {})
+        pending_client = dict(request_snapshot.get("pending_client") or {})
+        pending_client["client_user_id"] = request.user.id
+        pending_client["offline_client"] = False
+        pending_client["claimed_at"] = timezone.now().isoformat()
+        pending_client["email"] = pending_client.get("email") or getattr(request.user, "email", "")
+        pending_client["name"] = pending_client.get("name") or getattr(request.user, "name", "") or getattr(request.user, "email", "")
+        request_snapshot["pending_client"] = pending_client
+        request_snapshot["offline_claimed_by_user_id"] = request.user.id
+        quote_request.on_behalf_of = request.user
+        quote_request.customer_name = pending_client.get("name") or quote_request.customer_name
+        quote_request.customer_email = pending_client.get("email") or quote_request.customer_email
+        quote_request.request_snapshot = request_snapshot
+        quote_request.save(update_fields=["on_behalf_of", "customer_name", "customer_email", "request_snapshot", "updated_at"])
+        latest_response = quote_request.quotes.exclude(status=Quote.PENDING).order_by("-created_at", "-id").first()
+        return Response(
+            {
+                "quote_request_id": quote_request.id,
+                "quote_id": latest_response.id if latest_response else None,
+                "claimed": True,
+            }
+        )
+
+
 class PartnerClientListView(BaseRoleDetailView):
     dashboard_role = "partner"
     allowed_roles = (CANONICAL_PARTNER_ROLE,)
 
+    def _client_rows_from_quote_history(self, request):
+        rows: list[dict[str, object]] = []
+        seen: set[tuple[object, str, str]] = set()
+        quote_requests = QuoteRequest.objects.filter(created_by=request.user).select_related("on_behalf_of").order_by("-updated_at", "-created_at")[:100]
+        for quote_request in quote_requests:
+            snapshot = quote_request.request_snapshot if isinstance(quote_request.request_snapshot, dict) else {}
+            pending_client = snapshot.get("pending_client") if isinstance(snapshot.get("pending_client"), dict) else {}
+            row = _partner_client_payload(
+                client_user=quote_request.on_behalf_of,
+                name=str(pending_client.get("name") or quote_request.customer_name or "").strip(),
+                phone=_normalize_phone(pending_client.get("phone") or quote_request.customer_phone or ""),
+                email=str(pending_client.get("email") or quote_request.customer_email or "").strip().lower(),
+                company=str(pending_client.get("company") or "").strip(),
+                is_offline=quote_request.on_behalf_of_id is None,
+            )
+            key = (row.get("client_id"), str(row.get("phone") or ""), str(row.get("email") or ""))
+            if key in seen or not (row.get("client_id") or row.get("phone") or row.get("email") or row.get("name")):
+                continue
+            seen.add(key)
+            rows.append(row)
+        return rows
+
     def get(self, request):
-        return Response({"detail": "Partner client CRM is postponed for MVP."}, status=410)
+        search = str(request.query_params.get("search") or request.query_params.get("q") or "").strip().lower()
+        rows = self._client_rows_from_quote_history(request)
+        User = get_user_model()
+        user_queryset = User.objects.filter(role=User.Role.CLIENT)
+        if search:
+            user_queryset = user_queryset.filter(
+                Q(name__icontains=search)
+                | Q(email__icontains=search)
+                | Q(username__icontains=search)
+            )
+        for user in user_queryset.order_by("name", "email", "id")[:25]:
+            row = _partner_client_payload(client_user=user)
+            if not any(existing.get("client_id") == row.get("client_id") for existing in rows):
+                rows.append(row)
+        if search:
+            rows = [
+                row for row in rows
+                if search in " ".join(str(row.get(field) or "").lower() for field in ("name", "phone", "email", "company"))
+            ]
+        return Response({"role": "partner", "results": rows[:50]})
 
     @transaction.atomic
     def post(self, request):
-        return Response({"detail": "Partner client CRM is postponed for MVP."}, status=410)
-
+        serializer = PartnerClientCreateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        try:
+            payload = _resolve_or_create_partner_client(
+                partner_user=request.user,
+                client_name=serializer.validated_data.get("name", ""),
+                client_email=serializer.validated_data.get("email", ""),
+                client_phone=serializer.validated_data.get("phone", ""),
+                client_company=serializer.validated_data.get("company", ""),
+            )
+        except ValueError as exc:
+            return Response({"detail": str(exc)}, status=400)
+        return Response(payload, status=201)
 
 class PartnerProductionShopListView(BaseRoleDetailView):
     dashboard_role = "partner"

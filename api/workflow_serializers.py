@@ -677,8 +677,8 @@ class PartnerQuoteAttachClientSerializer(serializers.Serializer):
     def validate(self, attrs):
         if attrs.get("client_user") is not None:
             return attrs
-        if not attrs.get("client_email"):
-            raise serializers.ValidationError("Client email is required when no existing client is selected.")
+        if not (attrs.get("client_email") or attrs.get("client_phone") or attrs.get("client_name")):
+            raise serializers.ValidationError("Client email, phone, or name is required when no existing client is selected.")
         return attrs
 
 

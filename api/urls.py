@@ -112,6 +112,7 @@ urlpatterns = [
     path("shop/requests/<int:pk>/", workflow_views.QuoteRequestDetailView.as_view(), name="shop-quote-request-detail"),
     path("client/responses/", workflow_views.ClientResponseListView.as_view(), name="client-response-list"),
     path("client/responses/<int:response_id>/accept/", workflow_views.ClientResponseAcceptView.as_view(), name="client-response-accept"),
+    path("quotes/offline-claim/", dashboard_views.OfflineQuoteClaimView.as_view(), name="offline-quote-claim"),
     path("quotes/<int:quote_id>/accept/", payment_views.QuoteAcceptView.as_view(), name="quote-accept-payment"),
     path("payments/stk-push/", payment_views.PaymentInitiateSTKView.as_view(), name="payment-stk-push"),
     path("payments/mpesa-callback/", payment_views.MpesaCallbackView.as_view(), name="payment-mpesa-callback"),
