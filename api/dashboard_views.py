@@ -1532,9 +1532,60 @@ class PartnerProductionShopListView(BaseRoleDetailView):
     dashboard_role = "partner"
     allowed_roles = (CANONICAL_PARTNER_ROLE,)
 
+    def get_queryset(self, request):
+        queryset = (
+            Shop.objects.filter(is_active=True, is_public=True)
+            .filter(Q(supports_custom_requests=True) | Q(supports_catalog_requests=True))
+            .filter(
+                papers__is_active=True,
+                machines__is_active=True,
+                machines__printing_rates__is_active=True,
+            )
+            .select_related("owner")
+            .distinct()
+        )
+        search = str(request.query_params.get("search") or request.query_params.get("q") or "").strip()
+        if search:
+            queryset = queryset.filter(
+                Q(name__icontains=search)
+                | Q(slug__icontains=search)
+                | Q(city__icontains=search)
+                | Q(service_area__icontains=search)
+            )
+        location = str(request.query_params.get("location") or request.query_params.get("area") or "").strip()
+        if location:
+            queryset = queryset.filter(
+                Q(city__icontains=location)
+                | Q(state__icontains=location)
+                | Q(country__icontains=location)
+                | Q(service_area__icontains=location)
+            )
+        capability = str(request.query_params.get("capability") or request.query_params.get("request_type") or "").strip().lower()
+        if capability in {"custom", "custom_requests"}:
+            queryset = queryset.filter(supports_custom_requests=True)
+        elif capability in {"catalog", "catalog_requests"}:
+            queryset = queryset.filter(supports_catalog_requests=True)
+        return queryset.order_by("name", "id")
+
     def get(self, request):
-        shops = Shop.objects.filter(managed_jobs__broker=request.user).distinct().order_by("name")
-        return Response({"role": "partner", "results": [{"id": shop.id, "name": shop.name, "slug": shop.slug} for shop in shops]})
+        results = []
+        for shop in self.get_queryset(request):
+            results.append(
+                {
+                    "id": shop.id,
+                    "name": shop.name,
+                    "slug": shop.slug,
+                    "city": shop.city,
+                    "service_area": shop.service_area,
+                    "location": ", ".join(part for part in [shop.service_area, shop.city] if part),
+                    "can_receive_requests": True,
+                    "can_price_requests": True,
+                    "supports_custom_requests": shop.supports_custom_requests,
+                    "supports_catalog_requests": shop.supports_catalog_requests,
+                    "pricing_source": "shop_rate_card",
+                }
+            )
+        return Response({"role": "partner", "results": results})
 
 
 class PartnerPaymentListView(BaseRoleDetailView):
