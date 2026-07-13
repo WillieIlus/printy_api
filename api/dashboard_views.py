@@ -1788,14 +1788,14 @@ class ProductionPricingListView(BaseRoleDetailView):
     allowed_roles = (CANONICAL_PRODUCTION_ROLE,)
 
     def get(self, request):
-        pricing_rows = PrintingRate.objects.filter(shop__owner=request.user).select_related("shop").order_by("shop__name", "sheet_size")[:100]
+        pricing_rows = PrintingRate.objects.filter(machine__shop__owner=request.user).select_related("machine__shop").order_by("machine__shop__name", "sheet_size")[:100]
         return Response(
             {
                 "role": "production",
                 "results": [
                     {
                         "id": row.id,
-                        "shop_name": row.shop.name,
+                        "shop_name": row.machine.shop.name,
                         "sheet_size": row.sheet_size,
                         "color_mode": row.color_mode,
                         "single_price": str(row.single_price),
@@ -1881,3 +1881,4 @@ class ProductionPaymentListView(BaseRoleDetailView):
                 ],
             }
         )
+
