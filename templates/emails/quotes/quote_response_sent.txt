@@ -1,0 +1,14 @@
+{{ subject }}
+
+{{ greeting }}
+{{ intro }}
+
+Shop: {{ shop_name }}
+Quoted amount: {{ summary_rows.1.value }}
+Turnaround: {{ summary_rows.2.value }}
+Included specs: {{ summary_rows.3.value }}
+Needs confirmation: {{ summary_rows.4.value }}
+Shop note: {{ summary_rows.5.value }}
+
+{{ support_copy }}
+{{ cta_label }}: {{ cta_url }}

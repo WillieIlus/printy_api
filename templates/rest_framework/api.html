@@ -1,0 +1,71 @@
+{% extends "rest_framework/base.html" %}
+{% load i18n static %}
+
+{% block content %}
+    {{ block.super }}
+
+    {% if workflow_action_buttons %}
+        <div class="well" style="margin-top: 24px;">
+            <h4 style="margin-top: 0;">{% trans "Workflow transitions" %}</h4>
+            <p class="help-block">
+                {% trans "Click a button to run that state-machine transition (approve &rarr; pay &rarr; assign &rarr; press-advance &rarr; confirm-delivery). The page reloads with the updated job after each step." %}
+            </p>
+            {% for button in workflow_action_buttons %}
+                <form class="workflow-button-form" action="{{ button.url }}" method="post"
+                      style="margin-bottom: 8px; display: flex; align-items: center; gap: 8px;">
+                    {% csrf_token %}
+                    <span class="workflow-button-label" style="min-width: 180px;">{{ button.label }}</span>
+                    {% for field in button.fields %}
+                        {% if field.type == "select" %}
+                            <select name="{{ field.name }}" class="form-control" style="width: auto; display: inline-block; margin-right: 6px;">
+                                {% for option in field.options %}
+                                    <option value="{{ option.value }}">{{ option.label }}</option>
+                                {% endfor %}
+                            </select>
+                        {% else %}
+                            <input type="text" name="{{ field.name }}" class="form-control"
+                                   placeholder="{{ field.placeholder }}" style="width: auto; display: inline-block; margin-right: 6px;">
+                        {% endif %}
+                    {% endfor %}
+                    <button type="submit" class="btn btn-primary btn-xs js-tooltip" data-placement="top"
+                            title="POST {{ button.url }}">{{ button.label }}</button>
+                </form>
+            {% endfor %}
+        </div>
+
+        <script>
+            (function () {
+                var forms = document.querySelectorAll('.workflow-button-form');
+                Array.prototype.forEach.call(forms, function (form) {
+                    form.addEventListener('submit', function (event) {
+                        event.preventDefault();
+                        var button = form.querySelector('button[type="submit"]');
+                        var original = button.textContent;
+                        button.disabled = true;
+                        button.textContent = 'Running…';
+                        var data = new FormData(form);
+                        fetch(form.action, {
+                            method: 'POST',
+                            headers: {'X-CSRFToken': data.get('csrfmiddlewaretoken')},
+                            body: data
+                        }).then(function (response) {
+                            return response.json().then(function (body) {
+                                if (!response.ok) {
+                                    throw new Error((body && body.detail) || ('HTTP ' + response.status));
+                                }
+                                return body;
+                            });
+                        }).then(function () {
+                            button.textContent = 'Done ✓';
+                            window.location.reload();
+                        }).catch(function (err) {
+                            button.disabled = false;
+                            button.textContent = original;
+                            window.alert('Transition failed: ' + err.message);
+                        });
+                    });
+                });
+            })();
+        </script>
+    {% endif %}
+{% endblock %}

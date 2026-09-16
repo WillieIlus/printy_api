@@ -1,0 +1,13 @@
+{{ subject }}
+
+{{ greeting }}
+{{ intro }}
+
+Job: {{ summary_rows.0.value }}
+Quantity: {{ summary_rows.1.value }}
+Accepted formats: {{ summary_rows.2.value }}
+File size: {{ summary_rows.3.value }}
+Print manager: {{ summary_rows.4.value }}
+
+{{ support_copy }}
+{{ cta_label }}: {{ cta_url }}

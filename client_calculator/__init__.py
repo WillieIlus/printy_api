@@ -1,0 +1,1 @@
+"""Client-facing adapter for Printy's canonical calculator workflow."""

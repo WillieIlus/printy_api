@@ -1,0 +1,7 @@
+{% autoescape off %}Hello from Printy!
+
+{% block content %}{% endblock content %}
+
+Thank you for using Printy!
+Print work, clearer.
+{% endautoescape %}

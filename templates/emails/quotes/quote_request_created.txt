@@ -1,0 +1,16 @@
+{{ subject }}
+
+{{ greeting }}
+{{ intro }}
+
+Buyer: {{ client_name }}
+Job type: {{ summary_rows.1.value }}
+Quantity: {{ summary_rows.2.value }}
+Size: {{ summary_rows.3.value }}
+Paper / grammage: {{ summary_rows.4.value }}
+Finishing: {{ summary_rows.5.value }}
+Artwork: {{ summary_rows.6.value }}
+Notes: {{ summary_rows.7.value }}
+
+{{ support_copy }}
+{{ cta_label }}: {{ cta_url }}

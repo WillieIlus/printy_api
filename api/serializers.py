@@ -1,0 +1,2239 @@
+"""
+API serializers with strong validation of shop consistency.
+All nested resources (products, papers, machines, materials, finishing_rates)
+must belong to the same shop.
+"""
+import logging
+from decimal import Decimal
+
+from rest_framework import serializers
+
+logger = logging.getLogger(__name__)
+
+from accounts.models import User, UserProfile
+from catalog.choices import PricingMode, ProductStatus
+from catalog.models import Product, ProductCategory, ProductFinishingOption, ProductImage
+from inventory.models import Machine, Paper
+from pricing.choices import ChargeUnit, ColorMode, FinishingBillingBasis, FinishingSideMode, FinishingSides, Sides
+from pricing.models import FinishingRate, PrintingRate, VolumeDiscount
+from quotes.choices import QuoteStatus
+from quotes.models import QuoteItem, QuoteItemAttachment, QuoteItemFinishing, QuoteRequest
+from quotes.turnaround import (
+    derive_product_turnaround_hours,
+    estimate_turnaround,
+    humanize_working_hours,
+    schedule_summary,
+)
+from services.pricing.marketplace_pricing import build_marketplace_pricing_summary
+from shops.models import Shop
+
+from .quote_serializers import (
+    QuoteRequestCustomerCreateSerializer,
+    QuoteRequestCustomerDetailSerializer,
+    QuoteRequestCustomerListSerializer,
+    QuoteRequestCustomerUpdateSerializer,
+    QuoteRequestShopDetailSerializer,
+    QuoteRequestShopListSerializer,
+    QuoteSharePublicSerializer,
+    QuoteCreateSerializer,
+    QuoteDetailSerializer,
+    QuoteListSerializer,
+    QuoteSummarySerializer,
+    QuoteUpdateSerializer,
+)
+
+
+def _serializer_marketplace_pricing(*, base_price, shop, currency: str = "KES") -> dict[str, object]:
+    return build_marketplace_pricing_summary(
+        base_price=base_price,
+        shop=shop,
+        currency=currency,
+    )
+
+from .validators import validate_shop_consistency
+
+
+def _malformed_select_message(field_name: str) -> str:
+    return f"{field_name} must be sent as a primitive value, not an object or array."
+
+
+class StrictChoiceField(serializers.ChoiceField):
+    def to_internal_value(self, data):
+        if isinstance(data, (dict, list)):
+            raise serializers.ValidationError(_malformed_select_message(self.field_name))
+        return super().to_internal_value(data)
+
+
+class StrictPrimaryKeyRelatedField(serializers.PrimaryKeyRelatedField):
+    def to_internal_value(self, data):
+        if isinstance(data, (dict, list)):
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug("Malformed select payload for %s: %r", self.field_name, data)
+            raise serializers.ValidationError(_malformed_select_message(self.field_name))
+        return super().to_internal_value(data)
+
+
+def get_shop_status(shop):
+    """
+    Compute shop status: 'opening' | 'closing_soon' | 'closed'.
+    Uses shop's timezone-naive times; assumes local timezone.
+    """
+    from datetime import datetime
+
+    from django.utils import timezone
+
+    now = timezone.localtime(timezone.now())
+    weekday = now.isoweekday()  # 1=Mon .. 7=Sun
+    from_hour = getattr(shop, "opening_time", None) or "08:00"
+    to_hour = getattr(shop, "closing_time", None) or "18:00"
+    try:
+        open_h = datetime.strptime(from_hour, "%H:%M").time()
+        close_h = datetime.strptime(to_hour, "%H:%M").time()
+    except (ValueError, TypeError):
+        return "closed"
+
+    now_time = now.time()
+    if now_time < open_h or now_time > close_h:
+        return "closed"
+
+    delta = datetime.combine(now.date(), close_h) - datetime.combine(now.date(), now_time)
+    minutes_before_close = int(delta.total_seconds() // 60)
+    if minutes_before_close <= getattr(shop, "closing_soon_minutes", 30):
+        return "closing_soon"
+    return "opening"
+
+
+def build_product_turnaround_payload(product, *, rush: bool = False):
+    working_hours = derive_product_turnaround_hours(product, rush=rush)
+    estimate = estimate_turnaround(
+        shop=getattr(product, "shop", None),
+        working_hours=working_hours,
+    )
+    return {
+        "turnaround_hours": working_hours,
+        "estimated_working_hours": estimate.working_hours if estimate else working_hours,
+        "estimated_ready_at": estimate.ready_at if estimate else None,
+        "human_ready_text": estimate.human_ready_text if estimate else "Ready time on request",
+        "turnaround_label": estimate.label if estimate else "On request",
+        "turnaround_text": humanize_working_hours(working_hours),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Public / Read-only serializers
+# ---------------------------------------------------------------------------
+
+
+class PublicShopListSerializer(serializers.ModelSerializer):
+    """List active shops (public)."""
+
+    status = serializers.SerializerMethodField()
+    description = serializers.CharField(read_only=True)
+    service_area = serializers.CharField(read_only=True)
+    turnaround_statement = serializers.CharField(read_only=True)
+    opening_hours_text = serializers.CharField(read_only=True)
+    public_whatsapp_number = serializers.CharField(read_only=True)
+    public_email = serializers.CharField(read_only=True)
+    logo = serializers.SerializerMethodField()
+    social_links = serializers.SerializerMethodField()
+    schedule_summary = serializers.SerializerMethodField()
+    country = serializers.CharField(read_only=True)
+    location_label = serializers.SerializerMethodField()
+    can_receive_requests = serializers.SerializerMethodField()
+    can_price_requests = serializers.SerializerMethodField()
+    supports_custom_requests = serializers.BooleanField(read_only=True)
+    supports_catalog_requests = serializers.BooleanField(read_only=True)
+    pricing_ready = serializers.BooleanField(read_only=True)
+    public_match_ready = serializers.BooleanField(read_only=True)
+    rate_card_completeness = serializers.SerializerMethodField()
+    setup_percent = serializers.SerializerMethodField()
+    turnaround_configured = serializers.SerializerMethodField()
+    turnaround_label = serializers.SerializerMethodField()
+    products_count = serializers.SerializerMethodField()
+    materials_count = serializers.SerializerMethodField()
+    pricing_rules_count = serializers.SerializerMethodField()
+    finishing_rates_count = serializers.SerializerMethodField()
+    capability_tags = serializers.SerializerMethodField()
+    material_tags = serializers.SerializerMethodField()
+    finishing_tags = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Shop
+        fields = [
+            "id",
+            "name",
+            "slug",
+            "currency",
+            "description",
+            "service_area",
+            "turnaround_statement",
+            "opening_hours_text",
+            "public_whatsapp_number",
+            "public_email",
+            "logo",
+            "city",
+            "state",
+            "country",
+            "location_label",
+            "latitude",
+            "longitude",
+            "google_place_id",
+            "social_links",
+            "status",
+            "can_receive_requests",
+            "can_price_requests",
+            "supports_custom_requests",
+            "supports_catalog_requests",
+            "pricing_ready",
+            "public_match_ready",
+            "rate_card_completeness",
+            "setup_percent",
+            "turnaround_configured",
+            "turnaround_label",
+            "products_count",
+            "materials_count",
+            "pricing_rules_count",
+            "finishing_rates_count",
+            "capability_tags",
+            "material_tags",
+            "finishing_tags",
+            "opening_time",
+            "closing_time",
+            "closing_soon_minutes",
+            "timezone",
+            "same_day_cutoff_time",
+            "schedule_summary",
+        ]
+        read_only_fields = ["slug"]
+
+    def get_status(self, obj):
+        return get_shop_status(obj)
+
+    def get_logo(self, obj):
+        profile = getattr(getattr(obj, "owner", None), "profile", None)
+        return getattr(profile, "avatar", None) or None
+
+    def get_social_links(self, obj):
+        profile = getattr(getattr(obj, "owner", None), "profile", None)
+        if not profile:
+            return []
+        return []
+
+    def get_schedule_summary(self, obj):
+        return schedule_summary(obj)
+
+    def _setup_status(self, obj):
+        cache = self.context.setdefault("_public_setup_status", {})
+        if obj.pk not in cache:
+            from setup.services import get_setup_status_for_shop
+
+            cache[obj.pk] = get_setup_status_for_shop(obj)
+        return cache[obj.pk]
+
+    def get_location_label(self, obj):
+        parts = [part.strip() for part in [obj.city, obj.state, obj.country] if (part or "").strip()]
+        return ", ".join(parts[:3])
+
+    def get_can_receive_requests(self, obj):
+        return bool(self._setup_status(obj).get("can_receive_requests"))
+
+    def get_can_price_requests(self, obj):
+        return bool(self._setup_status(obj).get("can_price_requests"))
+
+    def get_rate_card_completeness(self, obj):
+        return int(self._setup_status(obj).get("rate_card_completeness") or 0)
+
+    def get_setup_percent(self, obj):
+        return int(self._setup_status(obj).get("setup_percent") or 0)
+
+    def get_turnaround_configured(self, obj):
+        return bool(self._setup_status(obj).get("turnaround_configured"))
+
+    def get_turnaround_label(self, obj):
+        if obj.same_day_cutoff_time:
+            return f"Same-day before {obj.same_day_cutoff_time.strftime('%H:%M')}"
+        if self.get_turnaround_configured(obj):
+            return "Turnaround shown on products"
+        return "Turnaround on request"
+
+    def get_products_count(self, obj):
+        return Product.objects.filter(is_active=True, is_public=True).count()
+
+    def get_materials_count(self, obj):
+        return int(self._setup_status(obj).get("materials_count") or 0)
+
+    def get_pricing_rules_count(self, obj):
+        return int(self._setup_status(obj).get("pricing_rules_count") or 0)
+
+    def get_finishing_rates_count(self, obj):
+        return int(self._setup_status(obj).get("finishing_rates_count") or 0)
+
+    def get_capability_tags(self, obj):
+        tags = []
+        products = Product.objects.filter(is_active=True, is_public=True).select_related("category").order_by("name")[:8]
+        seen = set()
+        for product in products:
+            category_name = (getattr(product.category, "name", "") or "").strip()
+            label = category_name or (product.pricing_mode or "").replace("_", " ").title()
+            normalized = label.lower()
+            if normalized and normalized not in seen:
+                seen.add(normalized)
+                tags.append(label)
+            if len(tags) >= 5:
+                break
+        return tags
+
+    def get_material_tags(self, obj):
+        tags = []
+        seen = set()
+        for paper in Paper.objects.filter(shop=obj, is_active=True).order_by("sheet_size", "gsm")[:8]:
+            label = f"{paper.sheet_size} {paper.gsm}gsm"
+            normalized = label.lower()
+            if normalized not in seen:
+                seen.add(normalized)
+                tags.append(label)
+            if len(tags) >= 3:
+                break
+        return tags
+
+    def get_finishing_tags(self, obj):
+        tags = []
+        seen = set()
+        finishings = (
+            FinishingRate.objects.filter(shop=obj, is_active=True)
+            .select_related("category")
+            .order_by("name")[:8]
+        )
+        for finishing in finishings:
+            label = (finishing.name or "").strip() or (getattr(finishing.category, "name", "") or "").strip()
+            normalized = label.lower()
+            if normalized and normalized not in seen:
+                seen.add(normalized)
+                tags.append(label)
+            if len(tags) >= 5:
+                break
+        return tags
+
+
+class MatchShopsInputSerializer(serializers.Serializer):
+    """Input for POST /api/public/match-shops/."""
+
+    pricing_mode = serializers.ChoiceField(choices=["SHEET", "LARGE_FORMAT"], default="SHEET")
+    finished_width_mm = serializers.IntegerField(default=0, min_value=0)
+    finished_height_mm = serializers.IntegerField(default=0, min_value=0)
+    quantity = serializers.IntegerField(default=100, min_value=1)
+    sides = serializers.ChoiceField(choices=[("SIMPLEX", "Simplex"), ("DUPLEX", "Duplex")], default="SIMPLEX")
+    color_mode = serializers.ChoiceField(choices=[("BW", "B&W"), ("COLOR", "Color")], default="COLOR")
+    sheet_size = serializers.CharField(required=False, allow_blank=True, default="SRA3")
+    paper_gsm = serializers.IntegerField(required=False, allow_null=True)
+    paper_type = serializers.CharField(required=False, allow_blank=True, default="")
+    finishing_ids = serializers.ListField(
+        child=serializers.IntegerField(),
+        required=False,
+        default=list,
+    )
+    lat = serializers.FloatField(required=False, allow_null=True)
+    lng = serializers.FloatField(required=False, allow_null=True)
+    radius_km = serializers.FloatField(default=50, min_value=0.1, max_value=500)
+
+
+class MatchShopsResultSerializer(serializers.Serializer):
+    """Single shop match result."""
+
+    id = serializers.IntegerField()
+    name = serializers.CharField()
+    slug = serializers.CharField()
+    can_calculate = serializers.BooleanField()
+    reason = serializers.CharField()
+    missing_fields = serializers.ListField(child=serializers.CharField())
+
+
+class MatchShopsResponseSerializer(serializers.Serializer):
+    """Response for POST /api/public/match-shops/."""
+
+    shops = MatchShopsResultSerializer(many=True)
+    total = serializers.IntegerField()
+
+
+class FinishingOptionSerializer(serializers.ModelSerializer):
+    """Finishing option for a product (read-only for catalog)."""
+
+    finishing_rate_name = serializers.CharField(source="finishing_rate.name", read_only=True)
+    charge_unit = serializers.CharField(source="finishing_rate.charge_unit", read_only=True)
+    price = serializers.DecimalField(
+        source="finishing_rate.price", max_digits=12, decimal_places=2, read_only=True
+    )
+
+    class Meta:
+        model = ProductFinishingOption
+        fields = ["id", "finishing_rate", "finishing_rate_name", "charge_unit", "price", "is_default"]
+
+
+class ProductImageSerializer(serializers.ModelSerializer):
+    """Product image for catalog. Returns image path for frontend getMediaUrl."""
+
+    image = serializers.SerializerMethodField()
+
+    class Meta:
+        model = ProductImage
+        fields = ["id", "image", "is_primary", "display_order"]
+
+    def get_image(self, obj):
+        """Return path relative to MEDIA_ROOT for frontend."""
+        if obj.image:
+            return obj.image.name
+        return None
+
+
+class CatalogProductSerializer(serializers.ModelSerializer):
+    """Product with allowed finishing options, price hint, and gallery breakdown for public catalog."""
+
+    finishing_options = FinishingOptionSerializer(many=True, read_only=True)
+    images = ProductImageSerializer(many=True, read_only=True)
+    primary_image = serializers.SerializerMethodField()
+    category = serializers.SerializerMethodField()
+    default_sides = serializers.CharField()
+    pricing_mode = serializers.CharField()
+    price_hint = serializers.SerializerMethodField()
+    can_calculate = serializers.SerializerMethodField()
+    pricing_ready = serializers.SerializerMethodField()
+    price_range_est = serializers.SerializerMethodField()
+    imposition_summary = serializers.SerializerMethodField()
+    default_size_label = serializers.SerializerMethodField()
+    printing_total = serializers.SerializerMethodField()
+    finishing_summary = serializers.SerializerMethodField()
+    final_size = serializers.SerializerMethodField()
+    is_owner = serializers.SerializerMethodField()
+    turnaround_hours = serializers.SerializerMethodField()
+    rush_turnaround_hours = serializers.IntegerField(read_only=True)
+    rush_available = serializers.BooleanField(read_only=True)
+    estimated_working_hours = serializers.SerializerMethodField()
+    estimated_ready_at = serializers.SerializerMethodField()
+    human_ready_text = serializers.SerializerMethodField()
+    turnaround_label = serializers.SerializerMethodField()
+    turnaround_text = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Product
+        fields = [
+            "id",
+            "slug",
+            "name",
+            "description",
+            "category",
+            "product_kind",
+            "pricing_mode",
+            "default_finished_width_mm",
+            "default_finished_height_mm",
+            "default_bleed_mm",
+            "default_sides",
+            "min_quantity",
+            "turnaround_days",
+            "turnaround_hours",
+            "rush_turnaround_hours",
+            "rush_available",
+            "estimated_working_hours",
+            "estimated_ready_at",
+            "human_ready_text",
+            "turnaround_label",
+            "turnaround_text",
+            "finishing_options",
+            "images",
+            "primary_image",
+            "can_calculate",
+            "pricing_ready",
+            "price_hint",
+            "price_range_est",
+            "imposition_summary",
+            "default_size_label",
+            "printing_total",
+            "finishing_summary",
+            "final_size",
+            "is_owner",
+            "status",
+            "is_public",
+            "is_active",
+        ]
+
+    def get_is_owner(self, obj):
+        request = self.context.get("request")
+        if not request or not request.user.is_authenticated:
+            return False
+        shop = self.context.get("shop") or getattr(obj, "shop", None)
+        if not shop:
+            return False
+        owner_id = getattr(shop, "owner_id", None)
+        return owner_id == request.user.id
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        # When shop is in context (catalog view), add shop to product for edit URL
+        shop = self.context.get("shop")
+        if shop and "shop" not in data:
+            data["shop"] = PublicShopListSerializer(shop).data
+        return data
+
+    def get_primary_image(self, obj):
+        """Path of primary or first image for card display (frontend prepends mediaBase)."""
+        img = obj.get_primary_image()
+        if img and img.image:
+            return img.image.name
+        return None
+
+    def get_category(self, obj):
+        """Category name for display (frontend expects string, not FK id)."""
+        return obj.category.name if obj.category else None
+
+    def get_price_hint(self, obj):
+        from catalog.services import product_price_hint
+
+        return product_price_hint(obj)
+
+    def get_can_calculate(self, obj):
+        hint = self.get_price_hint(obj) or {}
+        return bool(hint.get("can_calculate"))
+
+    def get_pricing_ready(self, obj):
+        shop = self.context.get("shop")
+        return bool(getattr(shop, "pricing_ready", False))
+
+    def get_price_range_est(self, obj):
+        from catalog.services import compute_product_price_range_est
+
+        return compute_product_price_range_est(obj)
+
+    def get_imposition_summary(self, obj):
+        """e.g. 'Fits on SRA3: 10-up' for SHEET products."""
+        if obj.pricing_mode != "SHEET":
+            return None
+        try:
+            from inventory.choices import SHEET_SIZE_DIMENSIONS
+            sheet_size = (obj.default_sheet_size or "").strip() or "SRA3"
+            dims = SHEET_SIZE_DIMENSIONS.get(sheet_size)
+            if dims:
+                cps = obj.get_copies_per_sheet(sheet_size, dims[0], dims[1])
+                return f"{sheet_size}: {cps}-up"
+        except Exception:
+            pass
+        return None
+
+    def get_default_size_label(self, obj):
+        """e.g. 'SRA3' or 'Large Format'."""
+        if obj.pricing_mode == "LARGE_FORMAT":
+            return "Large Format"
+        return (obj.default_sheet_size or "").strip() or "SRA3"
+
+    def get_printing_total(self, obj):
+        """Computed printing total at min_quantity for display."""
+        try:
+            hint = self.get_price_hint(obj)
+            if hint and hint.get("can_calculate") and hint.get("min_price") is not None:
+                return hint["min_price"]
+        except Exception:
+            pass
+        return None
+
+    def get_finishing_summary(self, obj):
+        """Short list of finishing labels, e.g. ['Lamination', 'Cutting']."""
+        try:
+            options = obj.finishing_options.select_related("finishing_rate").all()
+            return [opt.finishing_rate.name for opt in options if opt.finishing_rate.is_active]
+        except Exception:
+            return []
+
+    def get_final_size(self, obj):
+        """Final product size string, e.g. '90×50mm' or '6000×3000mm'."""
+        w = obj.default_finished_width_mm
+        h = obj.default_finished_height_mm
+        if w and h:
+            return f"{w}×{h}mm"
+        return None
+
+
+    def _turnaround_payload(self, obj):
+        return build_product_turnaround_payload(obj)
+
+    def get_turnaround_hours(self, obj):
+        return self._turnaround_payload(obj)["turnaround_hours"]
+
+    def get_estimated_working_hours(self, obj):
+        return self._turnaround_payload(obj)["estimated_working_hours"]
+
+    def get_estimated_ready_at(self, obj):
+        return self._turnaround_payload(obj)["estimated_ready_at"]
+
+    def get_human_ready_text(self, obj):
+        return self._turnaround_payload(obj)["human_ready_text"]
+
+    def get_turnaround_label(self, obj):
+        return self._turnaround_payload(obj)["turnaround_label"]
+
+    def get_turnaround_text(self, obj):
+        return self._turnaround_payload(obj)["turnaround_text"]
+
+
+class CatalogProductWithShopSerializer(CatalogProductSerializer):
+    """Global catalog product serializer kept for import compatibility."""
+
+    pass
+
+
+# ---------------------------------------------------------------------------
+# Quote request serializers (buyer)
+# ---------------------------------------------------------------------------
+
+
+class QuoteItemFinishingWriteSerializer(serializers.ModelSerializer):
+    """Write serializer for quote item finishing (validates shop consistency)."""
+
+    finishing_rate = StrictPrimaryKeyRelatedField(queryset=FinishingRate.objects.all())
+    selected_side = StrictChoiceField(choices=["front", "back", "both"], required=False)
+
+    class Meta:
+        model = QuoteItemFinishing
+        fields = ["finishing_rate", "coverage_qty", "price_override", "apply_to_sides", "selected_side"]
+
+    def validate_finishing_rate(self, value):
+        quote_item = self.context.get("quote_item")
+        if quote_item and value:
+            validate_shop_consistency(
+                quote_item.quote_request.shop,
+                finishing_rate=value,
+                field_name="finishing_rate",
+            )
+        return value
+
+
+class QuoteItemAttachmentSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = QuoteItemAttachment
+        fields = ["id", "file", "name", "created_at"]
+
+
+class QuoteItemAttachmentUploadSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = QuoteItemAttachment
+        fields = ["file", "name"]
+        extra_kwargs = {"file": {"required": True}, "name": {"required": False, "allow_blank": True}}
+
+    def validate_file(self, value):
+        content_type = getattr(value, "content_type", "") or ""
+        if content_type and not content_type.startswith("image/"):
+            raise serializers.ValidationError("Only image uploads are supported for quote item attachments.")
+        return value
+
+
+class QuoteItemWriteSerializer(serializers.ModelSerializer):
+    """Write serializer for quote items (PRODUCT + CUSTOM, validates shop consistency)."""
+
+    finishings = QuoteItemFinishingWriteSerializer(many=True, required=False)
+    item_spec_snapshot = serializers.JSONField(required=False, allow_null=True)
+
+    class Meta:
+        model = QuoteItem
+        fields = [
+            "item_type",
+            "product",
+            "title",
+            "spec_text",
+            "has_artwork",
+            "quantity",
+            "pricing_mode",
+            "paper",
+            "chosen_width_mm",
+            "chosen_height_mm",
+            "sides",
+            "color_mode",
+            "machine",
+            "special_instructions",
+            "finishings",
+            "item_spec_snapshot",
+        ]
+
+    def validate(self, attrs):
+        quote_request = self.context.get("quote_request")
+        if not quote_request:
+            return attrs
+
+        shop = quote_request.shop
+        item_type = attrs.get("item_type") or getattr(self.instance, "item_type", "PRODUCT")
+
+        # Auto-bump quantity to product's min_quantity
+        if item_type == "PRODUCT":
+            product = attrs.get("product") or (self.instance.product if self.instance else None)
+            if product:
+                min_qty = getattr(product, "min_quantity", 1) or 1
+                qty = attrs.get("quantity")
+                if qty is not None and qty < min_qty:
+                    attrs["quantity"] = min_qty
+
+        # PRODUCT: product required
+        if item_type == "PRODUCT":
+            product = attrs.get("product") or (self.instance.product if self.instance else None)
+            if not product:
+                raise serializers.ValidationError({"product": "Product is required for PRODUCT items."})
+        # CUSTOM: title or spec_text required
+        elif item_type == "CUSTOM":
+            title = attrs.get("title", getattr(self.instance, "title", "") if self.instance else "")
+            spec_text = attrs.get("spec_text", getattr(self.instance, "spec_text", "") if self.instance else "")
+            if not title and not spec_text:
+                raise serializers.ValidationError(
+                    {"title": "Title or spec_text is required for CUSTOM items."}
+                )
+
+        # Pricing mode validation
+        pricing_mode = attrs.get("pricing_mode") or getattr(self.instance, "pricing_mode", None)
+        if pricing_mode == "SHEET" and attrs.get("paper") is None and (
+            not self.instance or not self.instance.paper_id
+        ):
+            pass  # Optional at create; can be set later
+        validate_shop_consistency(
+            shop,
+            product=attrs.get("product"),
+            paper=attrs.get("paper"),
+            machine=attrs.get("machine"),
+        )
+        return attrs
+
+    def create(self, validated_data):
+        from django.db import transaction
+        from quotes.pricing_service import compute_and_store_pricing
+
+        finishings_data = validated_data.pop("finishings", [])
+        item_spec_snapshot = validated_data.pop("item_spec_snapshot", None)
+        quote_request = self.context["quote_request"]
+        item_type = validated_data.get("item_type", "PRODUCT")
+        product = validated_data.get("product")
+        # Default pricing_mode: from product (PRODUCT) or SHEET/LARGE_FORMAT (CUSTOM)
+        if not validated_data.get("pricing_mode"):
+            if item_type == "PRODUCT" and product:
+                validated_data["pricing_mode"] = product.pricing_mode or "SHEET"
+            elif item_type == "CUSTOM":
+                validated_data["pricing_mode"] = "SHEET"
+
+        if item_spec_snapshot is None:
+            item_spec_snapshot = self._build_item_spec_snapshot(validated_data, finishings_data)
+
+        with transaction.atomic():
+            item = QuoteItem.objects.create(
+                quote_request=quote_request,
+                item_spec_snapshot=item_spec_snapshot,
+                **validated_data,
+            )
+            for fd in finishings_data:
+                QuoteItemFinishing.objects.create(quote_item=item, **fd)
+            try:
+                compute_and_store_pricing(item)
+            except Exception:
+                item.needs_review = True
+                item.save(update_fields=["needs_review"])
+        return item
+
+    def update(self, instance, validated_data):
+        from quotes.pricing_service import compute_and_store_pricing
+
+        finishings_data = validated_data.pop("finishings", None)
+        item_spec_snapshot = validated_data.pop("item_spec_snapshot", None)
+        for attr, value in validated_data.items():
+            setattr(instance, attr, value)
+        if item_spec_snapshot is not None:
+            instance.item_spec_snapshot = item_spec_snapshot
+        instance.save()
+        if finishings_data is not None:
+            instance.finishings.all().delete()
+            for fd in finishings_data:
+                QuoteItemFinishing.objects.create(quote_item=instance, **fd)
+        if item_spec_snapshot is None:
+            effective_finishings = finishings_data
+            if effective_finishings is None:
+                effective_finishings = [
+                    {
+                        "finishing_rate": finishing.finishing_rate,
+                        "apply_to_sides": finishing.apply_to_sides,
+                        "selected_side": finishing.selected_side,
+                    }
+                    for finishing in instance.finishings.select_related("finishing_rate").all()
+                ]
+            instance.item_spec_snapshot = self._build_item_spec_snapshot(
+                {
+                    "item_type": instance.item_type,
+                    "product": instance.product,
+                    "title": instance.title,
+                    "spec_text": instance.spec_text,
+                    "quantity": instance.quantity,
+                    "pricing_mode": instance.pricing_mode,
+                    "paper": instance.paper,
+                    "chosen_width_mm": instance.chosen_width_mm,
+                    "chosen_height_mm": instance.chosen_height_mm,
+                    "sides": instance.sides,
+                    "color_mode": instance.color_mode,
+                    "machine": instance.machine,
+                },
+                effective_finishings,
+            )
+            instance.save(update_fields=["item_spec_snapshot", "updated_at"])
+        try:
+            compute_and_store_pricing(instance)
+        except Exception:
+            instance.needs_review = True
+            instance.save(update_fields=["needs_review"])
+        return instance
+
+    def _build_item_spec_snapshot(self, item_data, finishings_data):
+        return {
+            "item_type": item_data.get("item_type"),
+            "product_id": getattr(item_data.get("product"), "id", None),
+            "title": item_data.get("title") or "",
+            "spec_text": item_data.get("spec_text") or "",
+            "quantity": item_data.get("quantity"),
+            "pricing_mode": item_data.get("pricing_mode"),
+            "paper_id": getattr(item_data.get("paper"), "id", None),
+            "chosen_width_mm": item_data.get("chosen_width_mm"),
+            "chosen_height_mm": item_data.get("chosen_height_mm"),
+            "sides": item_data.get("sides") or "",
+            "color_mode": item_data.get("color_mode") or "COLOR",
+            "machine_id": getattr(item_data.get("machine"), "id", None),
+            "finishings": [
+                {
+                    "finishing_rate_id": getattr(finishing.get("finishing_rate"), "id", None),
+                    "apply_to_sides": finishing.get("apply_to_sides"),
+                    "selected_side": finishing.get("selected_side"),
+                }
+                for finishing in finishings_data
+            ],
+        }
+
+
+class QuoteItemReadSerializer(serializers.ModelSerializer):
+    """Read serializer for quote items (PRODUCT + CUSTOM)."""
+
+    product_name = serializers.SerializerMethodField()
+    product_slug = serializers.SerializerMethodField()
+    finishings = QuoteItemFinishingWriteSerializer(many=True, read_only=True)
+    attachments = QuoteItemAttachmentSerializer(many=True, read_only=True)
+
+    class Meta:
+        model = QuoteItem
+        fields = [
+            "id",
+            "item_type",
+            "product",
+            "product_name",
+            "product_slug",
+            "title",
+            "spec_text",
+            "has_artwork",
+            "quantity",
+            "pricing_mode",
+            "paper",
+            "chosen_width_mm",
+            "chosen_height_mm",
+            "sides",
+            "color_mode",
+            "machine",
+            "special_instructions",
+            "unit_price",
+            "line_total",
+            "needs_review",
+            "finishings",
+            "attachments",
+            "created_at",
+        ]
+
+    def get_product_name(self, obj):
+        if obj.item_type == "PRODUCT" and obj.product_id:
+            return obj.product.name
+        return obj.title or ""
+
+    def get_product_slug(self, obj):
+        if obj.item_type == "PRODUCT" and obj.product_id and obj.product:
+            return getattr(obj.product, "slug", None) or ""
+        return ""
+
+
+# Quote request serializers — use quote_serializers for customer/shop separation
+QuoteRequestCreateSerializer = QuoteRequestCustomerCreateSerializer
+QuoteRequestPatchSerializer = QuoteRequestCustomerUpdateSerializer
+QuoteRequestReadSerializer = QuoteRequestCustomerDetailSerializer  # Default for detail; views may override for list
+
+
+# ---------------------------------------------------------------------------
+# Staff quoting API (/api/quotes/) — staff-only, full control
+# ---------------------------------------------------------------------------
+
+
+class QuoteItemWithBreakdownSerializer(serializers.ModelSerializer):
+    """Read serializer for quote items including pricing_snapshot (breakdown)."""
+
+    product_name = serializers.SerializerMethodField()
+    finishings = QuoteItemFinishingWriteSerializer(many=True, read_only=True)
+    attachments = QuoteItemAttachmentSerializer(many=True, read_only=True)
+    calculation_description = serializers.SerializerMethodField()
+    calculation_explanations = serializers.SerializerMethodField()
+
+    class Meta:
+        model = QuoteItem
+        fields = [
+            "id",
+            "item_type",
+            "product",
+            "product_name",
+            "title",
+            "spec_text",
+            "has_artwork",
+            "quantity",
+            "pricing_mode",
+            "paper",
+            "chosen_width_mm",
+            "chosen_height_mm",
+            "sides",
+            "color_mode",
+            "machine",
+            "special_instructions",
+            "unit_price",
+            "line_total",
+            "pricing_snapshot",
+            "calculation_description",
+            "calculation_explanations",
+            "pricing_locked_at",
+            "finishings",
+            "attachments",
+        ]
+
+    def get_product_name(self, obj):
+        if obj.item_type == "PRODUCT" and obj.product_id:
+            return obj.product.name
+        return obj.title or ""
+
+    def get_calculation_description(self, obj):
+        snapshot = obj.pricing_snapshot or {}
+        return snapshot.get("calculation_description", "")
+
+    def get_calculation_explanations(self, obj):
+        snapshot = obj.pricing_snapshot or {}
+        return snapshot.get("explanations", [])
+
+
+class QuoteCreateSerializer(serializers.ModelSerializer):
+    """Staff: create quote draft."""
+
+    class Meta:
+        model = QuoteRequest
+        fields = ["shop", "customer_name", "customer_email", "customer_phone", "notes"]
+
+    def validate_shop(self, value):
+        if not value or not value.is_active:
+            raise serializers.ValidationError("Shop must be active.")
+        return value
+
+    def create(self, validated_data):
+        validated_data["created_by"] = self.context["request"].user
+        validated_data["status"] = QuoteStatus.DRAFT
+        return super().create(validated_data)
+
+
+class QuoteDetailSerializer(QuoteRequestShopDetailSerializer):
+    """Staff: full quote detail — alias for QuoteRequestShopDetailSerializer."""
+    pass
+
+
+class QuoteItemAddSerializer(QuoteItemWriteSerializer):
+    """
+    Staff: add/update quote item with calculator input.
+    On create/update, computes and stores pricing snapshot in a transaction.
+    """
+
+    class Meta(QuoteItemWriteSerializer.Meta):
+        pass
+
+    def create(self, validated_data):
+        from django.db import transaction
+        from quotes.pricing_service import compute_and_store_pricing
+
+        finishings_data = validated_data.pop("finishings", [])
+        quote_request = self.context["quote_request"]
+
+        with transaction.atomic():
+            item = QuoteItem.objects.create(quote_request=quote_request, **validated_data)
+            for fd in finishings_data:
+                QuoteItemFinishing.objects.create(quote_item=item, **fd)
+            compute_and_store_pricing(item)
+        return item
+
+    def update(self, instance, validated_data):
+        from django.db import transaction
+        from quotes.pricing_service import compute_and_store_pricing
+
+        finishings_data = validated_data.pop("finishings", None)
+        with transaction.atomic():
+            for attr, value in validated_data.items():
+                setattr(instance, attr, value)
+            instance.save()
+            if finishings_data is not None:
+                instance.finishings.all().delete()
+                for fd in finishings_data:
+                    QuoteItemFinishing.objects.create(quote_item=instance, **fd)
+            compute_and_store_pricing(instance)
+        return instance
+
+
+# ---------------------------------------------------------------------------
+# Seller serializers (shop-scoped with consistency validation)
+# ---------------------------------------------------------------------------
+
+
+class ShopSerializer(serializers.ModelSerializer):
+    """CRUD for seller's own shop. Owner set by view on create."""
+
+    schedule_summary = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Shop
+        fields = [
+            "id",
+            "name",
+            "slug",
+            "currency",
+            "is_vat_enabled",
+            "vat_rate",
+            "vat_mode",
+            "is_active",
+            "owner",
+            "description",
+            "service_area",
+            "turnaround_statement",
+            "opening_hours_text",
+            "public_whatsapp_number",
+            "public_email",
+            "business_email",
+            "phone_number",
+            "address_line",
+            "city",
+            "state",
+            "country",
+            "zip_code",
+            "latitude",
+            "longitude",
+            "google_place_id",
+            "opening_time",
+            "closing_time",
+            "closing_soon_minutes",
+            "timezone",
+            "same_day_cutoff_time",
+            "is_public",
+            "schedule_summary",
+        ]
+        read_only_fields = ["slug", "owner"]
+        extra_kwargs = {
+            # Coerce null to "" — model uses blank=True, default="" but no null=True
+            "description": {"allow_null": True, "default": ""},
+            "service_area": {"allow_null": True, "default": ""},
+            "turnaround_statement": {"allow_null": True, "default": ""},
+            "opening_hours_text": {"allow_null": True, "default": ""},
+            "public_whatsapp_number": {"allow_null": True, "default": ""},
+            "public_email": {"allow_null": True, "default": ""},
+            "business_email": {"allow_null": True, "default": ""},
+            "phone_number": {"allow_null": True, "default": ""},
+            "address_line": {"allow_null": True, "default": ""},
+            "city": {"allow_null": True, "default": ""},
+            "state": {"allow_null": True, "default": ""},
+            "country": {"allow_null": True, "default": ""},
+            "zip_code": {"allow_null": True, "default": ""},
+            "google_place_id": {"allow_null": True, "default": ""},
+        }
+
+    def validate_vat_rate(self, value):
+        if value is None:
+            return Decimal("16.00")
+        if value < 0:
+            raise serializers.ValidationError("VAT rate must be 0 or greater.")
+        if value > 100:
+            raise serializers.ValidationError("VAT rate cannot exceed 100.")
+        return value
+
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+        is_vat_enabled = attrs.get("is_vat_enabled", getattr(self.instance, "is_vat_enabled", False))
+        vat_mode = attrs.get("vat_mode", getattr(self.instance, "vat_mode", None))
+        if is_vat_enabled and not vat_mode:
+            raise serializers.ValidationError({"vat_mode": "VAT mode is required when VAT is enabled."})
+        return attrs
+
+    def validate_description(self, value):
+        return value or ""
+
+    def validate_service_area(self, value):
+        return value or ""
+
+    def validate_turnaround_statement(self, value):
+        return value or ""
+
+    def validate_opening_hours_text(self, value):
+        return value or ""
+
+    def validate_public_whatsapp_number(self, value):
+        return value or ""
+
+    def validate_public_email(self, value):
+        return value or ""
+
+    def validate_business_email(self, value):
+        return value or ""
+
+    def validate_phone_number(self, value):
+        return value or ""
+
+    def validate_address_line(self, value):
+        return value or ""
+
+    def validate_city(self, value):
+        return value or ""
+
+    def validate_state(self, value):
+        return value or ""
+
+    def validate_country(self, value):
+        return value or ""
+
+    def validate_zip_code(self, value):
+        return value or ""
+
+    def get_schedule_summary(self, obj):
+        return schedule_summary(obj)
+
+
+class MachineSerializer(serializers.ModelSerializer):
+    """CRUD for shop machines."""
+
+    class Meta:
+        model = Machine
+        fields = [
+            "id",
+            "name",
+            "machine_type",
+            "max_width_mm",
+            "max_height_mm",
+            "min_gsm",
+            "max_gsm",
+            "is_active",
+        ]
+
+    def validate(self, attrs):
+        shop = self.context.get("shop")
+        if shop:
+            # On create, shop comes from URL; on update, instance already has shop
+            pass
+        return attrs
+
+
+class PaperSerializer(serializers.ModelSerializer):
+    """CRUD for shop papers."""
+
+    display_name = serializers.CharField(read_only=True)
+    available_for_quoting = serializers.BooleanField(source="is_active", required=False)
+    use_for_flat_jobs = serializers.SerializerMethodField()
+    use_for_booklet_covers = serializers.BooleanField(source="is_cover_stock", required=False)
+    use_for_booklet_inserts = serializers.BooleanField(source="is_insert_stock", required=False)
+    use_for_stickers_labels = serializers.BooleanField(source="is_sticker_stock", required=False)
+
+    class Meta:
+        model = Paper
+        fields = [
+            "id",
+            "name",
+            "display_name",
+            "available_for_quoting",
+            "sheet_size",
+            "gsm",
+            "category",
+            "paper_type",
+            "use_for_flat_jobs",
+            "use_for_booklet_covers",
+            "use_for_booklet_inserts",
+            "use_for_stickers_labels",
+            "is_cover_stock",
+            "is_insert_stock",
+            "is_sticker_stock",
+            "is_specialty",
+            "width_mm",
+            "height_mm",
+            "buying_price",
+            "selling_price",
+            "quantity_in_stock",
+            "reorder_level",
+            "is_active",
+            "is_default",
+        ]
+        extra_kwargs = {
+            "name": {"required": False, "allow_blank": True},
+            "paper_type": {"required": False},
+        }
+
+    def get_use_for_flat_jobs(self, obj):
+        return True
+
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+        shop = self.context.get("shop") or getattr(self.instance, "shop", None)
+        sheet_size = attrs.get("sheet_size", getattr(self.instance, "sheet_size", None))
+        gsm = attrs.get("gsm", getattr(self.instance, "gsm", None))
+        paper_type = attrs.get("paper_type", getattr(self.instance, "paper_type", None))
+
+        if shop and sheet_size and gsm and paper_type:
+            duplicate = Paper.objects.filter(
+                shop=shop,
+                sheet_size=sheet_size,
+                gsm=gsm,
+                paper_type=paper_type,
+            )
+            if self.instance:
+                duplicate = duplicate.exclude(pk=self.instance.pk)
+            if duplicate.exists():
+                raise serializers.ValidationError({
+                    "non_field_errors": [
+                        "This shop already has paper with this sheet size, GSM, and paper type."
+                    ]
+                })
+        return attrs
+
+
+class PrintingRateSerializer(serializers.ModelSerializer):
+    """CRUD for machine printing rates (per-side print price + optional duplex override/surcharge)."""
+
+    base_price = serializers.DecimalField(source="single_price", max_digits=12, decimal_places=2, read_only=True)
+    client_price = serializers.SerializerMethodField()
+    pricing_breakdown = serializers.SerializerMethodField()
+
+    class Meta:
+        model = PrintingRate
+        fields = [
+            "id",
+            "sheet_size",
+            "color_mode",
+            "single_price",
+            "base_price",
+            "client_price",
+            "pricing_breakdown",
+            "double_price",
+            "duplex_surcharge",
+            "duplex_surcharge_enabled",
+            "duplex_surcharge_min_gsm",
+            "is_active",
+            "is_default",
+        ]
+
+    def get_client_price(self, obj):
+        return self.get_pricing_breakdown(obj)["client_price"]
+
+    def get_pricing_breakdown(self, obj):
+        shop = getattr(getattr(obj, "machine", None), "shop", None)
+        currency = getattr(shop, "currency", "KES") or "KES"
+        return _serializer_marketplace_pricing(
+            base_price=obj.single_price,
+            shop=shop,
+            currency=currency,
+        )
+
+    def validate(self, attrs):
+        machine = self.context.get("machine")
+        if machine and self.instance is None:
+            # Ensure machine belongs to shop when creating
+            pass
+        duplex_surcharge = attrs.get("duplex_surcharge", getattr(self.instance, "duplex_surcharge", None))
+        duplex_surcharge_min_gsm = attrs.get(
+            "duplex_surcharge_min_gsm",
+            getattr(self.instance, "duplex_surcharge_min_gsm", None),
+        )
+        if attrs.get("duplex_surcharge_enabled") and attrs.get("duplex_surcharge") is None and not self.instance:
+            attrs["duplex_surcharge"] = "0.00"
+        if duplex_surcharge is not None and duplex_surcharge < 0:
+            raise serializers.ValidationError({"duplex_surcharge": "Duplex surcharge cannot be negative."})
+        if duplex_surcharge_min_gsm is not None and duplex_surcharge_min_gsm <= 0:
+            raise serializers.ValidationError({"duplex_surcharge_min_gsm": "Minimum gsm must be greater than zero."})
+        return attrs
+
+
+class FinishingRateSerializer(serializers.ModelSerializer):
+    """CRUD for shop finishing rates."""
+
+    charge_unit = StrictChoiceField(choices=ChargeUnit.choices, required=False)
+    billing_basis = StrictChoiceField(choices=FinishingBillingBasis.choices, required=False)
+    side_mode = StrictChoiceField(choices=FinishingSideMode.choices, required=False)
+    base_price = serializers.DecimalField(source="price", max_digits=12, decimal_places=2, read_only=True)
+    client_price = serializers.SerializerMethodField()
+    pricing_breakdown = serializers.SerializerMethodField()
+
+    class Meta:
+        model = FinishingRate
+        fields = [
+            "id",
+            "name",
+            "slug",
+            "charge_unit",
+            "billing_basis",
+            "side_mode",
+            "price",
+            "base_price",
+            "client_price",
+            "pricing_breakdown",
+            "double_side_price",
+            "setup_fee",
+            "min_qty",
+            "minimum_charge",
+            "applies_to_product_types",
+            "display_unit_label",
+            "help_text",
+            "is_active",
+        ]
+
+    def get_client_price(self, obj):
+        return self.get_pricing_breakdown(obj)["client_price"]
+
+    def get_pricing_breakdown(self, obj):
+        shop = getattr(obj, "shop", None)
+        currency = getattr(shop, "currency", "KES") or "KES"
+        return _serializer_marketplace_pricing(
+            base_price=obj.price,
+            shop=shop,
+            currency=currency,
+        )
+
+    def _is_lamination(self, attrs, instance):
+        name = (attrs.get("name", getattr(instance, "name", "")) or "").strip().lower()
+        slug = (attrs.get("slug", getattr(instance, "slug", "")) or "").strip().lower()
+        category_name = ""
+        thickness_microns = attrs.get("thickness_microns", getattr(instance, "thickness_microns", None))
+        return bool(
+            thickness_microns
+            or "lamination" in name
+            or "lamination" in slug
+            or "lamination" in category_name
+        )
+
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+
+        instance = self.instance
+        is_lamination = self._is_lamination(attrs, instance)
+
+        if is_lamination:
+            attrs["charge_unit"] = attrs.get("charge_unit", getattr(instance, "charge_unit", ChargeUnit.PER_SHEET))
+            if attrs["charge_unit"] == ChargeUnit.PER_SIDE_PER_SHEET:
+                attrs["charge_unit"] = ChargeUnit.PER_SHEET
+            attrs["billing_basis"] = attrs.get("billing_basis", getattr(instance, "billing_basis", FinishingBillingBasis.PER_SHEET))
+            attrs["side_mode"] = attrs.get("side_mode", getattr(instance, "side_mode", FinishingSideMode.PER_SELECTED_SIDE))
+            if not attrs.get("display_unit_label"):
+                attrs["display_unit_label"] = "per sheet"
+            if not attrs.get("help_text"):
+                attrs["help_text"] = "Charged per sheet. Choose one side or both sides."
+
+        charge_unit = attrs.get("charge_unit", getattr(instance, "charge_unit", ChargeUnit.PER_PIECE))
+        billing_basis = attrs.get(
+            "billing_basis",
+            getattr(instance, "billing_basis", FinishingBillingBasis.PER_PIECE),
+        )
+        side_mode = attrs.get(
+            "side_mode",
+            getattr(instance, "side_mode", FinishingSideMode.IGNORE_SIDES),
+        )
+        double_side_price = attrs.get(
+            "double_side_price",
+            getattr(instance, "double_side_price", None),
+        )
+
+        errors = {}
+        per_side_sheet_unit = charge_unit == ChargeUnit.PER_SIDE_PER_SHEET
+        side_selected_sheet_pricing = (
+            billing_basis == FinishingBillingBasis.PER_SHEET
+            and side_mode == FinishingSideMode.PER_SELECTED_SIDE
+        )
+        flat_basis_values = {
+            FinishingBillingBasis.FLAT_PER_JOB,
+            FinishingBillingBasis.FLAT_PER_GROUP,
+            FinishingBillingBasis.FLAT_PER_LINE,
+        }
+
+        if per_side_sheet_unit and billing_basis != FinishingBillingBasis.PER_SHEET:
+            errors["billing_basis"] = "Per-side-per-sheet finishings must use per_sheet billing_basis."
+
+        if per_side_sheet_unit and side_mode != FinishingSideMode.PER_SELECTED_SIDE:
+            errors["side_mode"] = "Per-side-per-sheet finishings must use per_selected_side side_mode."
+
+        if billing_basis == FinishingBillingBasis.PER_PIECE and side_mode != FinishingSideMode.IGNORE_SIDES:
+            errors["side_mode"] = "Per-piece finishings must use ignore_sides side_mode."
+
+        if billing_basis in flat_basis_values and side_mode != FinishingSideMode.IGNORE_SIDES:
+            errors["side_mode"] = "Flat finishings must use ignore_sides side_mode."
+
+        if billing_basis in flat_basis_values and charge_unit not in {ChargeUnit.FLAT, ChargeUnit.PER_SIDE}:
+            errors["charge_unit"] = "Flat finishings must use a flat-compatible charge_unit."
+
+        if billing_basis == FinishingBillingBasis.PER_SHEET and charge_unit == ChargeUnit.PER_PIECE:
+            errors["charge_unit"] = "Per-sheet finishings cannot use per-piece charge_unit."
+
+        if double_side_price and not side_selected_sheet_pricing:
+            errors["double_side_price"] = "double_side_price is only valid for per-sheet finishings that support side selection."
+
+        if is_lamination:
+            if billing_basis != FinishingBillingBasis.PER_SHEET:
+                errors["billing_basis"] = "Lamination must use per_sheet billing_basis."
+            if side_mode != FinishingSideMode.PER_SELECTED_SIDE:
+                errors["side_mode"] = "Lamination must use per_selected_side side_mode."
+            if charge_unit not in {ChargeUnit.PER_SHEET, ChargeUnit.PER_SIDE_PER_SHEET}:
+                errors["charge_unit"] = "Lamination must use per_sheet charge_unit. Legacy PER_SIDE_PER_SHEET is still supported."
+
+        if errors:
+            raise serializers.ValidationError(errors)
+
+        return attrs
+
+
+class VolumeDiscountSerializer(serializers.ModelSerializer):
+    """CRUD for shop volume discounts."""
+
+    discount_percent = serializers.DecimalField(
+        max_digits=5, decimal_places=2, coerce_to_string=True
+    )
+
+    class Meta:
+        model = VolumeDiscount
+        fields = ["id", "name", "min_quantity", "discount_percent", "is_active"]
+
+
+class MaterialSerializer(serializers.Serializer):
+    """Material pricing is postponed for MVP."""
+
+    def get_client_price(self, obj):
+        return self.get_pricing_breakdown(obj)["client_price"]
+
+    def get_pricing_breakdown(self, obj):
+        shop = getattr(obj, "shop", None)
+        currency = getattr(shop, "currency", "KES") or "KES"
+        return _serializer_marketplace_pricing(
+            base_price=obj.selling_price,
+            shop=shop,
+            currency=currency,
+        )
+
+
+class ProductImageUploadSerializer(serializers.ModelSerializer):
+    """Upload a product image (multipart/form-data)."""
+
+    class Meta:
+        model = ProductImage
+        fields = ["id", "image", "is_primary", "display_order"]
+        extra_kwargs = {
+            "image": {"required": True},
+            "is_primary": {"required": False},
+            "display_order": {"required": False},
+        }
+
+
+class ProductFinishingOptionWriteSerializer(serializers.ModelSerializer):
+    """Write serializer for product finishing options."""
+
+    finishing_rate = StrictPrimaryKeyRelatedField(queryset=FinishingRate.objects.all())
+    apply_to_sides = StrictChoiceField(choices=FinishingSides.choices, required=False)
+
+    class Meta:
+        model = ProductFinishingOption
+        fields = ["finishing_rate", "is_default", "apply_to_sides"]
+
+    def to_internal_value(self, data):
+        # Allow shorthand payloads like: finishing_options: [1, 2]
+        if isinstance(data, (int, str)):
+            data = {"finishing_rate": data}
+        elif not isinstance(data, dict):
+            raise serializers.ValidationError(
+                "Each finishing_options entry must be an object or a finishing_rate id."
+            )
+        return super().to_internal_value(data)
+
+    def validate(self, attrs):
+        product = self.context.get("product")
+        if product and attrs.get("finishing_rate"):
+            return attrs
+        return attrs
+
+
+class ProductWriteSerializer(serializers.ModelSerializer):
+    """
+    Write serializer for product create/update.
+    Enforces publish rules: status can only be PUBLISHED when shop has pricing.
+    """
+
+    finishing_options = ProductFinishingOptionWriteSerializer(many=True, required=False)
+    category = StrictPrimaryKeyRelatedField(
+        queryset=ProductCategory.objects.all(),
+        required=False,
+        allow_null=True,
+    )
+    pricing_mode = StrictChoiceField(choices=PricingMode.choices)
+    default_sides = StrictChoiceField(choices=Sides.choices, required=False)
+    status = StrictChoiceField(choices=ProductStatus.choices, required=False)
+
+    class Meta:
+        model = Product
+        fields = [
+            "id",
+            "name",
+            "description",
+            "category",
+            "pricing_mode",
+            "default_finished_width_mm",
+            "default_finished_height_mm",
+            "default_sheet_size",
+            "default_bleed_mm",
+            "default_sides",
+            "turnaround_days",
+            "standard_turnaround_hours",
+            "rush_turnaround_hours",
+            "rush_available",
+            "buffer_hours",
+            "queue_hours",
+            "min_quantity",
+            "min_width_mm",
+            "min_height_mm",
+            "max_width_mm",
+            "max_height_mm",
+            "min_gsm",
+            "max_gsm",
+            "allowed_sheet_sizes",
+            "allow_simplex",
+            "allow_duplex",
+            "is_active",
+            "is_public",
+            "status",
+            "finishing_options",
+        ]
+        extra_kwargs = {
+            "id": {"read_only": True},
+            "name": {"required": True, "allow_blank": False},
+            "description": {"required": False, "allow_blank": True},
+            "category": {"required": False, "allow_null": True},
+            "default_bleed_mm": {"required": False},
+            "default_sides": {"required": False},
+            "min_quantity": {"required": False, "min_value": 1},
+            "standard_turnaround_hours": {"required": False, "allow_null": True, "min_value": 1},
+            "rush_turnaround_hours": {"required": False, "allow_null": True, "min_value": 1},
+            "buffer_hours": {"required": False, "min_value": 0},
+            "queue_hours": {"required": False, "min_value": 0},
+            "min_width_mm": {"required": False},
+            "min_height_mm": {"required": False},
+            "max_width_mm": {"required": False},
+            "max_height_mm": {"required": False},
+            "min_gsm": {"required": False},
+            "max_gsm": {"required": False},
+            "allowed_sheet_sizes": {"required": False},
+            "allow_simplex": {"required": False},
+            "allow_duplex": {"required": False},
+            "is_public": {"required": False},
+            "status": {"required": False},
+        }
+
+    def validate_status(self, value):
+        return value
+
+    def validate_allowed_sheet_sizes(self, value):
+        if value is None:
+            return value
+        if not isinstance(value, list):
+            raise serializers.ValidationError("allowed_sheet_sizes must be an array of sheet size codes.")
+        invalid = [item for item in value if not isinstance(item, str) or not item.strip()]
+        if invalid:
+            raise serializers.ValidationError("Each allowed_sheet_sizes entry must be a non-empty string sheet size code.")
+        return value
+
+    def validate_finishing_options(self, value):
+        if value is None:
+            return value
+
+        seen_finishing_rates: dict[int, int] = {}
+        errors: list[dict[str, list[str]]] = [{} for _ in value]
+
+        for index, item in enumerate(value):
+            finishing_rate = item.get("finishing_rate")
+            if not finishing_rate:
+                continue
+
+            existing_index = seen_finishing_rates.get(finishing_rate.pk)
+            if existing_index is not None:
+                errors[index]["finishing_rate"] = [
+                    "Duplicate finishing_rate entries are not allowed."
+                ]
+            else:
+                seen_finishing_rates[finishing_rate.pk] = index
+
+        if any(errors):
+            raise serializers.ValidationError(errors)
+
+        return value
+
+    def validate(self, attrs):
+        shop = self.context.get("shop")
+        category = attrs.get("category") or getattr(self.instance, "category", None)
+        if category and category.shop_id and shop and category.shop_id != shop.id:
+            raise serializers.ValidationError({"category": "category must be global or belong to the same shop."})
+        rush_available = attrs.get("rush_available", getattr(self.instance, "rush_available", False))
+        rush_hours = attrs.get("rush_turnaround_hours", getattr(self.instance, "rush_turnaround_hours", None))
+        standard_hours = attrs.get("standard_turnaround_hours", getattr(self.instance, "standard_turnaround_hours", None))
+        if rush_available and not rush_hours:
+            raise serializers.ValidationError({"rush_turnaround_hours": "Set rush_turnaround_hours when rush is available."})
+        if rush_hours and standard_hours and rush_hours >= standard_hours:
+            raise serializers.ValidationError({"rush_turnaround_hours": "Rush turnaround must be faster than standard turnaround."})
+        return super().validate(attrs)
+
+    def create(self, validated_data):
+        finishings_data = validated_data.pop("finishing_options", [])
+        validated_data.setdefault("description", "")
+        validated_data.setdefault("category", None)
+        validated_data.setdefault("min_quantity", 1)
+        validated_data.setdefault("default_bleed_mm", 3)
+        validated_data.setdefault("default_sides", "SIMPLEX")
+        validated_data.setdefault("default_finished_width_mm", 90)
+        validated_data.setdefault("default_finished_height_mm", 54)
+        if validated_data.get("min_quantity", 1) < 1:
+            validated_data["min_quantity"] = 1
+        validated_data.setdefault("status", "DRAFT")
+        validated_data.setdefault("is_public", True)
+        product = Product.objects.create(**validated_data)
+        for fd in finishings_data:
+            ProductFinishingOption.objects.create(product=product, **fd)
+        return product
+
+    def update(self, instance, validated_data):
+        finishings_data = validated_data.pop("finishing_options", None)
+        for attr, value in validated_data.items():
+            setattr(instance, attr, value)
+        instance.save()
+        if finishings_data is not None:
+            instance.finishing_options.all().delete()
+            for fd in finishings_data:
+                ProductFinishingOption.objects.create(product=instance, **fd)
+        return instance
+
+
+class ProductFinishingOptionListSerializer(serializers.ModelSerializer):
+    """Read-only serializer for list. Uses finishing_rate_id to avoid following FK (prevents 500 on orphaned refs)."""
+
+    finishing_rate = serializers.IntegerField(source="finishing_rate_id", read_only=True)
+
+    class Meta:
+        model = ProductFinishingOption
+        fields = ["finishing_rate", "is_default"]
+
+
+class ProductListSerializer(serializers.ModelSerializer):
+    """Printer-facing list serializer with status + publish readiness."""
+
+    finishing_options = ProductFinishingOptionListSerializer(many=True, required=False, read_only=True)
+    can_publish = serializers.SerializerMethodField()
+    publish_block_reason = serializers.SerializerMethodField()
+    turnaround_hours = serializers.SerializerMethodField()
+    estimated_working_hours = serializers.SerializerMethodField()
+    estimated_ready_at = serializers.SerializerMethodField()
+    human_ready_text = serializers.SerializerMethodField()
+    turnaround_label = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Product
+        fields = [
+            "id",
+            "name",
+            "description",
+            "category",
+            "pricing_mode",
+            "default_finished_width_mm",
+            "default_finished_height_mm",
+            "default_sheet_size",
+            "default_bleed_mm",
+            "default_sides",
+            "turnaround_days",
+            "turnaround_hours",
+            "standard_turnaround_hours",
+            "rush_turnaround_hours",
+            "rush_available",
+            "buffer_hours",
+            "queue_hours",
+            "estimated_working_hours",
+            "estimated_ready_at",
+            "human_ready_text",
+            "turnaround_label",
+            "min_quantity",
+            "min_width_mm",
+            "min_height_mm",
+            "max_width_mm",
+            "max_height_mm",
+            "min_gsm",
+            "max_gsm",
+            "allowed_sheet_sizes",
+            "allow_simplex",
+            "allow_duplex",
+            "is_active",
+            "is_public",
+            "status",
+            "can_publish",
+            "publish_block_reason",
+            "finishing_options",
+        ]
+
+    def get_can_publish(self, obj):
+        from setup.services import get_product_publish_check
+        return get_product_publish_check(obj)["can_publish"]
+
+    def get_publish_block_reason(self, obj):
+        from setup.services import get_product_publish_check
+        check = get_product_publish_check(obj)
+        return " ".join(check["block_reasons"]) if check["block_reasons"] else ""
+
+    def _turnaround_payload(self, obj):
+        return build_product_turnaround_payload(obj)
+
+    def get_turnaround_hours(self, obj):
+        return self._turnaround_payload(obj)["turnaround_hours"]
+
+    def get_estimated_working_hours(self, obj):
+        return self._turnaround_payload(obj)["estimated_working_hours"]
+
+    def get_estimated_ready_at(self, obj):
+        return self._turnaround_payload(obj)["estimated_ready_at"]
+
+    def get_human_ready_text(self, obj):
+        return self._turnaround_payload(obj)["human_ready_text"]
+
+    def get_turnaround_label(self, obj):
+        return self._turnaround_payload(obj)["turnaround_label"]
+
+
+class ProductSerializer(serializers.ModelSerializer):
+    """Full product serializer with price hints (for retrieve)."""
+
+    finishing_options = ProductFinishingOptionWriteSerializer(many=True, required=False)
+    price_hint = serializers.SerializerMethodField()
+    price_range_est = serializers.SerializerMethodField()
+    turnaround_hours = serializers.SerializerMethodField()
+    estimated_working_hours = serializers.SerializerMethodField()
+    estimated_ready_at = serializers.SerializerMethodField()
+    human_ready_text = serializers.SerializerMethodField()
+    turnaround_label = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Product
+        fields = [
+            "id",
+            "name",
+            "description",
+            "category",
+            "pricing_mode",
+            "default_finished_width_mm",
+            "default_finished_height_mm",
+            "default_sheet_size",
+            "default_bleed_mm",
+            "default_sides",
+            "turnaround_days",
+            "turnaround_hours",
+            "standard_turnaround_hours",
+            "rush_turnaround_hours",
+            "rush_available",
+            "buffer_hours",
+            "queue_hours",
+            "estimated_working_hours",
+            "estimated_ready_at",
+            "human_ready_text",
+            "turnaround_label",
+            "min_quantity",
+            "min_width_mm",
+            "min_height_mm",
+            "max_width_mm",
+            "max_height_mm",
+            "min_gsm",
+            "max_gsm",
+            "allowed_sheet_sizes",
+            "allow_simplex",
+            "allow_duplex",
+            "is_active",
+            "is_public",
+            "status",
+            "finishing_options",
+            "price_hint",
+            "price_range_est",
+        ]
+
+    def get_price_hint(self, obj):
+        try:
+            from catalog.services import product_price_hint
+
+            return product_price_hint(obj)
+        except Exception as e:
+            logger.warning("product_price_hint failed for product %s: %s", obj.id if obj.pk else "new", e, exc_info=True)
+            return {
+                "can_calculate": False,
+                "min_price": None,
+                "max_price": None,
+                "price_display": "Price on request",
+                "pricing_mode_label": getattr(obj, "pricing_mode", ""),
+                "pricing_mode_explanation": "Price depends on your choices (paper, quantity, finishing).",
+                "reason": "Unable to compute price (shop setup may be incomplete).",
+            }
+
+    def get_price_range_est(self, obj):
+        try:
+            from catalog.services import compute_product_price_range_est
+
+            return compute_product_price_range_est(obj)
+        except Exception as e:
+            logger.warning("compute_product_price_range_est failed for product %s: %s", obj.id if obj.pk else "new", e, exc_info=True)
+            return {
+                "can_calculate": False,
+                "price_display": "Price on request",
+                "pricing_mode_label": getattr(obj, "pricing_mode", ""),
+                "pricing_mode_explanation": "Price depends on your choices (paper, quantity, finishing).",
+                "lowest": {"total": None, "unit_price": None, "paper_id": None, "paper_label": None, "printing_rate_id": None, "assumptions": {}, "summary": None},
+                "highest": {"total": None, "unit_price": None, "paper_id": None, "paper_label": None, "printing_rate_id": None, "assumptions": {}, "summary": None},
+                "reason": "Unable to compute price range (shop setup may be incomplete).",
+            }
+
+    def validate(self, attrs):
+        shop = self.context.get("shop")
+        if shop:
+            pass
+        return attrs
+
+    def _turnaround_payload(self, obj):
+        return build_product_turnaround_payload(obj)
+
+    def get_turnaround_hours(self, obj):
+        return self._turnaround_payload(obj)["turnaround_hours"]
+
+    def get_estimated_working_hours(self, obj):
+        return self._turnaround_payload(obj)["estimated_working_hours"]
+
+    def get_estimated_ready_at(self, obj):
+        return self._turnaround_payload(obj)["estimated_ready_at"]
+
+    def get_human_ready_text(self, obj):
+        return self._turnaround_payload(obj)["human_ready_text"]
+
+    def get_turnaround_label(self, obj):
+        return self._turnaround_payload(obj)["turnaround_label"]
+
+
+# ---------------------------------------------------------------------------
+# Profile (User as Profile - no separate Profile model)
+# ---------------------------------------------------------------------------
+
+
+class ProfileSerializer(serializers.ModelSerializer):
+    """Persisted dashboard profile representation."""
+
+    user = serializers.IntegerField(source="user_id", read_only=True)
+
+    class Meta:
+        model = UserProfile
+        fields = [
+            "id",
+            "user",
+            "bio",
+            "avatar",
+            "phone",
+            "address",
+            "city",
+            "state",
+            "country",
+            "postal_code",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = ["id", "user", "created_at", "updated_at"]
+
+    def update(self, instance, validated_data):
+        for attr, value in validated_data.items():
+            setattr(instance, attr, value or "")
+        instance.save()
+
+        return instance
+
+
+# ---------------------------------------------------------------------------
+# Tweak-and-Add serializers (Gallery → Tweak → Quote)
+# ---------------------------------------------------------------------------
+
+
+class TweakFinishingInputSerializer(serializers.Serializer):
+    """One finishing selection in a tweak request."""
+    finishing_rate = serializers.PrimaryKeyRelatedField(queryset=FinishingRate.objects.filter(is_active=True))
+    price_override = serializers.DecimalField(max_digits=12, decimal_places=2, required=False, allow_null=True)
+
+
+class TweakAndAddSerializer(serializers.Serializer):
+    """
+    Create a tweaked quote item from a product template and add to quote.
+
+    Example request:
+    {
+        "product": 5,
+        "quantity": 200,
+        "paper": 9,
+        "sides": "DUPLEX",
+        "color_mode": "COLOR",
+        "machine": 1,
+        "finishings": [{"finishing_rate": 1}, {"finishing_rate": 3}],
+        "special_instructions": "Rush order"
+    }
+
+    Example response: See TweakedItemReadSerializer.
+    """
+    product = serializers.PrimaryKeyRelatedField(queryset=Product.objects.filter(is_active=True))
+    quantity = serializers.IntegerField(required=False, default=None)
+    paper = serializers.PrimaryKeyRelatedField(queryset=Paper.objects.filter(is_active=True), required=False, allow_null=True)
+    sides = serializers.ChoiceField(choices=[("SIMPLEX", "Simplex"), ("DUPLEX", "Duplex")], required=False, default="")
+    color_mode = serializers.ChoiceField(choices=[("BW", "B&W"), ("COLOR", "Color")], required=False, default="COLOR")
+    machine = serializers.PrimaryKeyRelatedField(queryset=Machine.objects.filter(is_active=True), required=False, allow_null=True)
+    chosen_width_mm = serializers.IntegerField(required=False, allow_null=True)
+    chosen_height_mm = serializers.IntegerField(required=False, allow_null=True)
+    finishings = TweakFinishingInputSerializer(many=True, required=False, default=[])
+    special_instructions = serializers.CharField(required=False, allow_blank=True, default="")
+    has_artwork = serializers.BooleanField(required=False, default=False)
+
+    def validate(self, attrs):
+        product = attrs["product"]
+        shop = self.context.get("shop")
+
+        # Default quantity to product's min_quantity
+        qty = attrs.get("quantity")
+        min_qty = product.min_quantity or 100
+        if qty is None or qty < min_qty:
+            attrs["quantity"] = min_qty
+
+        # Default sides from template
+        if not attrs.get("sides"):
+            attrs["sides"] = product.default_sides or "SIMPLEX"
+
+        # Validate simplex/duplex against template
+        if attrs["sides"] == "SIMPLEX" and not product.allow_simplex:
+            raise serializers.ValidationError({"sides": "This product does not allow single-sided printing."})
+        if attrs["sides"] == "DUPLEX" and not product.allow_duplex:
+            raise serializers.ValidationError({"sides": "This product does not allow double-sided printing."})
+
+        pricing_mode = product.pricing_mode
+
+        if pricing_mode == PricingMode.SHEET:
+            machine = attrs.get("machine")
+            # Validate paper belongs to same shop and product rules (gsm, allowed_sheet_sizes, dimensions)
+            paper = attrs.get("paper")
+            if paper and shop and paper.shop_id != shop.id:
+                raise serializers.ValidationError({"paper": "Paper must belong to this shop."})
+            if paper:
+                from catalog.validation import validate_product_configuration
+                w_mm = attrs.get("chosen_width_mm") or product.default_finished_width_mm
+                h_mm = attrs.get("chosen_height_mm") or product.default_finished_height_mm
+                v = validate_product_configuration(product, paper=paper, width_mm=w_mm, height_mm=h_mm)
+                if not v["is_valid"]:
+                    raise serializers.ValidationError({"paper": "; ".join(v["errors"])})
+            # Validate machine
+            machine = attrs.get("machine")
+            if machine and shop and machine.shop_id != shop.id:
+                raise serializers.ValidationError({"machine": "Machine must belong to this shop."})
+
+        elif pricing_mode == PricingMode.LARGE_FORMAT:
+            # Default dimensions from product if not provided
+            if not attrs.get("chosen_width_mm"):
+                attrs["chosen_width_mm"] = product.default_finished_width_mm
+            if not attrs.get("chosen_height_mm"):
+                attrs["chosen_height_mm"] = product.default_finished_height_mm
+            w = attrs.get("chosen_width_mm") or 0
+            h = attrs.get("chosen_height_mm") or 0
+            # Validate dimensions against product rules
+            from catalog.validation import validate_product_configuration
+            v = validate_product_configuration(product, width_mm=w, height_mm=h)
+            if not v["is_valid"]:
+                raise serializers.ValidationError({"chosen_width_mm": "; ".join(v["errors"])})
+            # Validate minimum area
+            qty = attrs["quantity"]
+            area = (w / 1000) * (h / 1000) * qty
+            min_area = float(product.min_area_m2 or Decimal("0.50"))
+            if area < min_area:
+                raise serializers.ValidationError(
+                    {"chosen_width_mm": f"Total area ({area:.2f} m²) is below minimum ({min_area:.2f} m²)."}
+                )
+
+        # Validate finishings belong to the same shop
+        for fin in attrs.get("finishings", []):
+            fr = fin["finishing_rate"]
+            if shop and fr.shop_id != shop.id:
+                raise serializers.ValidationError({"finishings": f"Finishing '{fr.name}' does not belong to this shop."})
+
+        return attrs
+
+    def create(self, validated_data):
+        """
+        Create QuoteItem + QuoteItemFinishing records, then compute and store pricing.
+        Must be called inside transaction.atomic().
+        """
+        from django.db import transaction
+        from quotes.pricing_service import compute_and_store_pricing
+
+        product = validated_data["product"]
+        finishings_data = validated_data.pop("finishings", [])
+        quote_request = self.context["quote_request"]
+
+        paper = validated_data.get("paper")
+        machine = validated_data.get("machine")
+        item_spec_snapshot = {
+            "product_id": product.id,
+            "quantity": validated_data["quantity"],
+            "paper_id": paper.id if paper else None,
+            "sides": validated_data.get("sides", ""),
+            "color_mode": validated_data.get("color_mode", "COLOR"),
+            "machine_id": machine.id if machine else None,
+            "finishings": [
+                {"finishing_rate_id": fr.id}
+                for f in finishings_data
+                for fr in [f.get("finishing_rate")]
+                if fr
+            ],
+        }
+
+        with transaction.atomic():
+            item = QuoteItem.objects.create(
+                quote_request=quote_request,
+                item_type="PRODUCT",
+                product=product,
+                quantity=validated_data["quantity"],
+                pricing_mode=product.pricing_mode,
+                paper=validated_data.get("paper"),
+                chosen_width_mm=validated_data.get("chosen_width_mm"),
+                chosen_height_mm=validated_data.get("chosen_height_mm"),
+                sides=validated_data.get("sides", ""),
+                color_mode=validated_data.get("color_mode", "COLOR"),
+                machine=validated_data.get("machine"),
+                special_instructions=validated_data.get("special_instructions", ""),
+                has_artwork=validated_data.get("has_artwork", False),
+                item_spec_snapshot=item_spec_snapshot,
+            )
+            for fin in finishings_data:
+                QuoteItemFinishing.objects.create(
+                    quote_item=item,
+                    finishing_rate=fin["finishing_rate"],
+                    price_override=fin.get("price_override"),
+                )
+            compute_and_store_pricing(item)
+
+        return item
+
+
+class TweakedItemReadSerializer(serializers.ModelSerializer):
+    """
+    Read serializer for a tweaked quote item — returns chosen options,
+    computed totals, without the raw pricing snapshot.
+
+    Example response:
+    {
+        "id": 42,
+        "product": 5,
+        "product_name": "Standard Business Card",
+        "quantity": 200,
+        "pricing_mode": "SHEET",
+        "sides": "DUPLEX",
+        "color_mode": "COLOR",
+        "paper": 9,
+        "paper_label": "SRA3 300gsm GLOSS",
+        "machine": 1,
+        "finishings": [{"finishing_rate": 1, "name": "Lamination", "cost": "250.00"}],
+        "unit_price": "12.40",
+        "line_total": "2480.00",
+        "special_instructions": "",
+        "created_at": "2026-03-03T..."
+    }
+    """
+    product_name = serializers.SerializerMethodField()
+    paper_label = serializers.SerializerMethodField()
+    finishings = serializers.SerializerMethodField()
+
+    class Meta:
+        model = QuoteItem
+        fields = [
+            "id",
+            "item_type",
+            "product",
+            "product_name",
+            "quantity",
+            "pricing_mode",
+            "sides",
+            "color_mode",
+            "paper",
+            "paper_label",
+            "machine",
+            "chosen_width_mm",
+            "chosen_height_mm",
+            "finishings",
+            "unit_price",
+            "line_total",
+            "special_instructions",
+            "has_artwork",
+            "created_at",
+        ]
+
+    def get_product_name(self, obj):
+        if obj.product_id:
+            return obj.product.name
+        return obj.title or ""
+
+    def get_paper_label(self, obj):
+        if obj.paper_id:
+            p = obj.paper
+            return f"{p.sheet_size} {p.gsm}gsm {p.get_paper_type_display()}"
+        return None
+
+    def get_finishings(self, obj):
+        result = []
+        snapshot = obj.pricing_snapshot or {}
+        finishing_lines = {fl["name"]: fl["computed_cost"] for fl in snapshot.get("finishing_lines", [])}
+        for qif in obj.finishings.select_related("finishing_rate").all():
+            result.append({
+                "finishing_rate": qif.finishing_rate_id,
+                "name": qif.finishing_rate.name,
+                "charge_unit": qif.finishing_rate.charge_unit,
+                "cost": finishing_lines.get(qif.finishing_rate.name, str(qif.finishing_rate.price)),
+            })
+        return result
+
+
+class QuoteCalculatorInputSerializer(serializers.Serializer):
+    """Input for POST /api/calculator/quote-item/ — staff-only preview."""
+
+    product_id = serializers.IntegerField(required=True)
+    quantity = serializers.IntegerField(required=True, min_value=1)
+    width_mm = serializers.IntegerField(required=False, allow_null=True, min_value=1)
+    height_mm = serializers.IntegerField(required=False, allow_null=True, min_value=1)
+    paper_id = serializers.IntegerField(required=False, allow_null=True)
+    grammage = serializers.IntegerField(required=False, allow_null=True, min_value=1)
+    paper_type = serializers.CharField(required=False, allow_null=True, allow_blank=True)
+    sheet_size = serializers.CharField(required=False, allow_null=True, allow_blank=True)
+    finishing_ids = serializers.ListField(
+        child=serializers.IntegerField(),
+        required=False,
+        allow_empty=True,
+        default=list,
+    )
+    machine_id = serializers.IntegerField(required=False, allow_null=True)
+    sides = serializers.ChoiceField(
+        choices=[("SIMPLEX", "Simplex"), ("DUPLEX", "Duplex")],
+        required=False,
+        default="SIMPLEX",
+    )
+    color_mode = serializers.ChoiceField(
+        choices=[("COLOR", "Color"), ("BW", "B&W")],
+        required=False,
+        default="COLOR",
+    )
+    overhead_percent = serializers.DecimalField(
+        max_digits=5,
+        decimal_places=2,
+        required=False,
+        allow_null=True,
+    )
+    margin_percent = serializers.DecimalField(
+        max_digits=5,
+        decimal_places=2,
+        required=False,
+        allow_null=True,
+    )
+
+    def validate(self, attrs):
+        paper_id = attrs.get("paper_id")
+        grammage = attrs.get("grammage")
+        paper_type = attrs.get("paper_type") or ""
+        if not paper_id and (grammage is None or not paper_type.strip()):
+            raise serializers.ValidationError(
+                {"paper_id": "Provide paper_id or both grammage and paper_type."}
+            )
+        return attrs
+
+
+class GalleryProductOptionsSerializer(serializers.ModelSerializer):
+    """
+    Gallery product with available tweaking options (papers, finishings, machines, materials).
+    No user-specific computed totals — just the template + available choices.
+    """
+    finishing_options = FinishingOptionSerializer(many=True, read_only=True)
+    images = ProductImageSerializer(many=True, read_only=True)
+    primary_image = serializers.SerializerMethodField()
+    available_papers = serializers.SerializerMethodField()
+    available_machines = serializers.SerializerMethodField()
+    available_materials = serializers.SerializerMethodField()
+    available_finishings = serializers.SerializerMethodField()
+    imposition_summary = serializers.SerializerMethodField()
+    final_size = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Product
+        fields = [
+            "id", "name", "description", "category", "pricing_mode",
+            "default_finished_width_mm", "default_finished_height_mm",
+            "default_bleed_mm", "default_sides", "turnaround_days", "min_quantity",
+            "min_gsm", "max_gsm", "min_area_m2",
+            "allow_simplex", "allow_duplex",
+            "finishing_options", "images", "primary_image",
+            "imposition_summary", "final_size",
+            "available_papers", "available_machines",
+            "available_materials", "available_finishings",
+        ]
+
+    def get_primary_image(self, obj):
+        img = obj.get_primary_image()
+        return img.image.name if img and img.image else None
+
+    def get_imposition_summary(self, obj):
+        if obj.pricing_mode != "SHEET":
+            return None
+        try:
+            from inventory.choices import SHEET_SIZE_DIMENSIONS
+            ss = (obj.default_sheet_size or "").strip() or "SRA3"
+            dims = SHEET_SIZE_DIMENSIONS.get(ss)
+            if dims:
+                cps = obj.get_copies_per_sheet(ss, dims[0], dims[1])
+                return f"{ss}: {cps}-up"
+        except Exception:
+            pass
+        return None
+
+    def get_final_size(self, obj):
+        w, h = obj.default_finished_width_mm, obj.default_finished_height_mm
+        return f"{w}×{h}mm" if w and h else None
+
+    def get_available_papers(self, obj):
+        return []
+        papers = Paper.objects.none()
+        if obj.min_gsm:
+            papers = papers.filter(gsm__gte=obj.min_gsm)
+        if obj.max_gsm:
+            papers = papers.filter(gsm__lte=obj.max_gsm)
+        return [
+            {"id": p.id, "sheet_size": p.sheet_size, "gsm": p.gsm,
+             "paper_type": p.get_paper_type_display(), "selling_price": str(p.selling_price)}
+            for p in papers[:20]
+        ]
+
+    def get_available_machines(self, obj):
+        machines = Machine.objects.none()
+        return [{"id": m.id, "name": m.name, "machine_type": m.machine_type} for m in machines[:10]]
+
+    def get_available_materials(self, obj):
+        return []
+
+    def get_available_finishings(self, obj):
+        frs = FinishingRate.objects.none()
+        return [
+            {
+                "id": f.id,
+                "name": f.name,
+                "charge_unit": f.charge_unit,
+                "billing_basis": f.billing_basis,
+                "side_mode": f.side_mode,
+                "display_unit_label": f.display_unit_label,
+                "price": str(f.price),
+                "category": None,
+            }
+            for f in frs[:30]
+        ]

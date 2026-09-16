@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{{ subject }}</title>
+</head>
+<body style="margin:0;padding:24px 0;background:#f4efe7;font-family:Arial,sans-serif;color:#1f2937;">
+  <div style="display:none;max-height:0;overflow:hidden;opacity:0;">{{ preheader }}</div>
+  <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="border-collapse:collapse;">
+    <tr>
+      <td align="center">
+        <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width:640px;border-collapse:collapse;">
+          <tr>
+            <td style="padding:0 24px 18px 24px;">
+              <div style="font-size:26px;font-weight:700;letter-spacing:0.04em;color:#111827;">Printy</div>
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:0 16px;">
+              <div style="background:#ffffff;border:1px solid #e5e7eb;border-radius:20px;padding:32px 28px;">
+                <div style="font-size:28px;line-height:1.2;font-weight:700;color:#111827;margin-bottom:16px;">{{ headline }}</div>
+                <div style="font-size:16px;line-height:1.6;color:#374151;margin-bottom:18px;">{{ greeting }}</div>
+                <div style="font-size:15px;line-height:1.7;color:#4b5563;margin-bottom:22px;">{{ intro }}</div>
+                <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="border-collapse:collapse;margin-bottom:24px;">
+                  {% for row in summary_rows %}
+                  <tr>
+                    <td style="padding:10px 0;border-top:1px solid #e5e7eb;width:170px;font-size:13px;font-weight:700;color:#6b7280;vertical-align:top;">{{ row.label }}</td>
+                    <td style="padding:10px 0;border-top:1px solid #e5e7eb;font-size:14px;line-height:1.6;color:#111827;">{{ row.value }}</td>
+                  </tr>
+                  {% endfor %}
+                </table>
+                <div style="margin-bottom:24px;">
+                  <a href="{{ cta_url }}" style="display:inline-block;background:#0f766e;color:#ffffff;text-decoration:none;padding:14px 24px;border-radius:999px;font-size:14px;font-weight:700;">{{ cta_label }}</a>
+                </div>
+                <div style="font-size:14px;line-height:1.7;color:#4b5563;">{{ support_copy }}</div>
+              </div>
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:18px 24px 0 24px;font-size:12px;line-height:1.7;color:#6b7280;">
+              {{ footer_note }}<br>
+              If the button does not work, open: {{ cta_url }}
+            </td>
+          </tr>
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>
