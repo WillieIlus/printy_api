@@ -20,7 +20,7 @@ from rest_framework.response import Response
 from .models import WorkflowJob, WorkflowManager, WorkflowPrinter
 from .serializers import WorkflowJobSerializer, WorkflowManagerSerializer, WorkflowPrinterSerializer
 from . import transitions
-from .seed import INITIAL_JOBS, MANAGERS, PRINTERS
+from .seed import MANAGERS, PRINTERS
 
 
 def _manager_records():
@@ -204,27 +204,17 @@ class WorkflowJobViewSet(viewsets.ModelViewSet):
         by = request.data.get("by") or "Printy"
         return self._run_transition(request, lambda s, r: transitions.nudge(s, by))
 
-    @action(detail=False, methods=["post"], url_path="reset")
-    def reset(self, request):
-        """Re-seed every job back to INITIAL_JOBS (mirrors the UI demo reset)."""
-        seed_workflow()
-        return Response(WorkflowJobSerializer(WorkflowJob.objects.all(), many=True).data)
-
     def get_workflow_buttons(self):
         """Transition buttons rendered by the browsable API testing panel.
 
         One button per state-machine transition so the whole flow can be
-        clicked through in the DRF UI. Detail pages get the transitions, the
-        list page gets the demo reset.
+        clicked through in the DRF UI. Detail pages get the transitions.
         """
         if getattr(self, "request", None) is None:
             return []
         action = getattr(self, "action", None)
         pk = self.kwargs.get("pk")
         try:
-            if action == "list":
-                url = reverse("workflow-job-reset")
-                return [{"label": "Reset demo jobs", "method": "POST", "url": url, "fields": []}]
             if action != "retrieve" or not pk:
                 return []
             printer_options = [
@@ -261,7 +251,11 @@ class WorkflowJobViewSet(viewsets.ModelViewSet):
 
 @transaction.atomic
 def seed_workflow():
-    """Idempotent (re)seed of managers, printers and jobs to the canonical state."""
+    """Idempotent (re)seed of the managers and printers reference roster.
+
+    Jobs are intentionally not seeded - they must come from real workflow
+    activity (quote -> payment -> assignment) so no phantom jobs appear.
+    """
     for record in MANAGERS:
         WorkflowManager.objects.update_or_create(
             id=record["id"],
@@ -287,36 +281,5 @@ def seed_workflow():
                 "on_time": record["onTime"],
                 "initials": record["initials"],
                 "hue": record["hue"],
-            },
-        )
-    for job in INITIAL_JOBS:
-        state = dict(job)
-        printer = WorkflowPrinter.objects.get(id=state["printerId"]) if state["printerId"] else None
-        WorkflowJob.objects.update_or_create(
-            id=state["id"],
-            defaults={
-                "code": state["code"],
-                "title": state["title"],
-                "product": state["product"],
-                "qty": state["qty"],
-                "value": Decimal(str(state["value"])),
-                "buyer_id": state["buyerId"],
-                "buyer_name": state["buyerName"],
-                "buyer_company": state["buyerCompany"],
-                "manager": WorkflowManager.objects.get(id=state["managerId"]),
-                "printer": printer,
-                "specs": state["specs"],
-                "proof_img": state["proofImg"] or "",
-                "status": state["status"],
-                "custody": state["custody"],
-                "stage": state["stage"],
-                "press": state["press"],
-                "progress": state["progress"],
-                "owner": state["owner"],
-                "eta": state["eta"],
-                "placed_at": state["placedAt"],
-                "dispute": state.get("dispute"),
-                "history": state["history"],
-                "feed": state["feed"],
             },
         )

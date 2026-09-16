@@ -33,9 +33,6 @@ class WorkflowUrlTest(SimpleTestCase):
     def test_job_nudge_url(self):
         self.assertEqual(reverse("workflow-job-nudge", kwargs={"pk": "j1"}), "/api/workflow/jobs/j1/nudge/")
 
-    def test_job_reset_url(self):
-        self.assertEqual(reverse("workflow-job-reset"), "/api/workflow/jobs/reset/")
-
     def test_manager_list_url(self):
         self.assertEqual(reverse("workflow-manager-list"), "/api/workflow/managers/")
 
@@ -60,12 +57,8 @@ class WorkflowUrlTest(SimpleTestCase):
             "workflow-job-confirm-delivery",
             "workflow-job-resolve-dispute",
             "workflow-job-nudge",
-            "workflow-job-reset",
         ]:
-            # All names should be resolvable at runtime; detail ones need a pk.
             if name == "workflow-job-list":
-                reverse(name)
-            elif name == "workflow-job-reset":
                 reverse(name)
             else:
                 reverse(name, kwargs={"pk": "j1"})
