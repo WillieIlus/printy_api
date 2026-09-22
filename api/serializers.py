@@ -10,6 +10,7 @@ from rest_framework import serializers
 
 logger = logging.getLogger(__name__)
 
+from api.spec_choice_fields import ColorModeField, PrintSidesField
 from accounts.models import User, UserProfile
 from catalog.choices import PricingMode, ProductStatus
 from catalog.models import Product, ProductCategory, ProductFinishingOption, ProductImage
@@ -322,8 +323,8 @@ class MatchShopsInputSerializer(serializers.Serializer):
     finished_width_mm = serializers.IntegerField(default=0, min_value=0)
     finished_height_mm = serializers.IntegerField(default=0, min_value=0)
     quantity = serializers.IntegerField(default=100, min_value=1)
-    sides = serializers.ChoiceField(choices=[("SIMPLEX", "Simplex"), ("DUPLEX", "Duplex")], default="SIMPLEX")
-    color_mode = serializers.ChoiceField(choices=[("BW", "B&W"), ("COLOR", "Color")], default="COLOR")
+    sides = PrintSidesField(default="SIMPLEX")
+    color_mode = ColorModeField(default="COLOR")
     sheet_size = serializers.CharField(required=False, allow_blank=True, default="SRA3")
     paper_gsm = serializers.IntegerField(required=False, allow_null=True)
     paper_type = serializers.CharField(required=False, allow_blank=True, default="")
@@ -1886,8 +1887,8 @@ class TweakAndAddSerializer(serializers.Serializer):
     product = serializers.PrimaryKeyRelatedField(queryset=Product.objects.filter(is_active=True))
     quantity = serializers.IntegerField(required=False, default=None)
     paper = serializers.PrimaryKeyRelatedField(queryset=Paper.objects.filter(is_active=True), required=False, allow_null=True)
-    sides = serializers.ChoiceField(choices=[("SIMPLEX", "Simplex"), ("DUPLEX", "Duplex")], required=False, default="")
-    color_mode = serializers.ChoiceField(choices=[("BW", "B&W"), ("COLOR", "Color")], required=False, default="COLOR")
+    sides = PrintSidesField(required=False, default="")
+    color_mode = ColorModeField(required=False, default="COLOR")
     machine = serializers.PrimaryKeyRelatedField(queryset=Machine.objects.filter(is_active=True), required=False, allow_null=True)
     chosen_width_mm = serializers.IntegerField(required=False, allow_null=True)
     chosen_height_mm = serializers.IntegerField(required=False, allow_null=True)
@@ -2117,13 +2118,11 @@ class QuoteCalculatorInputSerializer(serializers.Serializer):
         default=list,
     )
     machine_id = serializers.IntegerField(required=False, allow_null=True)
-    sides = serializers.ChoiceField(
-        choices=[("SIMPLEX", "Simplex"), ("DUPLEX", "Duplex")],
+    sides = PrintSidesField(
         required=False,
         default="SIMPLEX",
     )
-    color_mode = serializers.ChoiceField(
-        choices=[("COLOR", "Color"), ("BW", "B&W")],
+    color_mode = ColorModeField(
         required=False,
         default="COLOR",
     )

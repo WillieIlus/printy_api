@@ -11,6 +11,8 @@ from decimal import Decimal
 
 from rest_framework import serializers
 
+from api.spec_choice_fields import ColorModeField, PrintSidesField
+
 
 PRODUCT_ALIASES = {
     "business-cards": "business_card",
@@ -142,8 +144,8 @@ class ClientCalculatorInputSerializer(serializers.Serializer):
     material_id = serializers.IntegerField(required=False, allow_null=True, min_value=1)
     material_key = serializers.CharField(required=False, allow_blank=True, max_length=80)
 
-    color_mode = serializers.ChoiceField(choices=("COLOR", "BW"), default="COLOR")
-    sides = serializers.ChoiceField(choices=("SIMPLEX", "DUPLEX"), default="SIMPLEX")
+    color_mode = ColorModeField(default="COLOR")
+    sides = PrintSidesField(default="SIMPLEX")
     finishings = ClientFinishingSerializer(many=True, required=False, default=list)
     finishing_ids = serializers.ListField(
         child=serializers.IntegerField(min_value=1), required=False, default=list,

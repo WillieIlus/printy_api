@@ -1053,6 +1053,7 @@ def build_public_calculator_preview(payload: dict[str, Any]) -> dict[str, Any]:
     request_payload = {
         "calculator_mode": "marketplace",
         "product_family": PRODUCT_FAMILY_BY_TYPE[product_type],
+        "product_type": product_type,
         "pricing_mode": "custom",
         "product_pricing_mode": "SHEET",
         "quantity": payload.get("quantity"),

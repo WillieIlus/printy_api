@@ -1,6 +1,7 @@
 from rest_framework import serializers
 from decimal import Decimal
 from api.size_utils import normalize_size_payload, validate_size_selection
+from api.spec_choice_fields import ColorModeField, PrintSidesField
 
 
 class PublicFinishingSelectionSerializer(serializers.Serializer):
@@ -42,9 +43,9 @@ class PublicCalculatorPayloadSerializer(serializers.Serializer):
     width_mm = serializers.IntegerField(required=False, allow_null=True, min_value=1, help_text="Finished width in mm.")
     height_mm = serializers.IntegerField(required=False, allow_null=True, min_value=1, help_text="Finished height in mm.")
     normalized_size = serializers.CharField(required=False, allow_blank=True, default="")
-    print_sides = serializers.ChoiceField(choices=["SIMPLEX", "DUPLEX"], default="SIMPLEX")
+    print_sides = PrintSidesField(default="SIMPLEX")
     apply_duplex_surcharge = serializers.BooleanField(required=False, allow_null=True, default=None)
-    colour_mode = serializers.ChoiceField(choices=["BW", "COLOR"], default="COLOR")
+    colour_mode = ColorModeField(default="COLOR")
     paper_id = serializers.IntegerField(required=False, allow_null=True)
     paper_preference = serializers.CharField(required=False, allow_blank=True, default="")
     material_id = serializers.IntegerField(required=False, allow_null=True)
@@ -199,10 +200,10 @@ class PublicBookletMatchPayloadSerializer(serializers.Serializer):
     insert_paper_type = serializers.CharField(required=False, allow_blank=True, default="")
     insert_paper_gsm = serializers.IntegerField(required=False, allow_null=True)
     sheet_size = serializers.CharField(required=False, allow_blank=True, default="")
-    cover_sides = serializers.ChoiceField(choices=["SIMPLEX", "DUPLEX"], default="DUPLEX")
-    insert_sides = serializers.ChoiceField(choices=["SIMPLEX", "DUPLEX"], default="DUPLEX")
-    cover_color_mode = serializers.ChoiceField(choices=["BW", "COLOR"], default="COLOR")
-    insert_color_mode = serializers.ChoiceField(choices=["BW", "COLOR"], default="COLOR")
+    cover_sides = PrintSidesField(default="DUPLEX")
+    insert_sides = PrintSidesField(default="DUPLEX")
+    cover_color_mode = ColorModeField(default="COLOR")
+    insert_color_mode = ColorModeField(default="COLOR")
     cover_lamination_mode = serializers.ChoiceField(choices=["none", "front", "both"], default="none")
     width_mm = serializers.IntegerField(required=False, allow_null=True, min_value=1)
     height_mm = serializers.IntegerField(required=False, allow_null=True, min_value=1)

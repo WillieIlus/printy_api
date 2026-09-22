@@ -3,6 +3,7 @@ Django settings for printy_API project.
 Prepared for printy.ke launch and frontend connection.
 """
 import os
+import sys
 import logging
 import importlib.util
 from pathlib import Path
@@ -233,9 +234,25 @@ SOCIALACCOUNT_PROVIDERS = {
 # Email
 # =============================================================================
 
+# Deployment environment label. The default is "production" on purpose: if a
+# server boots without an explicit APP_ENV it is treated as production so the
+# email-delivery guard below cannot silently fall back to the console backend.
+# Local development must set APP_ENV=local (see .env.local.example).
+APP_ENV = _get_env("APP_ENV", default="production").strip().lower()
+
+_IS_TESTING_SETTINGS = (
+    "test_settings" in os.environ.get("DJANGO_SETTINGS_MODULE", "")
+    or sys.argv[1:2] == ["test"]
+)
+# True only for local dev / test runs. In production this stays False so that a
+# console EMAIL_BACKEND is reported as a hard startup error (printy.E001).
+EMAIL_IS_LOCAL = DEBUG or _IS_TESTING_SETTINGS or APP_ENV in {"local", "dev", "development"}
+
+# Local default is the console backend so `runserver` prints emails to the
+# terminal without needing SMTP credentials. Production MUST override this;
+# the guard below fails `manage.py check` if a non-local environment keeps it.
 EMAIL_BACKEND = os.environ.get(
     "EMAIL_BACKEND",
-    # Local default only. Production must set SMTP credentials in .env.
     "django.core.mail.backends.console.EmailBackend",
 )
 EMAIL_HOST = os.environ.get("EMAIL_HOST", "smtp.gmail.com")
@@ -252,6 +269,88 @@ DEFAULT_FROM_EMAIL = os.environ.get(
 )
 SERVER_EMAIL = DEFAULT_FROM_EMAIL
 ADMIN_NOTIFY_EMAIL = os.environ.get("ADMIN_NOTIFY_EMAIL", "hello@printy.ke")
+
+
+def _evaluate_email_delivery(*, backend, is_local, host, host_user, host_password):
+    """Pure evaluation of the email delivery configuration.
+
+    Pure (no settings/DB read) so it is trivially unit-testable and reused by
+    the registered system check below. Returns Django check Message objects.
+    """
+    from django.core.checks import Error, Info
+
+    messages = []
+    is_console = backend.endswith("backends.console.EmailBackend")
+    is_smtp = "backends.smtp.EmailBackend" in backend
+
+    if is_console:
+        if is_local:
+            messages.append(
+                Info(
+                    "Email backend is the console backend; emails are printed to the process "
+                    "output and never delivered over SMTP.",
+                    hint="Expected for local development. For real delivery set "
+                    "EMAIL_BACKEND=django.core.mail.backends.smtp.EmailBackend.",
+                    id="printy.W901",
+                )
+            )
+        else:
+            messages.append(
+                Error(
+                    "EMAIL_BACKEND resolves to the console backend while APP_ENV is not local, "
+                    "so emails are printed to the server console and are NEVER delivered. This is "
+                    "almost always the default fallback: EMAIL_BACKEND is missing from the "
+                    "deployed .env, so SMTP credentials are configured but ignored.",
+                    hint="Set EMAIL_BACKEND=django.core.mail.backends.smtp.EmailBackend plus "
+                    "EMAIL_HOST, EMAIL_PORT, EMAIL_USE_TLS, EMAIL_HOST_USER and "
+                    "EMAIL_HOST_PASSWORD in the deployed .env, then re-run manage.py check. "
+                    "See docs/EMAIL_DELIVERY.md.",
+                    id="printy.E001",
+                )
+            )
+        return messages
+
+    if is_smtp:
+        if not host:
+            messages.append(
+                Error(
+                    "EMAIL_HOST is not set; SMTP delivery cannot work.",
+                    hint="Set EMAIL_HOST (e.g. smtp.gmail.com) in .env.",
+                    id="printy.E004",
+                )
+            )
+        if not host_user or _is_placeholder_secret(host_user):
+            messages.append(
+                Error(
+                    "EMAIL_HOST_USER is empty or a placeholder; SMTP authentication will fail.",
+                    hint="Set a real EMAIL_HOST_USER in .env.",
+                    id="printy.E002",
+                )
+            )
+        if not host_password or _is_placeholder_secret(host_password):
+            messages.append(
+                Error(
+                    "EMAIL_HOST_PASSWORD is empty or a placeholder; SMTP authentication will fail.",
+                    hint="Set a real EMAIL_HOST_PASSWORD (app password / provider secret) in .env.",
+                    id="printy.E003",
+                )
+            )
+    return messages
+
+
+from django.core import checks as _django_checks
+
+
+@_django_checks.register(_django_checks.Tags.compatibility)
+def check_email_delivery_config(app_configs=None, **kwargs):
+    """Fail server startup when emails would silently not be delivered."""
+    return _evaluate_email_delivery(
+        backend=EMAIL_BACKEND,
+        is_local=EMAIL_IS_LOCAL,
+        host=EMAIL_HOST,
+        host_user=EMAIL_HOST_USER,
+        host_password=EMAIL_HOST_PASSWORD,
+    )
 
 FRONTEND_URL = os.environ.get("FRONTEND_URL", "http://localhost:3000").rstrip("/")
 
@@ -397,6 +496,116 @@ if MPESA_ENV == "production":
         raise ImproperlyConfigured(
             "MPESA_CALLBACK_URL cannot point to localhost when MPESA_ENV='production'."
         )
+
+
+def _evaluate_mpesa_production_config(*, env, consumer_key, consumer_secret, shortcode, passkey, callback_url):
+    """Pure evaluation of Daraja production readiness (unit-testable).
+
+    Mirrors the email guard: a server that boots with MPESA_ENV=production but
+    missing/placeholder Daraja credentials fails the system check loudly instead
+    of only erroring at the first payment.
+    """
+    from django.core.checks import Error, Info
+
+    messages = []
+    env = (env or "").strip().lower()
+    is_production = env == "production"
+
+    if not is_production:
+        messages.append(
+            Info(
+                "M-Pesa is configured for the sandbox Daraja environment; no live "
+                "money moves.",
+                hint="Flip MPESA_ENV=production and set real Daraja credentials to go live.",
+                id="printy.W902",
+            )
+        )
+
+    def _missing_or_placeholder(value):
+        return (not value) or _is_placeholder_secret(value)
+
+    if is_production:
+        if _missing_or_placeholder(consumer_key):
+            messages.append(
+                Error(
+                    "MPESA_CONSUMER_KEY is missing or a placeholder while "
+                    "MPESA_ENV=production.",
+                    hint="Set the real production Daraja consumer key (Daraja portal → "
+                    "production app) in the deployed .env.",
+                    id="printy.E013",
+                )
+            )
+        if _missing_or_placeholder(consumer_secret):
+            messages.append(
+                Error(
+                    "MPESA_CONSUMER_SECRET is missing or a placeholder while "
+                    "MPESA_ENV=production.",
+                    hint="Set the real production Daraja consumer secret in the deployed .env.",
+                    id="printy.E014",
+                )
+            )
+        digits = "".join(ch for ch in str(shortcode or "") if ch.isdigit())
+        if _missing_or_placeholder(shortcode) or not (5 <= len(digits) <= 11):
+            messages.append(
+                Error(
+                    "MPESA_SHORTCODE is missing, a placeholder, or not a plausible "
+                    "paybill/till number while MPESA_ENV=production.",
+                    hint="Set the production paybill (or till) Number registered in "
+                    "Daraja, e.g. 174379.",
+                    id="printy.E015",
+                )
+            )
+        if _missing_or_placeholder(passkey):
+            messages.append(
+                Error(
+                    "MPESA_PASSKEY is missing or a placeholder while MPESA_ENV=production.",
+                    hint="Set the production Lipa na M-Pesa Online passkey from the "
+                    "Daraja portal in the deployed .env.",
+                    id="printy.E016",
+                )
+            )
+        callback = (callback_url or "").lower()
+        if not callback:
+            messages.append(
+                Error(
+                    "MPESA_CALLBACK_URL is not set while MPESA_ENV=production.",
+                    hint="Set https://api.printy.ke/api/payments/mpesa/callback/ in .env.",
+                    id="printy.E010",
+                )
+            )
+        elif "localhost" in callback or "127.0.0.1" in callback:
+            messages.append(
+                Error(
+                    "MPESA_CALLBACK_URL cannot point to localhost while MPESA_ENV=production.",
+                    hint="Safaricom must reach the callback over the public HTTPS endpoint.",
+                    id="printy.E012",
+                )
+            )
+        elif not callback.startswith("https://"):
+            messages.append(
+                Error(
+                    "MPESA_CALLBACK_URL must use HTTPS while MPESA_ENV=production.",
+                    hint="Set the canonical https://api.printy.ke/api/payments/mpesa/callback/ "
+                    "callback in .env.",
+                    id="printy.E011",
+                )
+            )
+    return messages
+
+
+@_django_checks.register(_django_checks.Tags.compatibility)
+def check_mpesa_production_config(app_configs=None, **kwargs):
+    """Fail server startup when Daraja is aimed at production without real creds."""
+    from django.conf import settings as _running_settings
+
+    return _evaluate_mpesa_production_config(
+        env=getattr(_running_settings, "MPESA_ENV", ""),
+        consumer_key=getattr(_running_settings, "MPESA_CONSUMER_KEY", ""),
+        consumer_secret=getattr(_running_settings, "MPESA_CONSUMER_SECRET", ""),
+        shortcode=getattr(_running_settings, "MPESA_SHORTCODE", ""),
+        passkey=getattr(_running_settings, "MPESA_PASSKEY", ""),
+        callback_url=getattr(_running_settings, "MPESA_CALLBACK_URL", ""),
+    )
 
 # =============================================================================
 # Middleware

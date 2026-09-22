@@ -73,33 +73,33 @@ class NotificationTargetRouteContractTestCase(TestCase):
     def test_quote_request_targets_stay_inside_role_dashboards(self):
         self.assertEqual(
             self.serialize_target(self.notification_for(self.client_user, "quote_request", self.quote_request.id)),
-            f"/dashboard/client/quotes/{self.quote_request.id}",
+            "/app/buyer?tab=quote",
         )
         self.assertEqual(
             self.serialize_target(self.notification_for(self.manager, "quote_request", self.quote_request.id)),
-            f"/dashboard/partner/quotes/{self.quote_request.id}",
+            "/app/manager",
         )
         self.assertEqual(
             self.serialize_target(self.notification_for(self.admin, "quote_request", self.quote_request.id)),
-            "/dashboard/admin",
+            "/app/admin",
         )
 
     def test_managed_job_targets_are_role_aware_dashboard_urls(self):
         self.assertEqual(
             self.serialize_target(self.notification_for(self.client_user, "managed_job", self.managed_job.id)),
-            f"/dashboard/client/jobs/{self.managed_job.id}",
+            "/app/buyer",
         )
         self.assertEqual(
             self.serialize_target(self.notification_for(self.manager, "managed_job", self.managed_job.id)),
-            f"/dashboard/partner/jobs/{self.managed_job.id}",
+            "/app/manager",
         )
         self.assertEqual(
             self.serialize_target(self.notification_for(self.production_user, "managed_job", self.managed_job.id)),
-            f"/dashboard/production/jobs/{self.managed_job.id}",
+            "/app/printer",
         )
         self.assertEqual(
             self.serialize_target(self.notification_for(self.admin, "managed_job", self.managed_job.id)),
-            "/dashboard/admin",
+            "/app/admin",
         )
 
     def test_notification_targets_do_not_use_legacy_root_or_shops_routes(self):

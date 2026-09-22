@@ -553,6 +553,194 @@ def _build_unlocked_products(paper_rows: list[dict[str, Any]], finishing_rows: l
     return unlocked
 
 
+_PRODUCT_CATALOG = [
+    {
+        "key": "business-cards",
+        "label": "Business Cards",
+        "min_qty": 100,
+        "size": (BUSINESS_CARD_WIDTH_MM, BUSINESS_CARD_HEIGHT_MM),
+        "paper": "heavy",
+        "finishings": (("cutting",),),
+    },
+    {
+        "key": "laminated-business-cards",
+        "label": "Laminated Business Cards",
+        "min_qty": 100,
+        "size": (BUSINESS_CARD_WIDTH_MM, BUSINESS_CARD_HEIGHT_MM),
+        "paper": "heavy",
+        "finishings": (("lamination", "potch"), ("cutting",)),
+    },
+    {
+        "key": "flyers",
+        "label": "Flyers",
+        "min_qty": 100,
+        "size": (FLYER_A5_WIDTH_MM, FLYER_A5_HEIGHT_MM),
+        "paper": "light",
+        "finishings": (),
+    },
+    {
+        "key": "posters",
+        "label": "Posters",
+        "min_qty": 100,
+        "size": (297, 420),
+        "paper": "light",
+        "finishings": (),
+    },
+    {
+        "key": "brochures",
+        "label": "Brochures",
+        "min_qty": 100,
+        "size": (FLYER_A5_WIDTH_MM, FLYER_A5_HEIGHT_MM),
+        "paper": "light",
+        "finishings": (("cutting",),),
+    },
+    {
+        "key": "booklets",
+        "label": "Booklets",
+        "min_qty": 100,
+        "size": (FLYER_A5_WIDTH_MM, FLYER_A5_HEIGHT_MM),
+        "paper": "any",
+        "finishings": (("stitching", "saddle"),),
+    },
+    {
+        "key": "perfect-bound-books",
+        "label": "Perfect Bound Books",
+        "min_qty": 100,
+        "size": (FLYER_A5_WIDTH_MM, FLYER_A5_HEIGHT_MM),
+        "paper": "any",
+        "finishings": (("perfect",),),
+    },
+    {
+        "key": "spiral-bound-reports",
+        "label": "Spiral Bound Reports",
+        "min_qty": 100,
+        "size": (210, 297),
+        "paper": "any",
+        "finishings": (("spiral", "wire-o", "wire o"),),
+    },
+    {
+        "key": "stickers",
+        "label": "Sticker Sheets",
+        "min_qty": 100,
+        "size": (BUSINESS_CARD_WIDTH_MM, BUSINESS_CARD_HEIGHT_MM),
+        "paper": "sticker",
+        "finishings": (("cutting",),),
+    },
+]
+
+_PAPER_CONDITION_HELP = {
+    "heavy": "heavy card stock (200–350gsm) with a price set",
+    "light": "light digital paper (130–170gsm) with a price set",
+    "sticker": "sticker stock (e.g. Tic Tac) with a price set",
+    "any": "at least one paper with a price set",
+}
+
+_FINISHING_LABELS = {
+    ("cutting",): "Cutting",
+    ("lamination", "potch"): "Lamination",
+    ("stitching", "saddle"): "Saddle stitching",
+    ("perfect",): "Perfect binding",
+    ("spiral", "wire-o", "wire o"): "Spiral / wire-o binding",
+}
+
+
+def _paper_condition_met(condition: str, paper_rows: list[dict[str, Any]]) -> tuple[bool, list[str]]:
+    if condition == "heavy":
+        ok = any(_paper_matches(row, gsms=(200, 250, 300, 350), names=("200", "250", "300", "350")) for row in paper_rows)
+    elif condition == "light":
+        ok = any(_paper_matches(row, gsms=(130, 150, 170), names=("130", "150", "170")) for row in paper_rows)
+    elif condition == "sticker":
+        ok = any(_paper_matches(row, names=("tic tac", "sticker", "tictac"), paper_types=("sticker",)) for row in paper_rows)
+    else:
+        ok = any(_is_active_paper(row) for row in paper_rows)
+    return ok, [] if ok else [_PAPER_CONDITION_HELP.get(condition, "a priced paper")]
+
+
+def _finishing_condition_met(tokens: tuple[str, ...], finishing_rows: list[dict[str, Any]]) -> tuple[bool, str]:
+    label = _FINISHING_LABELS.get(tokens) or "Finishing"
+    return _has_finishing(finishing_rows, tokens), label
+
+
+def _qualified_paper_for_condition(condition: str, paper_rows: list[dict[str, Any]]) -> dict[str, Any] | None:
+    if condition == "heavy":
+        match = lambda row: _paper_matches(row, gsms=(200, 250, 300, 350), names=("200", "250", "300", "350"))  # noqa: E731
+    elif condition == "light":
+        match = lambda row: _paper_matches(row, gsms=(130, 150, 170), names=("130", "150", "170"))  # noqa: E731
+    elif condition == "sticker":
+        match = lambda row: _paper_matches(row, names=("tic tac", "sticker", "tictac"), paper_types=("sticker",))  # noqa: E731
+    else:
+        match = lambda row: _is_active_paper(row)  # noqa: E731
+    return next((row for row in paper_rows if match(row)), None)
+
+
+def _build_catalog_sample(product_def: dict[str, Any], paper_rows: list[dict[str, Any]], finishing_rows: list[dict[str, Any]]) -> dict[str, Any] | None:
+    paper = _qualified_paper_for_condition(product_def["paper"], paper_rows)
+    if paper is None:
+        return None
+    width_mm, height_mm = product_def["size"]
+    imposition = build_imposition_breakdown(
+        quantity=100,
+        finished_width_mm=width_mm,
+        finished_height_mm=height_mm,
+        sheet_width_mm=SRA3_WIDTH_MM,
+        sheet_height_mm=SRA3_HEIGHT_MM,
+    )
+    sheets_needed = int(imposition.good_sheets or 0)
+    pieces_per_sheet = int(imposition.copies_per_sheet or 0)
+    single_production = Decimal(sheets_needed) * _to_decimal(paper.get("single_side_price") or "0.00")
+    finishing_total = Decimal("0.00")
+    finishing_previews = []
+    for tokens in product_def.get("finishings", ()):
+        matched_row = next(
+            (
+                row
+                for row in finishing_rows
+                if _is_active_finishing(row) and any(name in _normalize_text(row.get("name")).lower() for name in tokens)
+            ),
+            None,
+        )
+        if matched_row is None:
+            continue
+        preview = _build_finishing_preview(matched_row, quantity=100, sheets_needed=sheets_needed)
+        finishing_previews.append(preview)
+        finishing_total += _to_decimal(preview["final_total"] or "0.00")
+    return {
+        "label": f"Sample 100 × {product_def['label']}",
+        "pieces_per_sheet": pieces_per_sheet,
+        "sheets_needed": sheets_needed,
+        "sample_size": f"{width_mm}×{height_mm}mm",
+        "single_sided_production": _decimal_string(single_production),
+        "finishing_estimate": _decimal_string(finishing_total) if finishing_total > 0 else None,
+        "total_production_cost": _decimal_string(single_production + finishing_total),
+        "finishing_previews": finishing_previews,
+    }
+
+
+def build_product_capability_catalog(paper_rows: list[dict[str, Any]], finishing_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    catalog = []
+    for product_def in _PRODUCT_CATALOG:
+        paper_ok, paper_missing = _paper_condition_met(product_def["paper"], paper_rows)
+        finishing_missing = [_finishing_condition_met(tokens, finishing_rows)[1] for tokens in product_def.get("finishings", ()) if not _finishing_condition_met(tokens, finishing_rows)[0]]
+        missing_items = list(paper_missing)
+        missing_items.extend(f"{label} finishing rate with a price set" for label in finishing_missing)
+        available = bool(paper_ok) and not finishing_missing
+        sample = _build_catalog_sample(product_def, paper_rows, finishing_rows) if available else None
+        catalog.append(
+            {
+                "key": product_def["key"],
+                "label": product_def["label"],
+                "min_qty": product_def["min_qty"],
+                "sample_size": f"{product_def['size'][0]}×{product_def['size'][1]}mm",
+                "available": available,
+                "status": "ready" if available else "gap",
+                "missing_items": missing_items,
+                "reason": "Ready to quote at 100 pieces." if available else "Add the missing items below to unlock this product.",
+                "sample": sample,
+            }
+        )
+    return catalog
+
+
 def _market_guide_or_placeholder(values: list[Decimal]) -> dict[str, Any]:
     stats = _decimal_stats(values)
     enough = len(values) >= MARKET_GUIDE_MIN_SAMPLE_COUNT
@@ -1061,6 +1249,7 @@ def summarize_rate_card(paper_rows: list[dict[str, Any]], finishing_rows: list[d
         "finishing_rows_added": len(active_finishing_rows),
         "products_unlocked": len(unlocked),
         "unlocked_products": unlocked,
+        "product_catalog": build_product_capability_catalog(paper_rows, finishing_rows),
         "capability_preview": capability_preview,
         "completion_feed": _build_completion_feed(paper_rows, finishing_rows),
         "next_suggestions": _build_next_suggestions(paper_rows, finishing_rows),
@@ -1193,13 +1382,17 @@ def save_shop_rate_card_setup(shop, *, paper_rows: list[dict[str, Any]], finishi
 
     if completed is not None:
         completed_value = bool(completed)
-        shop.pricing_ready = completed_value
         shop.public_match_ready = completed_value
         if completed_value:
             shop.is_active = True
             shop.is_public = True
 
     with transaction.atomic():
+        _persist_paper_rows(shop, normalized_papers)
+        _persist_finishing_rows(shop, normalized_finishings)
+        from shops.services import refresh_shop_pricing_ready
+
+        shop.pricing_ready = refresh_shop_pricing_ready(shop)
         shop.save(update_fields=["name", "public_whatsapp_number", "phone_number", "service_area", "city", "pricing_ready", "public_match_ready", "is_active", "is_public", "updated_at"])
         ShopRateCardSetup.objects.update_or_create(
             shop=shop,
@@ -1210,8 +1403,6 @@ def save_shop_rate_card_setup(shop, *, paper_rows: list[dict[str, Any]], finishi
                 "completed": bool(completed),
             },
         )
-        _persist_paper_rows(shop, normalized_papers)
-        _persist_finishing_rows(shop, normalized_finishings)
     return payload
 
 

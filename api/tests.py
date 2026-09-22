@@ -6165,7 +6165,7 @@ class QuoteEmailTemplateAPITestCase(TestCase):
         self.assertGreaterEqual(len(mail.outbox), 1)
         email = next(message for message in mail.outbox if message.subject == "New quote request from Email Buyer")
         self.assertEqual(email.from_email, "Printy <hello.printy@gmail.com>")
-        self.assertIn(f"https://printy.ke/dashboard/shop/requests/{quote_request.id}", email.body)
+        self.assertIn("https://printy.ke/app/printer", email.body)
         self.assertTrue(email.alternatives)
         self.assertIn("Respond inside Printy so the client can compare your quote clearly.", email.alternatives[0][0])
 
@@ -6188,7 +6188,7 @@ class QuoteEmailTemplateAPITestCase(TestCase):
         email = mail.outbox[-1]
         self.assertEqual(email.subject, "Verified Print Partner sent you a quote")
         self.assertEqual(email.from_email, "Printy <hello.printy@gmail.com>")
-        self.assertIn(f"https://printy.ke/dashboard/client/requests/{quote_request.id}", email.body)
+        self.assertIn("https://printy.ke/app/buyer?tab=quote", email.body)
         self.assertTrue(email.alternatives)
         self.assertIn("Nothing is final until you accept a quote.", email.alternatives[0][0])
 
@@ -6218,7 +6218,7 @@ class QuoteEmailTemplateAPITestCase(TestCase):
         self.assertEqual(accept_response.status_code, 200)
 
         email = next(message for message in mail.outbox if message.subject == "Quote accepted by Accepted Client")
-        self.assertIn(f"https://printy.ke/dashboard/shop/requests/{quote_request.id}", email.body)
+        self.assertIn("https://printy.ke/app/printer", email.body)
         self.assertTrue(email.alternatives)
         self.assertIn("Open the request in Printy and move the work into production.", email.alternatives[0][0])
 

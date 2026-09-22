@@ -97,10 +97,13 @@ class RateCardBootstrapAPITestCase(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertTrue(response.json()["completed"])
         shop = Shop.objects.get(owner=self.printer)
-        self.assertTrue(shop.pricing_ready)
         self.assertTrue(shop.public_match_ready)
         self.assertTrue(shop.is_active)
         self.assertTrue(shop.is_public)
+        # pricing_ready is data-driven: onboarding completes with zero active
+        # paper stock / printing rates, so the shop is NOT yet print-ready.
+        # This is the "paper stock is a critical printer item" rule.
+        self.assertFalse(shop.pricing_ready)
 
     def test_client_without_shop_setup_returns_actionable_404_without_creating_shop(self):
         self.client.force_authenticate(user=self.client_user)

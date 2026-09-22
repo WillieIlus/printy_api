@@ -117,8 +117,8 @@ def sync_managed_job_artwork_requirement(*, managed_job: ManagedJob) -> bool:
 def _job_dashboard_url(managed_job: ManagedJob, role: str) -> str:
     frontend_url = str(getattr(settings, "FRONTEND_URL", "https://printy.ke") or "https://printy.ke").rstrip("/")
     if role == "partner":
-        return f"{frontend_url}/dashboard/partner/jobs/{managed_job.id}"
-    return f"{frontend_url}/dashboard/client/jobs/{managed_job.id}"
+        return f"{frontend_url}/app/manager"
+    return f"{frontend_url}/app/buyer"
 
 
 def _job_artwork_email_context(*, managed_job: ManagedJob, source: str) -> dict[str, Any]:

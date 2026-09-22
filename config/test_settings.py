@@ -19,3 +19,8 @@ PASSWORD_HASHERS = [
     "django.contrib.auth.hashers.MD5PasswordHasher",
 ]
 
+# Tests must never run against live Daraja. Override whatever .env says so the
+# M-Pesa production guard (printy.E01x) stays quiet and no payment test can be
+# misread as moving real money.
+MPESA_ENV = "sandbox"
+

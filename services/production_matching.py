@@ -43,6 +43,14 @@ def _as_dict(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+def _shop_contact(shop: Shop) -> tuple[str, str]:
+    whatsapp = getattr(shop, "public_whatsapp_number", "") or ""
+    phone = getattr(shop, "phone_number", "") or ""
+    contact = whatsapp or phone
+    label = "WhatsApp" if whatsapp else ("Phone" if phone else "")
+    return contact, label
+
+
 def _decimal(value: Any, default: Decimal = Decimal("0")) -> Decimal:
     try:
         if value in (None, ""):
@@ -123,8 +131,48 @@ def _requested_paper_category(payload: dict[str, Any]) -> str:
     return ""
 
 
-def _required_finishing_keys(payload: dict[str, Any]) -> list[str]:
-    keys = list(PRODUCT_REQUIRED_FINISHINGS.get(_normalized_key(payload.get("product_type")), []))
+DEFAULT_PAPER_BY_PRODUCT: dict[str, tuple[int, str]] = {
+    "business_card": (300, "artcard"),
+    "flyer": (150, "matt"),
+    "poster": (150, "matt"),
+    "letterhead": (80, "bond"),
+    "certificate": (250, "artcard"),
+    "invitation_card": (300, "artcard"),
+    "brochure": (130, "matt"),
+    "sticker": (80, "tictac"),
+}
+
+
+def _has_paper_spec(payload: dict[str, Any]) -> bool:
+    return bool(
+        _normal(payload.get("paper_stock"))
+        or _normal(payload.get("paper_type"))
+        or _requested_gsm(payload)
+        or _requested_paper_category(payload)
+    )
+
+
+def _imply_paper_defaults(payload: dict[str, Any]) -> dict[str, Any]:
+    """Fall back to the product's recommended paper when the spec carries no
+    paper choice at all (common in manager-led intake). Returns a new payload;
+    the original request is never mutated."""
+    if _has_paper_spec(payload):
+        return payload
+    defaults = DEFAULT_PAPER_BY_PRODUCT.get(_normalized_key(payload.get("product_type")))
+    if not defaults:
+        return payload
+    gsm, category = defaults
+    implied = dict(payload)
+    implied["requested_gsm"] = gsm
+    implied["requested_paper_category"] = category
+    return implied
+
+
+def _explicit_finishing_requirements(payload: dict[str, Any]) -> list[str]:
+    """Finishings the caller has explicitly asked for (lamination plus any
+    finishing rows in the request). These must be available or the shop is
+    excluded. Structural requirements are handled separately."""
+    keys: list[str] = []
     lamination = normalize_finishing_slug(payload.get("lamination") or payload.get("cover_lamination"))
     if lamination and not is_empty_finishing(lamination):
         keys.append(lamination)
@@ -141,15 +189,20 @@ def _required_finishing_keys(payload: dict[str, Any]) -> list[str]:
     return keys
 
 
+def _required_finishing_keys(payload: dict[str, Any]) -> list[str]:
+    keys = list(PRODUCT_REQUIRED_FINISHINGS.get(_normalized_key(payload.get("product_type")), []))
+    for key in _explicit_finishing_requirements(payload):
+        if key not in keys:
+            keys.append(key)
+    return keys
+
+
 def _global_missing_fields(payload: dict[str, Any]) -> list[str]:
     missing = []
     if not _normal(payload.get("product_type")):
         missing.append("product_type")
     if not _int(payload.get("quantity")):
         missing.append("quantity")
-    width, height = _parse_finished_size(payload)
-    if not width or not height:
-        missing.append("finished_size")
     if not (_normal(payload.get("paper_stock")) or _requested_gsm(payload) or _requested_paper_category(payload)):
         missing.append("paper_stock")
     return missing
@@ -232,9 +285,16 @@ def _find_finishing(shop: Shop, key: str) -> FinishingRate | None:
 def _finishing_selections(shop: Shop, payload: dict[str, Any]) -> tuple[list[dict[str, Any]], list[str]]:
     selections = []
     missing = []
+    explicit_keys = set(_explicit_finishing_requirements(payload))
     for key in _required_finishing_keys(payload):
         rule = _find_finishing(shop, key)
         if rule is None:
+            if key == "cutting" and key not in explicit_keys:
+                # Cutting is an imposition concern for sheet-fed products: the
+                # finished pieces are cut out of the imposed parent sheet. A shop
+                # that handles trimming in-house must never be excluded from
+                # pricing because it has no catalogued cutting finishing rate.
+                continue
             missing.extend(["finishing", key])
             continue
         selections.append({"rule": rule, "selected_side": "both"})
@@ -251,11 +311,14 @@ def _location_summary(shop: Shop) -> str:
 
 def _diagnostic_row(*, shop: Shop, payload: dict[str, Any], missing: list[str], available: list[str] | None = None, reason: str = "") -> dict[str, Any]:
     missing = sorted(set(missing), key=missing.index)
+    shop_contact, shop_contact_label = _shop_contact(shop)
     return {
         "shop_id": shop.id,
         "shop_name": shop.name,
         "shop_display_name": shop.name,
         "shop_slug": shop.slug or "",
+        "shop_contact": shop_contact,
+        "shop_contact_label": shop_contact_label,
         "shop_location": _location_summary(shop),
         "shop_location_area": getattr(shop, "service_area", "") or getattr(shop, "city", ""),
         "location_summary": _location_summary(shop),
@@ -296,6 +359,7 @@ def _priced_row(*, shop: Shop, payload: dict[str, Any], paper: Paper, machine: M
     breakdown = _as_dict(preview.get("breakdown"))
     imposition = _as_dict(breakdown.get("imposition"))
     score = float(_decimal(subtotal, Decimal("0"))) if subtotal else 0.0
+    shop_contact, shop_contact_label = _shop_contact(shop)
     selection = {
         "paper_id": paper.id,
         "paper_label": _as_dict(breakdown.get("paper")).get("label") or f"{paper.sheet_size} {paper.gsm}gsm",
@@ -309,6 +373,8 @@ def _priced_row(*, shop: Shop, payload: dict[str, Any], paper: Paper, machine: M
         "shop_name": shop.name,
         "shop_display_name": shop.name,
         "shop_slug": shop.slug or "",
+        "shop_contact": shop_contact,
+        "shop_contact_label": shop_contact_label,
         "shop_location": _location_summary(shop),
         "shop_location_area": getattr(shop, "service_area", "") or getattr(shop, "city", ""),
         "location_summary": _location_summary(shop),
@@ -416,7 +482,7 @@ def _pricing_snapshot(rows: list[dict[str, Any]], *, currency: str) -> dict[str,
 
 
 def build_partner_production_matches(payload):
-    payload = _as_dict(payload)
+    payload = _imply_paper_defaults(_as_dict(payload))
     product_type = _normal(payload.get("product_type"))
     missing_fields = _global_missing_fields(payload)
     if missing_fields:
@@ -497,7 +563,7 @@ def price_single_shop_for_submission(*, shop: Shop, payload: dict[str, Any]) -> 
 
 
 def _normalized_single_shop_payload(payload: dict[str, Any]) -> dict[str, Any]:
-    payload = _as_dict(payload)
+    payload = _imply_paper_defaults(_as_dict(payload))
     normalized_payload = {
         **payload,
         "product_type": _normal(payload.get("product_type") or payload.get("job_type")),

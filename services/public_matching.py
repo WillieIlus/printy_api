@@ -6,9 +6,10 @@ from decimal import Decimal
 from typing import Any
 
 from django.db.models import Q
+from django.utils.text import slugify
 
 from inventory.models import Machine, Paper
-from pricing.models import PrintingRate
+from pricing.models import FinishingRate, PrintingRate
 from services.pricing.engine import calculate_sheet_pricing
 from services.pricing.finishing_normalization import normalize_finishing_slug, resolve_finishing_rate_for_slug
 from services.pricing.marketplace_pricing import apply_marketplace_pricing_to_preview
@@ -16,6 +17,14 @@ from shops.models import Shop
 
 
 MAX_PUBLIC_MATCHES = 12
+
+# Sheet products whose finished pieces have to be cut out of the imposed parent
+# sheet. The finished size is a pure imposition concern: it decides how many
+# pieces fit per SRA3 sheet, and the shop quotes on those sheets plus cutting.
+# Requiring a cutting path here would block shops, so cutting is priced whenever
+# the shop has one and silently skipped (never excluding the shop) when it does
+# not.
+SHEET_PRODUCTS_REQUIRING_CUTTING = {"business_card", "flyer", "label_sticker"}
 
 
 def _decimal(value: Any, default: Decimal = Decimal("0")) -> Decimal:
@@ -86,6 +95,15 @@ def _resolve_machine(shop: Shop, paper: Paper, payload: dict[str, Any]) -> Machi
     return (rated or fitting or list(machines))[:1][0] if (rated or fitting or list(machines)) else None
 
 
+def _resolve_cutting_rate(shop: Shop) -> FinishingRate | None:
+    rows = FinishingRate.objects.filter(shop=shop, is_active=True).order_by("id")
+    for row in rows:
+        candidates = {slugify(row.slug or ""), slugify(row.name or "")}
+        if any("cutting" in (candidate or "") for candidate in candidates):
+            return row
+    return None
+
+
 def _finishing_selections(shop: Shop, payload: dict[str, Any]) -> tuple[list[dict[str, Any]], list[str]]:
     selections = []
     missing = []
@@ -96,6 +114,15 @@ def _finishing_selections(shop: Shop, payload: dict[str, Any]) -> tuple[list[dic
             selections.append({"rule": rule, "selected_side": "both"})
         else:
             missing.append(canonical_slug)
+
+    product_type = (str(payload.get("product_type") or "").strip()).lower()
+    if product_type in SHEET_PRODUCTS_REQUIRING_CUTTING:
+        cutting = _resolve_cutting_rate(shop)
+        if cutting is not None and not any(
+            getattr(selection.get("rule"), "id", None) == cutting.id for selection in selections
+        ):
+            selections.append({"rule": cutting, "selected_side": "both"})
+
     return selections, missing
 
 

@@ -50,6 +50,19 @@ def _setting(name: str, default: str = "") -> str:
     return value.strip() if isinstance(value, str) else str(value).strip()
 
 
+def _is_placeholder(value: str) -> bool:
+    """True for empty or template values left in .env (replace-with-*, changeme…)."""
+    if not value:
+        return True
+    lowered = value.strip().lower()
+    return lowered.startswith("replace-with") or lowered in {
+        "changeme",
+        "change-me",
+        "secret",
+        "your-secret",
+    }
+
+
 def mpesa_base_url() -> str:
     override = _setting("MPESA_BASE_URL")
     if override:
@@ -59,15 +72,30 @@ def mpesa_base_url() -> str:
 
 
 def validate_production_config() -> None:
-    """Enforce the env rules in docs/env_vars.md before we ever call Daraja."""
+    """Enforce the env rules in docs/env_vars.md before we ever call Daraja.
+
+    Fail fast here (no HTTP call) when credentials are missing OR still
+    placeholders — the startup system check printy.E013–E016 catches this before
+    boot; this is the safety net for runtime loads.
+    """
     env = _setting("MPESA_ENV", "sandbox").lower()
-    required = [
-        "MPESA_CONSUMER_KEY", "MPESA_CONSUMER_SECRET",
-        "MPESA_SHORTCODE", "MPESA_PASSKEY",
+    suspicious = [
+        name
+        for name in ("MPESA_CONSUMER_KEY", "MPESA_CONSUMER_SECRET", "MPESA_PASSKEY")
+        if _is_placeholder(_setting(name))
     ]
-    missing = [name for name in required if not _setting(name)]
-    if missing:
-        raise MpesaConfigError(f"Missing Daraja settings: {', '.join(missing)}")
+    if suspicious:
+        raise MpesaConfigError(
+            f"Missing or placeholder Daraja settings: {', '.join(suspicious)}"
+        )
+
+    shortcode = _setting("MPESA_SHORTCODE")
+    digits = "".join(ch for ch in shortcode if ch.isdigit())
+    if not shortcode or _is_placeholder(shortcode) or not (5 <= len(digits) <= 11):
+        raise MpesaConfigError(
+            "MPESA_SHORTCODE is missing, a placeholder, or not a plausible "
+            "paybill/till number."
+        )
 
     callback = _setting("MPESA_CALLBACK_URL")
     if not callback:

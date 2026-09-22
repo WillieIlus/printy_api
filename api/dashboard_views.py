@@ -49,6 +49,7 @@ from quotes.services_workflow import update_quote_response
 from services.production_matching import build_partner_production_matches
 from services.pricing.breakdown_projection import production_breakdown_from_preview
 from services.pricing.finishing_normalization import is_empty_finishing, normalize_finishing_slug
+from services.pricing.spec_normalization import normalize_color_mode, normalize_print_sides
 from services.pricing.partner_market_rates import build_partner_market_rate_payload
 from shops.models import Shop
 from .workflow_serializers import (
@@ -800,6 +801,8 @@ class BaseRoleDetailView(BaseDashboardHomeView):
         for key in ("lamination", "cover_lamination"):
             if payload.get(key) and not is_empty_finishing(payload.get(key)):
                 payload[key] = normalize_finishing_slug(payload[key])
+        payload["print_sides"] = normalize_print_sides(payload.get("print_sides"))
+        payload["color_mode"] = normalize_color_mode(payload.get("color_mode"))
         return {key: value for key, value in payload.items() if value not in (None, "", [])}
 
     def _production_specs_snapshot(self, job: ManagedJob) -> dict[str, object]:

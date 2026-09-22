@@ -31,6 +31,7 @@ from quotes.status_normalization import (
 )
 from quotes.turnaround import estimate_turnaround, legacy_days_from_hours, humanize_working_hours
 
+from .frontend_links import normalize_frontend_path
 from .visibility import (
     CLIENT_ACTOR,
     project_client_counterparty_name,
@@ -368,8 +369,10 @@ class QuoteInboxMessageSerializer(serializers.ModelSerializer):
         ]
 
     def get_action_url(self, obj):
+        # Stored metadata may predate the /app/* frontend route migration, so the
+        # link is normalised (legacy /dashboard/* URLs resolve to the current routes).
         metadata = obj.metadata or {}
-        return metadata.get("action_url", "")
+        return normalize_frontend_path(metadata.get("action_url", ""))
 
     def _attachments(self, obj):
         if obj.quote_id:

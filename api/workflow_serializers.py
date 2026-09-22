@@ -35,6 +35,7 @@ from quotes.status_normalization import (
     quote_response_status_label,
 )
 from services.pricing.mvp_rate_card import FINISHING_DEFINITION_BY_KEY, PAPER_DEFINITION_BY_KEY
+from api.spec_choice_fields import ColorModeField, PrintSidesField
 
 
 def _as_dict(value):
@@ -219,8 +220,8 @@ class CalculatorConfigPreviewSerializer(serializers.Serializer):
     height_input = serializers.DecimalField(required=False, allow_null=True, max_digits=10, decimal_places=3, min_value=Decimal("0.001"))
     width_mm = serializers.IntegerField(required=False, allow_null=True, min_value=1)
     height_mm = serializers.IntegerField(required=False, allow_null=True, min_value=1)
-    print_sides = serializers.ChoiceField(choices=["SIMPLEX", "DUPLEX"], required=False, allow_null=True, default="SIMPLEX", help_text="Flat-job print sides.")
-    color_mode = serializers.ChoiceField(choices=["BW", "COLOR"], required=False, allow_null=True, default="COLOR", help_text="Flat-job colour mode.")
+    print_sides = PrintSidesField(required=False, allow_null=True, default="SIMPLEX", help_text="Flat-job print sides.")
+    color_mode = ColorModeField(required=False, allow_null=True, default="COLOR", help_text="Flat-job colour mode.")
     paper_stock = serializers.CharField(required=False, allow_blank=True, allow_null=True, help_text="Paper stock key from /api/calculator/config/.")
     material_type = serializers.CharField(required=False, allow_blank=True, allow_null=True, help_text="Large-format material label from /api/calculator/config/.")
     product_subtype = serializers.CharField(required=False, allow_blank=True, allow_null=True, help_text="Large-format subtype such as banner or poster.")
@@ -271,6 +272,8 @@ class PartnerProductionMatchResultSerializer(serializers.Serializer):
     shop_slug = serializers.CharField(required=False, allow_blank=True)
     shop_location = serializers.CharField(required=False, allow_null=True, allow_blank=True)
     shop_location_area = serializers.CharField(required=False, allow_null=True, allow_blank=True)
+    shop_contact = serializers.CharField(required=False, allow_blank=True)
+    shop_contact_label = serializers.CharField(required=False, allow_blank=True)
     can_produce = serializers.BooleanField()
     production_cost = serializers.CharField(required=False, allow_null=True)
     estimated_production_cost = serializers.CharField(required=False, allow_null=True)
@@ -279,6 +282,9 @@ class PartnerProductionMatchResultSerializer(serializers.Serializer):
     price_available = serializers.BooleanField()
     price_status = serializers.CharField()
     pricing_source = serializers.CharField(required=False, allow_blank=True)
+
+    eligible = serializers.SerializerMethodField()
+    ineligible_reason = serializers.SerializerMethodField()
     missing_requirements = serializers.ListField(child=serializers.CharField(), default=list)
     missing_spec_warnings = serializers.ListField(child=serializers.CharField(), default=list)
     available_reasons = serializers.ListField(child=serializers.CharField(), default=list)
@@ -302,6 +308,12 @@ class PartnerProductionMatchResultSerializer(serializers.Serializer):
     production_breakdown = serializers.JSONField(required=False, allow_null=True)
     selection = serializers.JSONField(required=False, allow_null=True)
 
+    def get_eligible(self, obj) -> bool:
+        return bool(obj.get("can_produce"))
+
+    def get_ineligible_reason(self, obj) -> str:
+        return obj.get("explanation") or obj.get("reason") or ""
+
 
 class PartnerProductionMatchResponseSerializer(serializers.Serializer):
     product_type = serializers.CharField(required=False, allow_blank=True, allow_null=True)
@@ -321,8 +333,8 @@ class CalculatorPreviewSerializer(serializers.Serializer):
     quantity = serializers.IntegerField(min_value=1)
     paper = serializers.PrimaryKeyRelatedField(queryset=Paper.objects.filter(is_active=True))
     machine = serializers.PrimaryKeyRelatedField(queryset=Machine.objects.filter(is_active=True))
-    color_mode = serializers.ChoiceField(choices=["BW", "COLOR"], default="COLOR")
-    sides = serializers.ChoiceField(choices=["SIMPLEX", "DUPLEX"], default="SIMPLEX")
+    color_mode = ColorModeField(default="COLOR")
+    sides = PrintSidesField(default="SIMPLEX")
     apply_duplex_surcharge = serializers.BooleanField(required=False, allow_null=True, default=None)
     size_mode = serializers.ChoiceField(choices=["standard", "custom"], required=False, default="custom")
     size_label = serializers.CharField(required=False, allow_blank=True, default="")
@@ -387,10 +399,10 @@ class BookletCalculatorPreviewSerializer(serializers.Serializer):
     binding_type = serializers.ChoiceField(choices=["saddle_stitch", "perfect_bind", "wire_o"], default="saddle_stitch")
     cover_paper = serializers.PrimaryKeyRelatedField(queryset=Paper.objects.filter(is_active=True), required=False, allow_null=True)
     insert_paper = serializers.PrimaryKeyRelatedField(queryset=Paper.objects.filter(is_active=True), required=False, allow_null=True)
-    cover_sides = serializers.ChoiceField(choices=["SIMPLEX", "DUPLEX"], default="DUPLEX")
-    insert_sides = serializers.ChoiceField(choices=["SIMPLEX", "DUPLEX"], default="DUPLEX")
-    cover_color_mode = serializers.ChoiceField(choices=["BW", "COLOR"], default="COLOR")
-    insert_color_mode = serializers.ChoiceField(choices=["BW", "COLOR"], default="COLOR")
+    cover_sides = PrintSidesField(default="DUPLEX")
+    insert_sides = PrintSidesField(default="DUPLEX")
+    cover_color_mode = ColorModeField(default="COLOR")
+    insert_color_mode = ColorModeField(default="COLOR")
     cover_lamination_mode = serializers.ChoiceField(choices=["none", "front", "both"], default="none")
     cover_lamination_finishing_rate = serializers.PrimaryKeyRelatedField(
         queryset=FinishingRate.objects.filter(is_active=True),
@@ -480,8 +492,8 @@ class DashboardCalculatorPayloadSerializer(serializers.Serializer):
     width_mm = serializers.IntegerField(required=False, min_value=1)
     height_mm = serializers.IntegerField(required=False, min_value=1)
     paper_id = serializers.PrimaryKeyRelatedField(queryset=Paper.objects.filter(is_active=True))
-    sides = serializers.ChoiceField(choices=["SIMPLEX", "DUPLEX"], default="SIMPLEX")
-    color_mode = serializers.ChoiceField(choices=["BW", "COLOR"], default="COLOR")
+    sides = PrintSidesField(default="SIMPLEX")
+    color_mode = ColorModeField(default="COLOR")
     orientation = serializers.CharField(required=False, allow_blank=True)
     bleed_mm = serializers.IntegerField(required=False, default=3)
     finishings = DashboardFinishingSelectionSerializer(many=True, required=False)
@@ -598,8 +610,8 @@ class PartnerAssignedRequestShopOptionsSerializer(serializers.Serializer):
     finished_size = serializers.CharField(required=False, allow_blank=True, allow_null=True)
     quantity = serializers.IntegerField(required=False, allow_null=True, min_value=1)
     paper_stock = serializers.CharField(required=False, allow_blank=True, allow_null=True)
-    print_sides = serializers.ChoiceField(choices=["SIMPLEX", "DUPLEX"], required=False, allow_null=True)
-    color_mode = serializers.ChoiceField(choices=["BW", "COLOR"], required=False, allow_null=True)
+    print_sides = PrintSidesField(required=False, allow_null=True)
+    color_mode = ColorModeField(required=False, allow_null=True)
     lamination = serializers.CharField(required=False, allow_blank=True, allow_null=True)
     urgency_type = serializers.ChoiceField(
         choices=["standard", "same_day", "express", "after_hours", "emergency"],

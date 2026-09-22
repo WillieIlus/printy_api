@@ -51,7 +51,11 @@ class NotificationSerializer(serializers.ModelSerializer):
         return getattr(actor_user, "email", None)
 
     def get_target_url(self, obj):
-        """Build frontend URL for the notification target (recipient-specific)."""
+        """Build frontend URL for the notification target (recipient-specific).
+
+        Frontend dashboard routes live under /app/* (single-page dashboards), so
+        deep links resolve to the role dashboard rather than a legacy /dashboard/* URL.
+        """
         try:
             if not obj.object_type or obj.object_id is None:
                 return None
@@ -70,15 +74,15 @@ class NotificationSerializer(serializers.ModelSerializer):
                         "on_behalf_of",
                     ).get(pk=oid)
                     if CANONICAL_SUPER_ADMIN_ROLE in roles:
-                        return "/dashboard/admin"
+                        return "/app/admin"
                     if qr.shop and qr.shop.owner_id == obj.user_id:
-                        return f"/dashboard/production/assignments/{oid}"
+                        return "/app/printer"
                     if qr.assigned_manager_id == obj.user_id or CANONICAL_PARTNER_ROLE in roles:
-                        return f"/dashboard/partner/quotes/{oid}"
+                        return "/app/manager"
                     if qr.created_by_id == obj.user_id or qr.on_behalf_of_id == obj.user_id or CANONICAL_CLIENT_ROLE in roles:
-                        return f"/dashboard/client/quotes/{oid}"
+                        return "/app/buyer?tab=quote"
                     if CANONICAL_PRODUCTION_ROLE in roles:
-                        return "/dashboard/production/assignments"
+                        return "/app/printer"
                     return None
                 except QuoteRequest.DoesNotExist:
                     return None
@@ -96,32 +100,32 @@ class NotificationSerializer(serializers.ModelSerializer):
                     ).get(pk=oid)
                     quote_request = sq.quote_request
                     if CANONICAL_SUPER_ADMIN_ROLE in roles:
-                        return "/dashboard/admin"
+                        return "/app/admin"
                     if sq.shop and sq.shop.owner_id == obj.user_id:
-                        return f"/dashboard/production/assignments/{oid}"
+                        return "/app/printer"
                     if quote_request and (quote_request.assigned_manager_id == obj.user_id or CANONICAL_PARTNER_ROLE in roles):
-                        return f"/dashboard/partner/quotes/{quote_request.id}"
+                        return "/app/manager"
                     if quote_request and (quote_request.created_by_id == obj.user_id or quote_request.on_behalf_of_id == obj.user_id or CANONICAL_CLIENT_ROLE in roles):
-                        return f"/dashboard/client/quotes/{quote_request.id}"
+                        return "/app/buyer?tab=quote"
                     if CANONICAL_PRODUCTION_ROLE in roles:
-                        return "/dashboard/production/assignments"
+                        return "/app/printer"
                     return None
                 except Quote.DoesNotExist:
                     return None
 
             if ot == "production_order":
                 if CANONICAL_SUPER_ADMIN_ROLE in roles:
-                    return "/dashboard/admin"
-                return f"/dashboard/production/jobs/{oid}"
+                    return "/app/admin"
+                return "/app/printer"
 
             if ot == "managed_job":
                 if CANONICAL_SUPER_ADMIN_ROLE in roles:
-                    return "/dashboard/admin"
+                    return "/app/admin"
                 if CANONICAL_PRODUCTION_ROLE in roles:
-                    return f"/dashboard/production/jobs/{oid}"
+                    return "/app/printer"
                 if CANONICAL_PARTNER_ROLE in roles:
-                    return f"/dashboard/partner/jobs/{oid}"
-                return f"/dashboard/client/jobs/{oid}"
+                    return "/app/manager"
+                return "/app/buyer"
             return None
         except Exception as exc:
             logger.warning("Failed to build notification target URL: %s", exc)

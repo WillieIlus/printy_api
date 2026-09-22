@@ -53,6 +53,7 @@ SIZE_LIBRARY = {
     "flyer": [
         {"value": "A6", "label": "A6", "width_mm": 105, "height_mm": 148},
         {"value": "A5", "label": "A5", "width_mm": 148, "height_mm": 210},
+        {"value": "DL", "label": "DL", "width_mm": 99, "height_mm": 210},
         {"value": "A4", "label": "A4", "width_mm": 210, "height_mm": 297},
         {"value": "A3", "label": "A3", "width_mm": 297, "height_mm": 420},
     ],
@@ -211,6 +212,7 @@ SIZE_OPTION_METADATA: dict[str, list[dict[str, Any]]] = {
     "flyer": [
         {"id": "A6", "label": "A6", "description": "Quarter-page flyer", "recommended": False},
         {"id": "A5", "label": "A5", "description": "Half-page flyer", "recommended": True},
+        {"id": "DL", "label": "DL", "description": "Long slim flyer", "recommended": False},
         {"id": "A4", "label": "A4", "description": "Full-page flyer", "recommended": False},
         {"id": "A3", "label": "A3", "description": "Large format flyer", "recommended": False},
     ],

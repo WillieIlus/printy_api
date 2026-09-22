@@ -23,6 +23,7 @@ from api.visibility import (
     project_production_intelligence,
     resolve_topology_mode_for_quote_request,
 )
+from pricing.choices import ColorMode, Sides
 from pricing.models import FinishingRate
 
 logger = logging.getLogger(__name__)
@@ -49,6 +50,23 @@ def _build_reference(prefix: str, instance_id: int) -> str:
 
 def _generate_share_token() -> str:
     return secrets.token_urlsafe(32)
+
+
+def _canonical_sides(value, default: str = "SIMPLEX") -> str:
+    """Canonicalize print-sides labels ('double', 'simplex') before they touch the model layer.
+
+    QuoteItem.sides only accepts SIMPLEX/DUPLEX, but calculator snapshots may
+    carry the friendly label space. Never store raw labels.
+    """
+    return Sides.from_friendly(value) or default
+
+
+def _canonical_color_mode(value, default: str = "COLOR") -> str:
+    """Canonicalize colour-mode labels ('full_color', 'black_only') before the model layer.
+
+    QuoteItem.color_mode only accepts BW/COLOR. Never store raw labels.
+    """
+    return ColorMode.from_friendly(value) or default
 
 
 def _ensure_share_link(response: Quote, *, user=None) -> QuoteShareLink:
@@ -375,8 +393,12 @@ def _build_quote_item(*, quote_request: QuoteRequest, draft: CalculatorDraft, sh
         paper=paper,
         chosen_width_mm=width_mm,
         chosen_height_mm=height_mm,
-        sides=calculator_inputs.get("print_sides") or calculator_inputs.get("sides") or getattr(product, "default_sides", "") or "SIMPLEX",
-        color_mode=calculator_inputs.get("colour_mode") or calculator_inputs.get("color_mode") or "COLOR",
+        sides=_canonical_sides(
+            calculator_inputs.get("print_sides") or calculator_inputs.get("sides") or getattr(product, "default_sides", "") or "SIMPLEX",
+        ),
+        color_mode=_canonical_color_mode(
+            calculator_inputs.get("colour_mode") or calculator_inputs.get("color_mode") or "COLOR",
+        ),
         machine=machine,
         special_instructions=(merged_request_details.get("notes") or custom_snapshot.get("custom_brief") or "")[:5000],
         pricing_snapshot=_extract_shop_preview(pricing_snapshot, shop),
@@ -447,8 +469,12 @@ def _build_manager_intake_quote_item(*, quote_request: QuoteRequest, draft: Calc
         pricing_mode=pricing_mode if pricing_mode in {"SHEET", "LARGE_FORMAT"} else "SHEET",
         chosen_width_mm=width_mm,
         chosen_height_mm=height_mm,
-        sides=calculator_inputs.get("print_sides") or calculator_inputs.get("sides") or "SIMPLEX",
-        color_mode=calculator_inputs.get("colour_mode") or calculator_inputs.get("color_mode") or "COLOR",
+        sides=_canonical_sides(
+            calculator_inputs.get("print_sides") or calculator_inputs.get("sides") or "SIMPLEX",
+        ),
+        color_mode=_canonical_color_mode(
+            calculator_inputs.get("colour_mode") or calculator_inputs.get("color_mode") or "COLOR",
+        ),
         special_instructions=(merged_request_details.get("notes") or custom_snapshot.get("custom_brief") or "")[:5000],
         pricing_snapshot={},
         item_spec_snapshot=_build_manager_intake_item_spec_snapshot(

@@ -14,6 +14,7 @@ from rest_framework.views import APIView
 
 from api.visibility import CLIENT_ACTOR, OPS_ACTOR, PARTNER_ACTOR, SHOP_ACTOR, resolve_actor
 from api.services.actor_serializer import select_actor_serializer
+from pricing.choices import ColorMode, Sides
 from jobs.artwork_confirmation import (
     get_artwork_confirmation_payload,
     request_client_artwork_confirmation,
@@ -161,12 +162,12 @@ def _build_reorder_draft_payload(*, managed_job: ManagedJob) -> dict:
         request_snapshot.get("requested_gsm"),
         getattr(getattr(quote_item, "paper", None), "gsm", None),
     )
-    print_sides = str(
-        _first_non_empty(request_snapshot.get("print_sides"), getattr(quote_item, "sides", None), "SIMPLEX") or "SIMPLEX"
-    ).strip() or "SIMPLEX"
-    color_mode = str(
-        _first_non_empty(request_snapshot.get("color_mode"), getattr(quote_item, "color_mode", None), "COLOR") or "COLOR"
-    ).strip() or "COLOR"
+    print_sides = (Sides.from_friendly(
+        _first_non_empty(request_snapshot.get("print_sides"), getattr(quote_item, "sides", None), "SIMPLEX")
+    ) or "SIMPLEX")
+    color_mode = (ColorMode.from_friendly(
+        _first_non_empty(request_snapshot.get("color_mode"), getattr(quote_item, "color_mode", None), "COLOR")
+    ) or "COLOR")
     lamination = str(_first_non_empty(request_snapshot.get("lamination"), "none") or "none").strip() or "none"
     finished_size = _format_finished_size(request_snapshot=request_snapshot, quote_item=quote_item)
     finishing_list = _normalize_reorder_finishing_list(request_snapshot=request_snapshot, quote_item=quote_item)

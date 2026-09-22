@@ -2,6 +2,38 @@
 
 This checklist is for real Safaricom production validation. Do not mark any payment as paid unless the callback confirms it.
 
+## Startup guard (fails fast — read this first)
+
+The backend refuses to boot when `MPESA_ENV=production` is paired with missing or
+placeholder Daraja credentials. `manage.py check` / gunicorn / `runserver` will
+exit with these errors so a live server can never silently start without M-Pesa:
+
+| ID | Condition |
+| --- | --- |
+| `printy.E010` | `MPESA_CALLBACK_URL` not set with `MPESA_ENV=production` |
+| `printy.E011` | `MPESA_CALLBACK_URL` not HTTPS with `MPESA_ENV=production` |
+| `printy.E012` | `MPESA_CALLBACK_URL` points at localhost/127.0.0.1 |
+| `printy.E013` | `MPESA_CONSUMER_KEY` missing or `replace-with-*` placeholder |
+| `printy.E014` | `MPESA_CONSUMER_SECRET` missing or placeholder |
+| `printy.E015` | `MPESA_SHORTCODE` missing, placeholder, or not 5–11 digits |
+| `printy.E016` | `MPESA_PASSKEY` missing or placeholder |
+
+The runtime guard `mpesa_payments.services.validate_production_config()` applies
+the same checks again before any HTTP call to Daraja (belt and braces).
+
+The deprecated dev flags `MPESA_SIMULATE_STK_PUSH` / `MPESA_AUTO_CONFIRM_STK_PUSH`
+are unused and removed; local sandbox simulation is done via the
+`simulate_mpesa_callback` management command (refuses when `MPESA_ENV=production`).
+
+Tests: `tests/test_mpesa_production_config.py` runs the guard matrix on every
+test pass.
+
+## Verify before going live
+
+```bash
+python manage.py check            # must exit 0 — no printy.E01x errors
+```
+
 ## Exact callback URL to register
 
 `https://api.printy.ke/api/payments/mpesa/callback/`

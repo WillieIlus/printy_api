@@ -430,7 +430,11 @@ class PrintingRate(TimeStampedModel):
     def resolve(cls, machine, sheet_size, color_mode, sides, *, paper=None, apply_duplex_surcharge=None):
         """
         Resolve PrintingRate and return price for given sides.
-        Order: 1) exact match (machine, sheet_size, color_mode), 2) default rate when sheet_size matches.
+        Order: 1) exact match (machine, sheet_size, color_mode), 2) default rate when
+        sheet_size AND color_mode both match.
+        B&W is optional: a shop that only holds COLOR rates never silently prices a
+        black_only job at color rates — resolve returns (None, None) so the shop is
+        "cannot produce" for that spec.
         """
         rate = cls.objects.filter(
             machine=machine,
@@ -444,13 +448,17 @@ class PrintingRate(TimeStampedModel):
                 paper=paper,
                 apply_duplex_surcharge=apply_duplex_surcharge,
             )
-        # Fallback: use machine's default rate when sheet_size matches
+        # Fallback: use machine's default rate only when sheet_size and color_mode match
         default_rate = cls.objects.filter(
             machine=machine,
             is_default=True,
             is_active=True,
         ).first()
-        if default_rate and default_rate.sheet_size == sheet_size:
+        if (
+            default_rate
+            and default_rate.sheet_size == sheet_size
+            and default_rate.color_mode == color_mode
+        ):
             return default_rate, default_rate.get_price_for_sides(
                 sides,
                 paper=paper,
