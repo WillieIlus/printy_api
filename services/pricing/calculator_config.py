@@ -94,7 +94,7 @@ PRODUCT_DEFINITIONS = OrderedDict(
             "business_card",
             {
                 "label": "Business Cards",
-                "required_fields": ["quantity", "finished_size", "paper_stock", "print_sides", "color_mode"],
+                "required_fields": ["quantity", "finished_size", "print_sides", "color_mode"],
                 "optional_fields": ["requested_paper_category", "requested_gsm", "lamination", "corner_rounding"],
                 "defaults": {
                     "quantity": 100,
@@ -113,7 +113,7 @@ PRODUCT_DEFINITIONS = OrderedDict(
             "flyer",
             {
                 "label": "Flyers",
-                "required_fields": ["quantity", "finished_size", "paper_stock", "print_sides", "color_mode"],
+                "required_fields": ["quantity", "finished_size", "print_sides", "color_mode"],
                 "optional_fields": ["requested_paper_category", "requested_gsm", "folding", "lamination"],
                 "defaults": {
                     "quantity": 100,
@@ -132,7 +132,7 @@ PRODUCT_DEFINITIONS = OrderedDict(
             "label_sticker",
             {
                 "label": "Label Stickers / Tictac",
-                "required_fields": ["quantity", "finished_size", "paper_stock", "shape", "cut_type", "color_mode"],
+                "required_fields": ["quantity", "finished_size", "shape", "cut_type", "color_mode"],
                 "optional_fields": ["requested_paper_category", "requested_gsm", "lamination"],
                 "defaults": {
                     "quantity": 100,
@@ -151,7 +151,7 @@ PRODUCT_DEFINITIONS = OrderedDict(
             "letterhead",
             {
                 "label": "Letterheads / Conqueror",
-                "required_fields": ["quantity", "finished_size", "paper_stock", "print_sides", "color_mode"],
+                "required_fields": ["quantity", "finished_size", "print_sides", "color_mode"],
                 "optional_fields": ["requested_paper_category", "requested_gsm"],
                 "defaults": {
                     "quantity": 100,
@@ -168,8 +168,16 @@ PRODUCT_DEFINITIONS = OrderedDict(
             "booklet",
             {
                 "label": "Booklets",
-                "required_fields": ["quantity", "finished_size", "total_pages", "cover_stock", "insert_stock"],
-                "optional_fields": ["cover_lamination", "binding_type", "cutting"],
+                "required_fields": ["quantity", "finished_size", "total_pages"],
+                "optional_fields": [
+                    "cover_lamination",
+                    "binding_type",
+                    "cutting",
+                    "requested_cover_paper_category",
+                    "requested_cover_gsm",
+                    "requested_insert_paper_category",
+                    "requested_insert_gsm",
+                ],
                 "defaults": {
                     "quantity": 100,
                     "finished_size": "A5",
@@ -356,28 +364,16 @@ def _field_definitions(
     material_types: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     category_field_key = "allowed_paper_categories"
-    stock_usage_filter = lambda item: True
-    stock_field = "paper_stock"
     requested_category_label = "Requested paper category"
     if product_key == "booklet":
         return [
             {"key": "quantity", "label": "Quantity", "type": "number", "required": True, "help_text": "How many finished booklets do you need?"},
             {"key": "finished_size", "label": "Finished size", "type": "select", "required": True, "options": SIZE_LIBRARY["booklet"]},
             {"key": "total_pages", "label": "Total pages", "type": "number", "required": True, "help_text": "Include every page. Backend will normalize to a production-safe multiple of 4."},
-            {
-                "key": "cover_stock",
-                "label": "Cover stock",
-                "type": "select",
-                "required": True,
-                "options": [item for item in paper_stocks if item["category"] in definition["allowed_cover_categories"] and item["is_cover_stock"]],
-            },
-            {
-                "key": "insert_stock",
-                "label": "Insert stock",
-                "type": "select",
-                "required": True,
-                "options": [item for item in paper_stocks if item["category"] in definition["allowed_insert_categories"] and item["is_insert_stock"]],
-            },
+            {"key": "requested_cover_paper_category", "label": "Requested cover paper", "type": "select", "required": False, "options": [item for item in _paper_categories() if item["value"] in definition["allowed_cover_categories"]], "help_text": "Optional cover paper preference. Shops price with their nearest available cover stock."},
+            {"key": "requested_cover_gsm", "label": "Requested cover GSM", "type": "number", "required": False, "help_text": "Optional exact cover grammage request. Backend will match the nearest available stock if needed."},
+            {"key": "requested_insert_paper_category", "label": "Requested insert paper", "type": "select", "required": False, "options": [item for item in _paper_categories() if item["value"] in definition["allowed_insert_categories"]], "help_text": "Optional insert paper preference. Shops price with their nearest available insert stock."},
+            {"key": "requested_insert_gsm", "label": "Requested insert GSM", "type": "number", "required": False, "help_text": "Optional exact insert grammage request. Backend will match the nearest available stock if needed."},
             {"key": "cover_lamination", "label": "Cover lamination", "type": "select", "required": False, "options": [{"value": "none", "label": "No lamination"}, {"value": "front", "label": "Front only"}, {"value": "both", "label": "Both sides"}], "help_text": "Lamination is applied to cover sheets only."},
             {"key": "binding_type", "label": "Binding", "type": "select", "required": False, "options": [{"value": "saddle_stitch", "label": "Saddle stitch"}, {"value": "perfect_bind", "label": "Perfect bind"}, {"value": "wire_o", "label": "Wire-O"}]},
             {"key": "cutting", "label": "Cutting", "type": "boolean", "required": False, "help_text": "Backend applies cutting only when the shop has a matching finishing path."},
@@ -390,15 +386,9 @@ def _field_definitions(
             {"key": "product_subtype", "label": "Product style", "type": "select", "required": False, "options": LARGE_FORMAT_SUBTYPE_OPTIONS},
         ]
 
-    if product_key == "label_sticker":
-        stock_usage_filter = lambda item: item["category"] in definition["allowed_paper_categories"] and item["is_sticker_stock"]
-    else:
-        stock_usage_filter = lambda item: item["category"] in definition["allowed_paper_categories"]
-
     fields = [
         {"key": "quantity", "label": "Quantity", "type": "number", "required": True},
         {"key": "finished_size", "label": "Finished size", "type": "select", "required": True, "options": SIZE_LIBRARY[product_key]},
-        {"key": stock_field, "label": "Paper stock", "type": "select", "required": True, "options": [item for item in paper_stocks if stock_usage_filter(item)]},
         {"key": "requested_paper_category", "label": requested_category_label, "type": "select", "required": False, "options": [item for item in _paper_categories() if item["value"] in definition["allowed_paper_categories"]], "help_text": "Optional override when the client requests a category that may need a closest-stock match."},
         {"key": "requested_gsm", "label": "Requested GSM", "type": "number", "required": False, "help_text": "Optional exact grammage request. Backend will match the nearest available stock if needed."},
         {"key": "color_mode", "label": "Color mode", "type": "select", "required": True, "options": COLOR_MODES},

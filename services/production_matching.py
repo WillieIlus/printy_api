@@ -203,8 +203,6 @@ def _global_missing_fields(payload: dict[str, Any]) -> list[str]:
         missing.append("product_type")
     if not _int(payload.get("quantity")):
         missing.append("quantity")
-    if not (_normal(payload.get("paper_stock")) or _requested_gsm(payload) or _requested_paper_category(payload)):
-        missing.append("paper_stock")
     return missing
 
 
@@ -414,7 +412,12 @@ def _match_shop(shop: Shop, payload: dict[str, Any]) -> dict[str, Any]:
     available = []
     papers = _candidate_papers(shop, payload)
     if not papers:
-        return _diagnostic_row(shop=shop, payload=payload, missing=["paper"], reason="No active matching paper stock is configured for this shop.")
+        return _diagnostic_row(
+            shop=shop,
+            payload=payload,
+            missing=["paper"],
+            reason="No active paper is priced on this shop's rate card, so it cannot produce a number for the job.",
+        )
     paper = papers[0]
     available.append(f"Matched paper {paper.sheet_size} {paper.gsm}gsm.")
 

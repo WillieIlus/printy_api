@@ -225,6 +225,76 @@ class CalculatorSpecHarmonizationTestCase(TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertIn("not a valid choice", str(response.json()))
 
+    def test_public_calculator_preview_prices_without_any_paper_choice(self):
+        """Buyers no longer pick a paper stock in the calculator, and a missing
+        paper choice must never block pricing: the shop's closest/default stock
+        prices the job (a printer prints even without holding the paper)."""
+        response = self.client.post(
+            "/api/calculator/public-preview/",
+            {
+                "product_type": "business_card",
+                "quantity": 100,
+                "finished_size": "90x55mm",
+                "print_sides": "DUPLEX",
+                "color_mode": "COLOR",
+            },
+            format="json",
+        )
+
+        assert response.status_code == 200, (
+            f"public calculator preview without a paper choice returned "
+            f"{response.status_code} {response.json()} — paper must never block pricing."
+        )
+        payload = response.json()
+        self.assertTrue(payload["can_calculate"])
+        self.assertNotIn("paper_stock", payload["missing_fields"])
+        self.assertGreaterEqual(payload["matches_count"], 1)
+        self.assertIsNotNone(payload["market_range"])
+        self.assertIsNotNone(payload["market_range"]["min"])
+        for match in payload["matches"]:
+            production = match.get("production_preview") or {}
+            self.assertGreaterEqual(production.get("sheets_required", 1), 1, match)
+
+    def test_public_calculator_preview_prices_with_no_matching_requested_stock(self):
+        """Requesting a paper the shop does not hold must not exclude it: shops
+        price with their closest available stock ('closest available stock')."""
+        response = self.client.post(
+            "/api/calculator/public-preview/",
+            {
+                "product_type": "business_card",
+                "quantity": 100,
+                "finished_size": "90x55mm",
+                "requested_paper_category": "conqueror",
+                "requested_gsm": 999,
+                "print_sides": "DUPLEX",
+                "color_mode": "COLOR",
+            },
+            format="json",
+        )
+
+        assert response.status_code == 200, (
+            f"public calculator preview with an unmatched paper request returned "
+            f"{response.status_code} {response.json()} — the requested stock must not block pricing."
+        )
+        payload = response.json()
+        self.assertTrue(payload["can_calculate"])
+        self.assertGreaterEqual(payload["matches_count"], 1)
+        self.assertIsNotNone(payload["market_range"])
+        self.assertIsNotNone(payload["market_range"]["min"])
+
+    def test_calculator_config_no_longer_advertises_paper_stock_required_fields(self):
+        response = self.client.get("/api/calculator/config/")
+        self.assertEqual(response.status_code, 200)
+        products = response.json()["products"]
+        for product in products:
+            self.assertNotIn("paper_stock", product["required_fields"], product["key"])
+            self.assertNotIn("cover_stock", product["required_fields"], product["key"])
+            self.assertNotIn("insert_stock", product["required_fields"], product["key"])
+            field_keys = [f["key"] for f in product["fields"]]
+            self.assertNotIn("paper_stock", field_keys, product["key"])
+            self.assertNotIn("cover_stock", field_keys, product["key"])
+            self.assertNotIn("insert_stock", field_keys, product["key"])
+
     # ------------------------------------------------------ finished size independence
 
     def test_every_advertised_finished_size_resolves_to_dimensions(self):

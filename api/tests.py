@@ -5712,7 +5712,7 @@ class CalculatorConfigContractAPITestCase(TestCase):
         data = response.json()
         self.assertFalse(data["can_calculate"])
         self.assertIn("finished_size", data["missing_fields"])
-        self.assertIn("paper_stock", data["missing_fields"])
+        self.assertNotIn("paper_stock", data["missing_fields"])
 
     def test_public_preview_matches_requested_gsm_to_closest_stock(self):
         response = self.client.post(
@@ -6744,7 +6744,7 @@ class ManagerShopOptionsAPITestCase(TestCase):
         self.assertEqual(response.status_code, 200)
         payload = response.json()
         self.assertIn("finished_size", payload["missing_fields"])
-        self.assertIn("paper_stock", payload["missing_fields"])
+        self.assertNotIn("paper_stock", payload["missing_fields"])
         self.assertEqual(payload["results"], [])
 
 
