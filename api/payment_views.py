@@ -86,6 +86,9 @@ def _serialize_payment(payment: Payment, request) -> dict:
             "amount": str(payment.amount) if payment.amount is not None else None,
             "expected_amount": str(payment.expected_amount) if payment.expected_amount is not None else None,
             "status": payment.status,
+            "is_paid": payment.status == Payment.STATUS_PAID,
+            "is_terminal": payment.status
+            in {Payment.STATUS_PAID, Payment.STATUS_FAILED, Payment.STATUS_CANCELLED, Payment.STATUS_EXPIRED},
             "mpesa_receipt_number": payment.mpesa_receipt_number,
             "checkout_request_id": payment.checkout_request_id,
             "merchant_request_id": payment.merchant_request_id,
@@ -94,6 +97,26 @@ def _serialize_payment(payment: Payment, request) -> dict:
         }
     )
     return payload
+
+
+class PaymentDetailView(APIView):
+    """GET /api/payments/{pk}/ — poll a canonical payment's status.
+
+    Quote-level M-Pesa payments are `payments.Payment` rows; the client needs
+    this endpoint to poll them (the `/payments/mpesa/{id}/` card endpoint reads
+    `mpesa_payments.MpesaPayment`, which only covers managed-job payables).
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, pk: int):
+        payment = get_object_or_404(
+            Payment.objects.select_related("payer", "quote"),
+            pk=pk,
+        )
+        if not _can_use_payment(request.user, payment):
+            raise PermissionDenied("Only the payer or platform staff can view this payment.")
+        return Response(_serialize_payment(payment, request), status=status.HTTP_200_OK)
 
 
 def _settlement_status(managed_job: ManagedJob) -> str:

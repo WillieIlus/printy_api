@@ -326,6 +326,98 @@ class CanonicalPaymentFlowTestCase(TestCase):
         self.assertIn("faster checkout", consent.consent_text)
         self.assertEqual(consent.user_agent, "Printy test client")
 
+    @override_settings(MPESA_ENV="sandbox", MPESA_ENVIRONMENT="test")
+    def test_payment_detail_serializes_terminal_state_and_guards_ownership(self):
+        _quote, payment = accept_quote_for_payment(quote=self.quote, accepted_by=self.client_user)
+        stk = initiate_stk_push(payment=payment, phone_number="+254700000000")
+
+        api_client = APIClient()
+        api_client.force_authenticate(user=self.client_user)
+        response = api_client.get(reverse("payment-detail", kwargs={"pk": payment.id}))
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["id"], payment.id)
+        self.assertEqual(payload["status"], Payment.STATUS_PROCESSING)
+        self.assertFalse(payload["is_paid"])
+        self.assertFalse(payload["is_terminal"])
+        self.assertEqual(payload["checkout_request_id"], stk.checkout_request_id)
+
+        handle_stk_callback(callback_payload=self._success_callback(stk))
+        response = api_client.get(reverse("payment-detail", kwargs={"pk": payment.id}))
+        payload = response.json()
+        self.assertEqual(payload["status"], Payment.STATUS_PAID)
+        self.assertTrue(payload["is_paid"])
+        self.assertTrue(payload["is_terminal"])
+        self.assertEqual(payload["mpesa_receipt_number"], "QGH7XXX")
+
+        stranger = User.objects.create_user(email="stranger@example.com", password="pass", role=User.Role.CLIENT)
+        api_client.force_authenticate(user=stranger)
+        response = api_client.get(reverse("payment-detail", kwargs={"pk": payment.id}))
+        self.assertEqual(response.status_code, 403)
+
+    @override_settings(MPESA_ENVIRONMENT="test")
+    def test_configured_card_callback_url_confirms_canonical_payment(self):
+        """Regression for the callback-collision blocker.
+
+        Production ``MPESA_CALLBACK_URL`` is ``/api/payments/mpesa/callback/``
+        (this app's route), and the canonical quote STK push publishes that
+        same URL. A live Daraja callback therefore lands here with a canonical
+        ``MpesaSTKRequest`` checkout id that no ``MpesaPayment`` owns. The view
+        must fall through to ``handle_stk_callback`` and confirm the canonical
+        ``Payment`` + create the ManagedJob — otherwise quote payments hang in
+        ``processing`` forever. Stub mode hides this by fabricating ids, so
+        this test drives the real shared URL.
+        """
+        _quote, payment = accept_quote_for_payment(quote=self.quote, accepted_by=self.client_user)
+        stk = initiate_stk_push(payment=payment, phone_number="+254700000000")
+        self.assertFalse(payment.status == Payment.STATUS_PAID)
+
+        response = self.client.post(
+            "/api/payments/mpesa/callback/",
+            self._success_callback(stk),
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"ResultCode": 0, "ResultDesc": "Accepted"})
+        payment.refresh_from_db()
+        stk.refresh_from_db()
+        self.assertEqual(stk.status, MpesaSTKRequest.STATUS_SUCCESS)
+        self.assertEqual(payment.status, Payment.STATUS_PAID)
+        self.assertTrue(payment.mpesa_receipt_number)
+        self.assertEqual(payment.mpesa_receipt_number, "QGH7XXX")
+        self.assertTrue(ManagedJob.objects.filter(source_quote=self.quote).exists())
+
+    @override_settings(MPESA_ENVIRONMENT="test")
+    def test_configured_callback_card_payment_still_confirmed_by_this_app(self):
+        """The shared URL must keep handling its own MpesaPayment rows."""
+        from mpesa_payments.models import MpesaPayment
+
+        card_payment = MpesaPayment.objects.create(
+            user=self.client_user,
+            phone_number="254700000000",
+            amount=Decimal("1750.00"),
+            account_reference="JOB-1",
+            description="Card path",
+        )
+        card_payment.mark_push_sent(
+            merchant_request_id="CARD-MR-1",
+            checkout_request_id="CARD-CR-1",
+            customer_message="Success",
+        )
+
+        response = self.client.post(
+            "/api/payments/mpesa/callback/",
+            self._success_callback(card_payment),
+            content_type="application/json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        card_payment.refresh_from_db()
+        self.assertTrue(card_payment.is_paid)
+        self.assertEqual(card_payment.mpesa_receipt_number, "QGH7XXX")
+
     @override_settings(MPESA_ENVIRONMENT="test")
     def test_existing_stk_request_repairs_processing_payment_state(self):
         _quote, payment = accept_quote_for_payment(quote=self.quote, accepted_by=self.client_user)

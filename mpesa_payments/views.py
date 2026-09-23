@@ -90,10 +90,27 @@ class MpesaStkPushView(APIView):
         return Response(MpesaPaymentReadSerializer(payment).data, status=status.HTTP_201_CREATED)
 
 
+def _callback_checkout_request_id(payload: dict) -> str:
+    body = payload.get("Body") if isinstance(payload, dict) else {}
+    stk = body.get("stkCallback") if isinstance(body, dict) else {}
+    return str(stk.get("CheckoutRequestID") or "")
+
+
 class MpesaCallbackView(APIView):
     """POST /api/payments/mpesa/callback/
 
     Safaricom's webhook. Idempotent: replays are logged and ignored.
+
+    This single URL is also the configured ``MPESA_CALLBACK_URL`` for the
+    canonical payments system (``payments.services.initiate_stk_push``
+    publishes the same setting), so a live Daraja callback for a canonical
+    ``MpesaSTKRequest`` lands here too. Dispatch by ownership:
+      * if a ``MpesaPayment`` owns the ``CheckoutRequestID`` -> this app;
+      * otherwise hand the body to the canonical ``handle_stk_callback``,
+        which reconciles ``payments.MpesaSTKRequest`` / ``Payment`` and
+        creates the ManagedJob.
+    Without the fallback, canonical quote payments hang in ``processing``
+    forever in production (stub mode masks it because it fabricates ids).
     """
 
     permission_classes = [AllowAny]
@@ -102,8 +119,17 @@ class MpesaCallbackView(APIView):
     def post(self, request):
         serializer = MpesaCallbackSerializer(data=request.data)
         serializer.is_valid(raise_exception=False)  # Daraja's shape is its own
+        payload = serializer.validated_data.get("payload") or request.data
         try:
-            process_callback(serializer.validated_data.get("payload") or request.data)
+            checkout_id = _callback_checkout_request_id(payload)
+            if checkout_id and MpesaPayment.objects.filter(checkout_request_id=checkout_id).exists():
+                process_callback(payload)
+            else:
+                # Canonical quote payments (or an unknown request). Guarded:
+                # handle_stk_callback is itself atomic + idempotent.
+                from payments.services import handle_stk_callback
+
+                handle_stk_callback(callback_payload=payload)
         except Exception:  # noqa: BLE001
             logger.exception("M-Pesa callback processing failed")
             # Still 200 — we logged it, and a retry would replay the same body.
