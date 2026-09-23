@@ -282,7 +282,7 @@ class CalculatorSpecHarmonizationTestCase(TestCase):
         self.assertIsNotNone(payload["market_range"])
         self.assertIsNotNone(payload["market_range"]["min"])
 
-    def test_calculator_config_no_longer_advertises_paper_stock_required_fields(self):
+    def test_calculator_config_advertises_optional_paper_tier_fields(self):
         response = self.client.get("/api/calculator/config/")
         self.assertEqual(response.status_code, 200)
         products = response.json()["products"]
@@ -291,9 +291,12 @@ class CalculatorSpecHarmonizationTestCase(TestCase):
             self.assertNotIn("cover_stock", product["required_fields"], product["key"])
             self.assertNotIn("insert_stock", product["required_fields"], product["key"])
             field_keys = [f["key"] for f in product["fields"]]
-            self.assertNotIn("paper_stock", field_keys, product["key"])
+            # Paper quality is a client-facing optional tier step (Premium /
+            # Standard / Budget); technical cover/insert stock stays internal.
             self.assertNotIn("cover_stock", field_keys, product["key"])
             self.assertNotIn("insert_stock", field_keys, product["key"])
+            if product["key"] in ("business_card", "flyer", "label_sticker", "letterhead"):
+                self.assertIn("paper_stock", field_keys, product["key"])
 
     # ------------------------------------------------------ finished size independence
 

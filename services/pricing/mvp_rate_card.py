@@ -90,6 +90,13 @@ DEFAULT_SINGLE_PRINT_BASE = Decimal("15.00")
 DEFAULT_DOUBLE_PRINT_BASE = Decimal("30.00")
 DEFAULT_HEAVY_PAPER_SURCHARGE = Decimal("10.00")
 DEFAULT_SURCHARGE_THRESHOLD_GSM = 250
+# Default paper stock price per sheet when a paper has no explicit base price.
+# All default papers are SRA3 press sheets, so the fallback is the SRA3 sheet
+# price (mirrors the seeded "SRA3 300g Art Card Gloss" at 24.00 in
+# inventory/management/commands/seed_shop_pricing.py). A 0.00 paper price would
+# make the paper invisible to every pricing/matching path (they all filter on
+# selling_price__gt=0) and silently block the whole quote flow.
+DEFAULT_PAPER_STOCK_PRICE = Decimal("24.00")
 DEFAULT_LIGHT_STOCK_QUANTITY = 2000
 DEFAULT_HEAVY_STOCK_QUANTITY = 500
 
@@ -967,6 +974,7 @@ def _persist_paper_rows(shop, paper_rows: list[dict[str, Any]]) -> None:
         if sheet_size not in SheetSize.values:
             sheet_size = SheetSize.SRA3
         paper_type = _paper_type_from_row(row)
+        base_price = _to_decimal(row.get("paper_base_price") or "0.00")
         defaults = {
             "name": _normalize_text(row.get("label") or row.get("paper_name") or definition.get("label")),
             "category": _paper_category_from_row(row),
@@ -974,8 +982,8 @@ def _persist_paper_rows(shop, paper_rows: list[dict[str, Any]]) -> None:
             "is_cover_stock": int(row.get("gsm") or definition.get("gsm") or 0) >= 170,
             "is_insert_stock": not _is_sticker_row(row),
             "is_sticker_stock": _is_sticker_row(row),
-            "buying_price": _to_decimal(row.get("paper_base_price") or "0.00"),
-            "selling_price": _to_decimal(row.get("paper_base_price") or "0.00"),
+            "buying_price": base_price,
+            "selling_price": base_price if base_price > 0 else DEFAULT_PAPER_STOCK_PRICE,
             "quantity_in_stock": int(row.get("quantity_in_stock") or _default_quantity_in_stock(row)),
             "is_active": bool(row.get("active")),
         }
