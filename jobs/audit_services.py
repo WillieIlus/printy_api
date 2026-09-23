@@ -20,6 +20,8 @@ EVENT_PAYMENT_CONFIRMED = "payment_confirmed"
 EVENT_SETTLEMENT_RELEASE_READY = "settlement_release_ready"
 EVENT_PAYOUT_RELEASED = "payout_released_manual"
 EVENT_ISSUE_RAISED = "issue_raised"
+EVENT_JOB_DELIVERED = "job_delivered"
+EVENT_JOB_COMPLETED = "job_completed"
 
 
 def record_job_status_event(

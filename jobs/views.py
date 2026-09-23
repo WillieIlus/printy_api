@@ -42,6 +42,7 @@ from jobs.file_services import (
     upload_proof_for_managed_job,
 )
 from jobs.choices import JobFileStatus, JobFileType
+from jobs.delivery_services import confirm_managed_job_completed, mark_managed_job_delivered
 from jobs.models import JobAssignment, JobFile, ManagedJob
 from jobs.payment_services import (
     initialize_settlement_for_managed_job,
@@ -394,6 +395,60 @@ class ManagedJobReorderView(APIView):
             },
             status=status.HTTP_201_CREATED,
         )
+
+
+class ManagedJobDeliverView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk):
+        managed_job = get_object_or_404(
+            ManagedJob.objects.select_related("assigned_shop", "client", "broker", "created_by"),
+            pk=pk,
+        )
+        actor = resolve_actor(request.user)
+        if not _can_access_managed_job(user=request.user, managed_job=managed_job, actor=actor):
+            return Response({"detail": _("Not authorized.")}, status=status.HTTP_403_FORBIDDEN)
+        effective_actor = _effective_managed_job_actor(user=request.user, managed_job=managed_job, actor=actor)
+        if effective_actor not in {OPS_ACTOR, SHOP_ACTOR, PARTNER_ACTOR}:
+            return Response({"detail": _("Not authorized.")}, status=status.HTTP_403_FORBIDDEN)
+        serializer = JobActionSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        try:
+            managed_job = mark_managed_job_delivered(
+                managed_job=managed_job,
+                actor=request.user,
+                note=serializer.validated_data.get("note", ""),
+            )
+        except ValueError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(ManagedJobSerializer(managed_job, context={"request": request}).data)
+
+
+class ManagedJobConfirmCompletionView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk):
+        managed_job = get_object_or_404(
+            ManagedJob.objects.select_related("assigned_shop", "client", "broker", "created_by"),
+            pk=pk,
+        )
+        actor = resolve_actor(request.user)
+        if not _can_access_managed_job(user=request.user, managed_job=managed_job, actor=actor):
+            return Response({"detail": _("Not authorized.")}, status=status.HTTP_403_FORBIDDEN)
+        effective_actor = _effective_managed_job_actor(user=request.user, managed_job=managed_job, actor=actor)
+        if effective_actor not in {OPS_ACTOR, CLIENT_ACTOR}:
+            return Response({"detail": _("Not authorized.")}, status=status.HTTP_403_FORBIDDEN)
+        serializer = JobActionSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        try:
+            managed_job = confirm_managed_job_completed(
+                managed_job=managed_job,
+                actor=request.user,
+                note=serializer.validated_data.get("note", ""),
+            )
+        except ValueError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(ManagedJobSerializer(managed_job, context={"request": request}).data)
 
 
 class ManagedJobPaymentListView(APIView):

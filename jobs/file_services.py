@@ -22,6 +22,7 @@ from jobs.audit_services import (
 )
 from jobs.choices import JobFileStatus, JobFileType, JobFileVisibility
 from jobs.models import JobAssignment, JobFile, ManagedJob
+from jobs.notify_services import notify_managed_job_recipients
 from notifications.models import Notification
 from notifications.services import notify
 from quotes.models import QuoteRequest, QuoteRequestAttachment, Quote, QuoteAttachment
@@ -40,6 +41,10 @@ def _as_dict(value: Any) -> dict[str, Any]:
 
 def _as_list(value: Any) -> list[Any]:
     return value if isinstance(value, list) else []
+
+
+def _notify_job_file_event(*, managed_job: ManagedJob, actor, message: str) -> None:
+    notify_managed_job_recipients(managed_job=managed_job, actor=actor, message=message)
 
 
 def _filename_for_field(file_field: Any) -> str:
@@ -490,6 +495,11 @@ def upload_artwork_for_managed_job(
         managed_job.id,
         job_file.id,
     )
+    _notify_job_file_event(
+        managed_job=managed_job,
+        actor=uploaded_by,
+        message=f"Artwork uploaded for {managed_job.managed_reference or 'this order'}.",
+    )
     return job_file
 
 
@@ -503,7 +513,7 @@ def upload_proof_for_managed_job(
     original_filename: str = "",
     notes: str = "Proof uploaded for approval.",
 ) -> JobFile:
-    return create_job_file(
+    job_file = create_job_file(
         managed_job=managed_job,
         assignment=assignment,
         uploaded_by=uploaded_by,
@@ -514,6 +524,12 @@ def upload_proof_for_managed_job(
         status=JobFileStatus.MANAGER_REVIEW,
         notes=notes,
     )
+    _notify_job_file_event(
+        managed_job=managed_job,
+        actor=uploaded_by,
+        message=f"Proof uploaded for {managed_job.managed_reference or 'this order'} and needs manager review.",
+    )
+    return job_file
 
 
 @transaction.atomic
@@ -543,6 +559,11 @@ def manager_approve_job_proof(*, job_file: JobFile, actor=None, notes: str = "")
         summary=f"Proof released to client: {job_file.original_filename or 'proof file'}.",
         metadata={"status": job_file.status, "visibility": job_file.visibility},
     )
+    _notify_job_file_event(
+        managed_job=job_file.managed_job,
+        actor=actor,
+        message=f"Proof is ready for your approval on {job_file.managed_job.managed_reference or 'this order'}.",
+    )
     return job_file
 
 
@@ -568,6 +589,11 @@ def manager_reject_job_proof(*, job_file: JobFile, actor=None, notes: str = "") 
         summary=f"Proof rejected by manager: {job_file.original_filename or 'proof file'}.",
         metadata={"status": job_file.status, "visibility": job_file.visibility},
     )
+    _notify_job_file_event(
+        managed_job=job_file.managed_job,
+        actor=actor,
+        message=f"Proof was rejected by the manager on {job_file.managed_job.managed_reference or 'this order'} and needs rework.",
+    )
     return job_file
 
 
@@ -592,6 +618,11 @@ def approve_job_proof(*, job_file: JobFile, actor=None, notes: str = "") -> JobF
         summary=f"Proof approved: {job_file.original_filename or 'proof file'}.",
         metadata={"status": job_file.status},
     )
+    _notify_job_file_event(
+        managed_job=job_file.managed_job,
+        actor=actor,
+        message=f"Proof approved for {job_file.managed_job.managed_reference or 'this order'}.",
+    )
     return job_file
 
 
@@ -613,6 +644,11 @@ def reject_job_proof(*, job_file: JobFile, actor=None, notes: str = "") -> JobFi
         event_type=EVENT_PROOF_REJECTED,
         summary=f"Proof rejected: {job_file.original_filename or 'proof file'}.",
         metadata={"status": job_file.status},
+    )
+    _notify_job_file_event(
+        managed_job=job_file.managed_job,
+        actor=actor,
+        message=f"Proof rejected on {job_file.managed_job.managed_reference or 'this order'} - a revision was requested.",
     )
     return job_file
 
@@ -636,6 +672,11 @@ def request_revision(*, job_file: JobFile, actor=None, notes: str = "") -> JobFi
         summary=f"Revision requested for {job_file.original_filename or 'proof file'}.",
         metadata={"status": job_file.status},
     )
+    _notify_job_file_event(
+        managed_job=job_file.managed_job,
+        actor=actor,
+        message=f"Revision requested for {job_file.managed_job.managed_reference or 'this order'}.",
+    )
     return job_file
 
 
@@ -657,5 +698,10 @@ def mark_file_print_ready(*, job_file: JobFile, actor=None, notes: str = "") -> 
         event_type=EVENT_FILE_UPLOADED,
         summary=f"File marked print ready: {job_file.original_filename or 'job file'}.",
         metadata={"status": job_file.status, "file_type": job_file.file_type},
+    )
+    _notify_job_file_event(
+        managed_job=job_file.managed_job,
+        actor=actor,
+        message=f"Files for {job_file.managed_job.managed_reference or 'this order'} are approved and ready to print.",
     )
     return job_file

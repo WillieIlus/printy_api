@@ -323,7 +323,7 @@ class JobAssignmentSerializer(serializers.ModelSerializer):
         if status == "finishing":
             return ["upload_proof", "mark_ready"]
         if status == "ready":
-            return ["mark_completed"]
+            return ["mark_completed", "mark_delivered"]
         return []
 
     def get_payment_confirmed(self, obj):
