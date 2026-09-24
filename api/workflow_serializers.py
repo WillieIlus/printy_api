@@ -153,20 +153,6 @@ class CalculatorConfigOptionSerializer(serializers.Serializer):
     label = serializers.CharField(required=False, allow_blank=True)
 
 
-class CalculatorConfigPaperStockSerializer(serializers.Serializer):
-    key = serializers.CharField()
-    label = serializers.CharField()
-    display_name = serializers.CharField(required=False, allow_blank=True)
-    category = serializers.CharField(required=False, allow_blank=True)
-    category_label = serializers.CharField(required=False, allow_blank=True)
-    gsm = serializers.IntegerField(required=False, allow_null=True)
-    paper_type = serializers.CharField(required=False, allow_blank=True)
-    is_cover_stock = serializers.BooleanField(required=False)
-    is_insert_stock = serializers.BooleanField(required=False)
-    is_sticker_stock = serializers.BooleanField(required=False)
-    is_specialty = serializers.BooleanField(required=False)
-
-
 class CalculatorConfigFinishingSerializer(serializers.Serializer):
     key = serializers.CharField()
     label = serializers.CharField(required=False, allow_blank=True)
@@ -188,9 +174,6 @@ class CalculatorConfigProductSerializer(serializers.Serializer):
     allowed_print_sides = serializers.ListField(child=serializers.CharField(), required=False)
     sizes = serializers.JSONField(required=False)
     fields = serializers.JSONField(required=False)
-    paper_options = serializers.JSONField(required=False)
-    cover_paper_options = serializers.JSONField(required=False)
-    insert_paper_options = serializers.JSONField(required=False)
     size_options = serializers.JSONField(required=False)
     allow_custom_size = serializers.BooleanField(required=False)
     allow_custom_paper_request = serializers.BooleanField(required=False)
@@ -200,7 +183,6 @@ class CalculatorConfigProductSerializer(serializers.Serializer):
 class CalculatorConfigSerializer(serializers.Serializer):
     products = CalculatorConfigProductSerializer(many=True)
     paper_categories = CalculatorConfigOptionSerializer(many=True)
-    paper_stocks = CalculatorConfigPaperStockSerializer(many=True)
     finishings = CalculatorConfigFinishingSerializer(many=True)
     sizes = serializers.JSONField()
     print_sides = CalculatorConfigOptionSerializer(many=True)
@@ -222,7 +204,7 @@ class CalculatorConfigPreviewSerializer(serializers.Serializer):
     height_mm = serializers.IntegerField(required=False, allow_null=True, min_value=1)
     print_sides = PrintSidesField(required=False, allow_null=True, default="SIMPLEX", help_text="Flat-job print sides.")
     color_mode = ColorModeField(required=False, allow_null=True, default="COLOR", help_text="Flat-job colour mode.")
-    paper_stock = serializers.CharField(required=False, allow_blank=True, allow_null=True, help_text="Paper stock key from /api/calculator/config/.")
+    paper_stock = serializers.CharField(required=False, allow_blank=True, allow_null=True, help_text="Legacy paper stock key; prefer requested_paper_category + requested_gsm.")
     material_type = serializers.CharField(required=False, allow_blank=True, allow_null=True, help_text="Large-format material label from /api/calculator/config/.")
     product_subtype = serializers.CharField(required=False, allow_blank=True, allow_null=True, help_text="Large-format subtype such as banner or poster.")
     requested_paper_category = serializers.CharField(required=False, allow_blank=True, allow_null=True, help_text="Fallback paper category when the buyer wants the shop to advise.")

@@ -282,21 +282,54 @@ class CalculatorSpecHarmonizationTestCase(TestCase):
         self.assertIsNotNone(payload["market_range"])
         self.assertIsNotNone(payload["market_range"]["min"])
 
-    def test_calculator_config_advertises_optional_paper_tier_fields(self):
+    def test_public_preview_returns_imposition_preview(self):
+        """The preview must return the imposition preview back to the client:
+        pieces per sheet, sheets required, parent sheet and the cutting flag,
+        so the buyer sees the production economics behind the price."""
+        response = self.client.post(
+            "/api/calculator/public-preview/",
+            {
+                "product_type": "business_card",
+                "quantity": 100,
+                "finished_size": "90x55mm",
+                "requested_paper_category": "matt",
+                "requested_gsm": 300,
+                "print_sides": "DUPLEX",
+                "color_mode": "COLOR",
+            },
+            format="json",
+        )
+        assert response.status_code == 200, response.json()
+        payload = response.json()
+        production = payload.get("production_preview") or {}
+        self.assertGreaterEqual(production.get("pieces_per_sheet") or 0, 1, payload)
+        self.assertGreaterEqual(production.get("sheets_required") or 0, 1, payload)
+        self.assertTrue(production.get("parent_sheet"), payload)
+        self.assertIn(production.get("cutting_required"), (True, False, None), payload)
+        for match in payload.get("matches") or []:
+            row = match.get("production_preview") or {}
+            self.assertGreaterEqual(row.get("pieces_per_sheet") or 0, 1, match)
+            self.assertGreaterEqual(row.get("sheets_required") or 0, 1, match)
+
+    def test_calculator_config_advertises_optional_paper_request_fields(self):
         response = self.client.get("/api/calculator/config/")
         self.assertEqual(response.status_code, 200)
-        products = response.json()["products"]
+        config = response.json()
+        self.assertNotIn("paper_stocks", config)
+        products = config["products"]
         for product in products:
             self.assertNotIn("paper_stock", product["required_fields"], product["key"])
             self.assertNotIn("cover_stock", product["required_fields"], product["key"])
             self.assertNotIn("insert_stock", product["required_fields"], product["key"])
             field_keys = [f["key"] for f in product["fields"]]
-            # Paper quality is a client-facing optional tier step (Premium /
-            # Standard / Budget); technical cover/insert stock stays internal.
+            # Paper is requested by category + gsm; technical cover/insert stock
+            # stays internal and the old paper_stock field is gone.
+            self.assertNotIn("paper_stock", field_keys, product["key"])
             self.assertNotIn("cover_stock", field_keys, product["key"])
             self.assertNotIn("insert_stock", field_keys, product["key"])
             if product["key"] in ("business_card", "flyer", "label_sticker", "letterhead"):
-                self.assertIn("paper_stock", field_keys, product["key"])
+                self.assertIn("requested_paper_category", field_keys, product["key"])
+                self.assertIn("requested_gsm", field_keys, product["key"])
 
     # ------------------------------------------------------ finished size independence
 

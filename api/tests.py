@@ -5627,21 +5627,9 @@ class CalculatorConfigContractAPITestCase(TestCase):
         recompute_shop_match_readiness(self.shop)
 
     def _stock_key(self, label: str) -> str:
-        response = self.client.get("/api/calculator/config/")
-        self.assertEqual(response.status_code, 200)
-        rows = response.json()["paper_stocks"]
-        wanted = label.strip().lower()
-        match = next(
-            (
-                item for item in rows
-                if str(item.get("label", "")).strip().lower() == wanted
-                or str(item.get("display_name", "")).strip().lower() == wanted
-            ),
-            None,
-        )
-        if match:
-            return match["key"]
-
+        """Legacy paper-stock key derived from a human label (tier style, e.g.
+        'Matt 130gsm' -> '130gsm'). The config no longer serves a paper_stocks
+        list, but the preview backend still tolerates these legacy keys."""
         digits = "".join(ch for ch in label if ch.isdigit())
         self.assertTrue(digits, f"Could not derive a stock key for {label!r}")
         return f"{digits}gsm"

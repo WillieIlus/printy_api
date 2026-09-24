@@ -95,7 +95,7 @@ PRODUCT_DEFINITIONS = OrderedDict(
             {
                 "label": "Business Cards",
                 "required_fields": ["quantity", "finished_size", "print_sides", "color_mode"],
-                "optional_fields": ["paper_stock", "lamination", "corner_rounding"],
+                "optional_fields": ["requested_paper_category", "requested_gsm", "lamination", "corner_rounding"],
                 "defaults": {
                     "quantity": 100,
                     "finished_size": "90x55mm",
@@ -114,7 +114,7 @@ PRODUCT_DEFINITIONS = OrderedDict(
             {
                 "label": "Flyers",
                 "required_fields": ["quantity", "finished_size", "print_sides", "color_mode"],
-                "optional_fields": ["paper_stock", "folding", "lamination"],
+                "optional_fields": ["requested_paper_category", "requested_gsm", "folding", "lamination"],
                 "defaults": {
                     "quantity": 100,
                     "finished_size": "A5",
@@ -133,7 +133,7 @@ PRODUCT_DEFINITIONS = OrderedDict(
             {
                 "label": "Label Stickers / Tictac",
                 "required_fields": ["quantity", "finished_size", "shape", "cut_type", "color_mode"],
-                "optional_fields": ["paper_stock", "lamination"],
+                "optional_fields": ["requested_paper_category", "requested_gsm", "lamination"],
                 "defaults": {
                     "quantity": 100,
                     "finished_size": "100x50mm",
@@ -152,7 +152,7 @@ PRODUCT_DEFINITIONS = OrderedDict(
             {
                 "label": "Letterheads / Conqueror",
                 "required_fields": ["quantity", "finished_size", "print_sides", "color_mode"],
-                "optional_fields": ["paper_stock"],
+                "optional_fields": ["requested_paper_category", "requested_gsm"],
                 "defaults": {
                     "quantity": 100,
                     "finished_size": "A4",
@@ -264,51 +264,6 @@ def _size_options_for_product(product_key: str) -> list[dict[str, Any]]:
     return options
 
 
-BOOKLET_COVER_TIER_DEFINITIONS: list[dict[str, Any]] = [
-    {"id": "250gsm", "label": "Economy", "description": "Light cover stock", "gsm": 250, "recommended": False},
-    {"id": "300gsm", "label": "Standard", "description": "Most common cover", "gsm": 300, "recommended": True},
-    {"id": "350gsm", "label": "Premium", "description": "Thick, premium feel", "gsm": 350, "recommended": False},
-]
-
-BOOKLET_INSERT_TIER_DEFINITIONS: list[dict[str, Any]] = [
-    {"id": "80gsm", "label": "Bond", "description": "Standard office weight", "gsm": 80, "recommended": True},
-    {"id": "100gsm", "label": "Quality", "description": "Heavier inside pages", "gsm": 100, "recommended": False},
-    {"id": "130gsm", "label": "Premium", "description": "Magazine-quality inserts", "gsm": 130, "recommended": False},
-]
-
-
-PAPER_TIER_DEFINITIONS: dict[str, list[dict[str, Any]]] = {
-    "business_card": [
-        {"id": "250gsm", "label": "Budget", "description": "Lower cost, lighter feel", "gsm": 250, "recommended": False},
-        {"id": "300gsm", "label": "Standard", "description": "Most common choice", "gsm": 300, "recommended": True},
-        {"id": "350gsm", "label": "Premium", "description": "Thicker, high-end feel", "gsm": 350, "recommended": False},
-    ],
-    "flyer": [
-        {"id": "130gsm", "label": "Budget", "description": "Everyday handouts", "gsm": 130, "recommended": False},
-        {"id": "150gsm", "label": "Standard", "description": "Most common choice", "gsm": 150, "recommended": True},
-        {"id": "200gsm", "label": "Premium", "description": "Thick, high-end feel", "gsm": 200, "recommended": False},
-    ],
-    "label_sticker": [
-        {"id": "90gsm", "label": "Budget", "description": "Thin sticker sheet", "gsm": 90, "recommended": False},
-        {"id": "120gsm", "label": "Standard", "description": "Most common choice", "gsm": 120, "recommended": True},
-        {"id": "150gsm", "label": "Premium", "description": "Thicker, more durable", "gsm": 150, "recommended": False},
-    ],
-    "letterhead": [
-        {"id": "80gsm", "label": "Budget", "description": "Everyday office weight", "gsm": 80, "recommended": False},
-        {"id": "100gsm", "label": "Standard", "description": "Most common choice", "gsm": 100, "recommended": True},
-        {"id": "120gsm", "label": "Premium", "description": "Heavier, formal feel", "gsm": 120, "recommended": False},
-    ],
-}
-
-# Fallback when a product has no bespoke tier list — the client only ever sees
-# Premium / Standard / Budget, never raw paper names.
-GENERIC_PAPER_TIER_DEFINITIONS: list[dict[str, Any]] = [
-    {"id": "130gsm", "label": "Budget", "description": "Everyday, low cost", "gsm": 130, "recommended": False},
-    {"id": "200gsm", "label": "Standard", "description": "Most common choice", "gsm": 200, "recommended": True},
-    {"id": "300gsm", "label": "Premium", "description": "Thick, premium feel", "gsm": 300, "recommended": False},
-]
-
-
 def _paper_queryset():
     public_shop_ids = Shop.objects.filter(is_active=True, is_public=True).values_list("id", flat=True)
     return Paper.objects.filter(shop_id__in=public_shop_ids, is_active=True, selling_price__gt=0)
@@ -377,7 +332,6 @@ def _paper_categories() -> list[dict[str, Any]]:
 def _field_definitions(
     product_key: str,
     definition: dict[str, Any],
-    paper_stocks: list[dict[str, Any]],
     material_types: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     if product_key == "booklet":
@@ -404,7 +358,8 @@ def _field_definitions(
     fields = [
         {"key": "quantity", "label": "Quantity", "type": "number", "required": True},
         {"key": "finished_size", "label": "Finished size", "type": "select", "required": True, "options": SIZE_LIBRARY[product_key]},
-        {"key": "paper_stock", "label": "Paper quality", "type": "select", "required": False, "help_text": "Clients pick a quality tier — we match the nearest available stock. Technical grammage and paper category stay behind the tier."},
+        {"key": "requested_paper_category", "label": "Requested paper", "type": "select", "required": False, "options": [item for item in _paper_categories() if item["value"] in definition["allowed_paper_categories"]], "help_text": "Optional paper preference. Shops price with their nearest available stock."},
+        {"key": "requested_gsm", "label": "Requested GSM", "type": "number", "required": False, "help_text": "Optional exact grammage request. Backend will match the nearest available stock if needed."},
         {"key": "color_mode", "label": "Color mode", "type": "select", "required": True, "options": COLOR_MODES},
     ]
     if definition["allowed_print_sides"]:
@@ -435,12 +390,11 @@ def _field_definitions(
 
 
 def get_calculator_config() -> dict[str, Any]:
-    paper_stocks = _aggregate_paper_stocks()
     material_types = _aggregate_material_types()
     finishings = _aggregate_finishings()
     products = []
     for product_key, definition in PRODUCT_DEFINITIONS.items():
-        fields = _field_definitions(product_key, definition, paper_stocks, material_types)
+        fields = _field_definitions(product_key, definition, material_types)
         products.append(
             {
                 "key": product_key,
@@ -455,9 +409,6 @@ def get_calculator_config() -> dict[str, Any]:
                 "allowed_print_sides": definition["allowed_print_sides"],
                 "sizes": SIZE_LIBRARY[product_key],
                 "fields": fields,
-                "paper_options": PAPER_TIER_DEFINITIONS.get(product_key, GENERIC_PAPER_TIER_DEFINITIONS),
-                "cover_paper_options": BOOKLET_COVER_TIER_DEFINITIONS if product_key == "booklet" else [],
-                "insert_paper_options": BOOKLET_INSERT_TIER_DEFINITIONS if product_key == "booklet" else [],
                 "size_options": _size_options_for_product(product_key),
                 "allow_custom_size": True,
                 "allow_custom_paper_request": product_key != "large_format",
@@ -467,7 +418,6 @@ def get_calculator_config() -> dict[str, Any]:
     return {
         "products": products,
         "paper_categories": _paper_categories(),
-        "paper_stocks": paper_stocks,
         "finishings": finishings,
         "sizes": SIZE_LIBRARY,
         "print_sides": PRINT_SIDES,
