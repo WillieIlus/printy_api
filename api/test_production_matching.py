@@ -59,7 +59,8 @@ class ProductionMatchingPhaseD1TestCase(TestCase):
                     "product_type": "business_card",
                     "quantity": 100,
                     "finished_size": "85x55mm",
-                    "paper_stock": "300gsm",
+                    "requested_paper_category": "gloss",
+                    "requested_gsm": 300,
                     "print_sides": "SIMPLEX",
                     "color_mode": "COLOR",
                 },
@@ -184,7 +185,8 @@ class ProductionMatchingPhaseD1TestCase(TestCase):
                 "product_type": "business_card",
                 "quantity": 100,
                 "finished_size": "85x55mm",
-                "paper_stock": "300gsm",
+                "requested_paper_category": "gloss",
+                "requested_gsm": 300,
                 "print_sides": "SIMPLEX",
                 "color_mode": "COLOR",
             },
@@ -209,7 +211,8 @@ class ProductionMatchingPhaseD1TestCase(TestCase):
                 "product_type": "business_card",
                 "quantity": 100,
                 "finished_size": "85x55mm",
-                "paper_stock": "300gsm",
+                "requested_paper_category": "gloss",
+                "requested_gsm": 300,
                 "print_sides": "SIMPLEX",
                 "color_mode": "COLOR",
             },
@@ -353,7 +356,8 @@ class ProductionMatchingPhaseD1TestCase(TestCase):
                     "product_type": "business_card",
                     "quantity": 100,
                     "finished_size": "85x55mm",
-                    "paper_stock": "300gsm",
+                    "requested_paper_category": "gloss",
+                    "requested_gsm": 300,
                     "print_sides": "SIMPLEX",
                     "color_mode": "COLOR",
                     "lamination": "matt-lamination",
@@ -383,7 +387,8 @@ class ProductionMatchingPhaseD1TestCase(TestCase):
                 "product_type": "business_card",
                 "quantity": 100,
                 "finished_size": "85x55mm",
-                "paper_stock": "300gsm",
+                "requested_paper_category": "gloss",
+                "requested_gsm": 300,
                 "print_sides": "SIMPLEX",
                 "color_mode": "COLOR",
             },
@@ -435,9 +440,9 @@ class ProductionMatchingPhaseD1TestCase(TestCase):
             "imposition and cutting, which happen on the shop's default sheet.",
         )
         self.assertNotIn(
-            "paper_stock",
+            "requested_paper_category",
             payload["missing_fields"],
-            "paper_stock is assumed from the product default (business_card -> 300gsm artcard); "
+            "paper is assumed from the product default (business_card -> 300gsm artcard); "
             "only truly absent specs block the search.",
         )
         self.assertGreaterEqual(payload["results_count"], 1)
@@ -687,12 +692,12 @@ class ProductionMatchingPhaseD1TestCase(TestCase):
         self.assertNotIn("platform_fee", payload_text)
         self.assertNotIn("client_total", payload_text)
 
-    def _prepare_assigned_quote(self, *, user=None, shop=None, pricing_snapshot=None, partner_markup="300.00"):
+    def _prepare_assigned_quote(self, *, user=None, shop=None, pricing_snapshot=None, markup_pct="75.00"):
         self.client.force_authenticate(user=user or self.manager)
         payload = {
             "shop": (shop or self.cheapest_shop).id,
             "pricing_snapshot": pricing_snapshot if pricing_snapshot is not None else self._shop_options(self.manager).json()["pricing_snapshot"],
-            "partner_markup": partner_markup,
+            "markup_pct": markup_pct,
             "note": "Prepared from unified manager builder.",
         }
         return self.client.post(
@@ -732,13 +737,42 @@ class ProductionMatchingPhaseD1TestCase(TestCase):
         self.assertEqual(quote.shop_id, override["shop_id"])
         self.assertEqual(self.quote_request.request_snapshot["selected_shop_ids"], [self.expensive_shop.id])
 
+    def test_assigned_prepare_accepts_high_percent_markup_instead_of_rejecting(self):
+        """The manager UI enters markup as a PERCENT. 99% must not be read as a
+        99.00 KES amount (which would sit below the 5% floor relative to a
+        ~7750 production cost) and rejected with 'Markup cannot be below 5%'."""
+        options = self._shop_options(self.manager).json()
+        entry = next(row for row in options["results"] if row["is_recommended"])
+
+        response = self._prepare_assigned_quote(
+            shop=Shop.objects.get(pk=entry["shop_id"]),
+            pricing_snapshot=options["pricing_snapshot"],
+            markup_pct="99.00",
+        )
+
+        self.assertEqual(response.status_code, 201, response.content)
+        quote = Quote.objects.get(pk=response.json()["quote"]["id"])
+        split = quote.financial_split
+        production = split.production_cost
+        expected_markup = (production * Decimal("99") / Decimal("100")).quantize(Decimal("0.01"))
+        self.assertEqual(split.manager_markup, expected_markup, f"{split.production_cost} / {split.manager_markup}")
+
+    def test_assigned_prepare_still_rejects_below_five_percent_markup(self):
+        response = self._prepare_assigned_quote(markup_pct="3.00")
+
+        self.assertEqual(response.status_code, 400)
+        field_errors = response.json()["field_errors"]
+        self.assertIn("markup_pct", field_errors)
+        self.assertEqual(field_errors["markup_pct"][0], "Markup cannot be below 5%.")
+        self.assertEqual(self.quote_request.quotes.count(), 0)
+
     def test_assigned_prepare_requires_selected_shop(self):
         self.client.force_authenticate(user=self.manager)
         response = self.client.post(
             f"/api/dashboard/partner/quotes/{self.quote_request.id}/prepare/",
             {
                 "pricing_snapshot": self._shop_options(self.manager).json()["pricing_snapshot"],
-                "partner_markup": "300.00",
+                "markup_pct": "75.00",
             },
             format="json",
         )
@@ -758,7 +792,7 @@ class ProductionMatchingPhaseD1TestCase(TestCase):
         )
 
         self.assertEqual(response.status_code, 400)
-        self.assertIn("partner_markup", response.json()["field_errors"])
+        self.assertIn("markup_pct", response.json()["field_errors"])
 
     def test_assigned_prepare_rejects_no_eligible_shop_snapshot(self):
         response = self._prepare_assigned_quote(
@@ -808,9 +842,9 @@ class ProductionMatchingPhaseD1TestCase(TestCase):
         )
 
     def test_shop_options_imply_default_paper_when_request_has_no_paper_spec(self):
-        """Live QR-1/QR-2 have no paper fields. Instead of reporting
-        'Missing: paper_stock', matching implies the product's recommended
-        default (business_card -> 300gsm artcard) so the manager sees priced
+        """Live QR-1/QR-2 have no paper fields. Instead of reporting a missing
+        paper spec, matching implies the product's recommended paper
+        (business_card -> 300gsm artcard) so the manager sees priced
         printer shops — without mutating the stored request."""
         self.client.force_authenticate(user=self.manager)
         request = self._request_without_paper_spec()
@@ -829,7 +863,7 @@ class ProductionMatchingPhaseD1TestCase(TestCase):
         self.assertGreaterEqual(payload["matched_count"], 1, payload)
         self.assertTrue(any(row["price_status"] == "priced" for row in payload["results"]), payload)
 
-    def test_matcher_never_overrides_an_explicit_paper_stock(self):
+    def test_matcher_never_overrides_an_explicit_paper_request(self):
         from services.production_matching import build_partner_production_matches
 
         payload = build_partner_production_matches(
@@ -839,13 +873,15 @@ class ProductionMatchingPhaseD1TestCase(TestCase):
                 "print_sides": "DUPLEX",
                 "product_type": "business_card",
                 "finished_size": "90x55mm",
-                "paper_stock": "250gsm matt",
+                "requested_paper_category": "matt",
+                "requested_gsm": 250,
             }
         )
         snapshot = payload["spec_snapshot"]
         self.assertNotIn("paper_stock", payload["missing_fields"], payload)
-        self.assertEqual(snapshot["paper_stock"], "250gsm matt")
-        self.assertNotIn("requested_gsm", snapshot, "explicit stock must not be overwritten by defaults")
+        self.assertEqual(snapshot["requested_paper_category"], "matt")
+        self.assertEqual(snapshot["requested_gsm"], 250)
+        self.assertNotIn("paper_stock", snapshot, "matching never materializes a paper_stock key")
         self.assertGreaterEqual(payload["matched_count"], 1, payload)
 
     def test_refresh_shop_pricing_ready_is_data_driven_not_flag_driven(self):

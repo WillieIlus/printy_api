@@ -22,7 +22,7 @@ from api.visibility import (
     strip_forbidden_keys,
 )
 from quotes.choices import CalculatorDraftContext, CalculatorDraftIntent, CalculatorDraftStatus, QuoteStatus, QuoteOfferStatus
-from quotes.guardrails import validate_partner_markup_amount
+from quotes.guardrails import _money, validate_partner_markup_amount
 from quotes.models import CalculatorDraft, ProductionOption, QuoteItem, QuoteRequest, QuoteRequestMessage, Quote
 from quotes.request_brief import build_quote_request_whatsapp_handoff
 from quotes.status_normalization import (
@@ -585,6 +585,47 @@ class PartnerQuotePreviewSerializer(serializers.Serializer):
             validate_partner_markup_amount(base_price=base_price, markup_amount=attrs["partner_markup"])
         except ValueError as exc:
             raise serializers.ValidationError({"partner_markup": [str(exc)]})
+        return attrs
+
+
+class PartnerAssignedQuoteCreateSerializer(serializers.Serializer):
+    shop = serializers.PrimaryKeyRelatedField(queryset=Shop.objects.all())
+    pricing_snapshot = serializers.JSONField()
+    markup_pct = serializers.DecimalField(max_digits=7, decimal_places=2, min_value=Decimal("0.00"))
+
+    def validate(self, attrs):
+        pricing_snapshot = attrs.get("pricing_snapshot")
+        if not isinstance(pricing_snapshot, dict):
+            raise serializers.ValidationError({"pricing_snapshot": ["Production pricing snapshot is required."]})
+
+        selected_shops = pricing_snapshot.get("selected_shops")
+        if not isinstance(selected_shops, list) or not selected_shops:
+            raise serializers.ValidationError({"pricing_snapshot": ["Choose a priced production shop before sending this quote."]})
+
+        shop_entry = next(
+            (
+                entry for entry in selected_shops
+                if isinstance(entry, dict) and (entry.get("id") == attrs["shop"].id or entry.get("slug") == attrs["shop"].slug)
+            ),
+            None,
+        )
+        if not shop_entry:
+            raise serializers.ValidationError({"shop": ["Selected shop must be one of the priced production options."]})
+
+        preview = _as_dict(shop_entry.get("preview")) or shop_entry
+        totals = _as_dict(preview.get("totals"))
+        base_price = totals.get("shop_total") or totals.get("subtotal") or totals.get("grand_total")
+        if base_price in (None, ""):
+            raise serializers.ValidationError({"pricing_snapshot": ["Production price is not available yet for the selected shop."]})
+
+        production_amount = _money(base_price)
+        markup_pct = attrs["markup_pct"]
+        markup_amount = (production_amount * markup_pct / Decimal("100")).quantize(Decimal("0.01"))
+        try:
+            validate_partner_markup_amount(base_price=production_amount, markup_amount=markup_amount)
+        except ValueError as exc:
+            raise serializers.ValidationError({"markup_pct": [str(exc)]})
+        attrs["partner_markup"] = markup_amount
         return attrs
 
 

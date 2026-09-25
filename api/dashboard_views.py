@@ -57,7 +57,7 @@ from .workflow_serializers import (
     PartnerAssignedRequestShopOptionsSerializer,
     PartnerQuoteAttachClientSerializer,
     PartnerProductionMatchResponseSerializer,
-    PartnerQuotePreviewSerializer,
+    PartnerAssignedQuoteCreateSerializer,
     QuoteRequestReadSerializer,
     QuoteResponseReadSerializer,
 )
@@ -1366,7 +1366,7 @@ class PartnerAssignedRequestQuoteCreateView(ManagerCapablePartnerQuoteView):
         quote_request = get_object_or_404(self.get_queryset(request), pk=pk)
         if quote_request.assigned_manager_id != request.user.id:
             raise PermissionDenied("You cannot respond to this quote request.")
-        serializer = PartnerQuotePreviewSerializer(data=request.data)
+        serializer = PartnerAssignedQuoteCreateSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         try:
             payload = respond_to_assigned_quote_request(
