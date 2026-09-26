@@ -29,13 +29,13 @@ from accounts.models import UserProfile
 from api.services.admin_dashboard import build_admin_dashboard_payload
 from api.visibility import project_shop_identity
 from jobs.choices import JobAssignmentStatus, ManagedJobAssignmentStatus, ManagedJobPaymentStatus, ManagedJobStatus
-from jobs.artwork_confirmation import get_artwork_confirmation_payload, require_artwork_confirmation_dispatch_ready
-from jobs.managed_services import create_assignment_for_managed_job
+from jobs.artwork_confirmation import get_artwork_confirmation_payload
 from jobs.models import JobAssignment, ManagedJob
+from jobs.visibility import partner_managed_job_filter
 from inventory.models import Paper
 from notifications.models import Notification
 from notifications.services import notify_quote_event
-from jobs.file_services import managed_job_artwork_state, managed_job_has_artwork, notify_missing_artwork
+from jobs.file_services import managed_job_artwork_state, notify_missing_artwork
 from pricing.models import FinishingRate, PrintingRate
 from pricing.services.platform_fee_policy import calculate_financial_split, create_quote_financial_split
 from pricing.services.production_cost_calculator import calculate_client_price_with_waste_setup_and_quantity_tier
@@ -555,13 +555,9 @@ def _production_shop_filter(user):
 
 
 def _partner_managed_job_filter(user):
-    return (
-        Q(broker=user)
-        | Q(source_quote_request__created_by=user)
-        | Q(source_quote_request__assigned_manager=user)
-        | Q(source_quote__created_by=user)
-        | Q(created_by=user)
-    )
+    # Canonical rule lives in jobs.visibility so the partner job list and the
+    # partner dispatch endpoint can never disagree about who may act on a job.
+    return partner_managed_job_filter(user)
 
 
 def _job_source(job: ManagedJob) -> str:
@@ -742,21 +738,6 @@ class BaseRoleDetailView(BaseDashboardHomeView):
         if isinstance(nested, dict):
             return nested
         return snapshot
-
-    def _dispatch_missing_specs(self, job: ManagedJob) -> list[str]:
-        quote_request = getattr(job, "source_quote_request", None)
-        request_snapshot = self._request_snapshot(quote_request)
-        root_snapshot = self._request_snapshot_root(quote_request)
-        calculator_inputs = root_snapshot.get("calculator_inputs") if isinstance(root_snapshot.get("calculator_inputs"), dict) else {}
-        required_specs = {
-            "product_type": request_snapshot.get("product_type") or request_snapshot.get("product_label") or calculator_inputs.get("product_type"),
-            "quantity": request_snapshot.get("quantity") or calculator_inputs.get("quantity"),
-            "size": request_snapshot.get("finished_size") or request_snapshot.get("size_label") or calculator_inputs.get("finished_size"),
-            "paper": request_snapshot.get("paper_stock") or request_snapshot.get("paper_label") or calculator_inputs.get("paper_stock"),
-            "print_sides": request_snapshot.get("print_sides") or request_snapshot.get("print_sides_label") or calculator_inputs.get("print_sides"),
-            "color_mode": request_snapshot.get("color_mode") or request_snapshot.get("color_mode_label") or calculator_inputs.get("color_mode"),
-        }
-        return [key for key, value in required_specs.items() if value in (None, "", [])]
 
     def _assigned_request_match_payload(self, quote_request: QuoteRequest, overrides: dict[str, object] | None = None) -> dict[str, object]:
         snapshot = self._request_snapshot_root(quote_request)
@@ -1609,104 +1590,6 @@ class PartnerJobListDetailView(BaseRoleDetailView):
                 }
             )
         return Response({"role": "partner", "results": [self._job_row(job, role=CANONICAL_PARTNER_ROLE) for job in self.get_queryset(request)]})
-
-
-class PartnerJobDispatchView(BaseRoleDetailView):
-    dashboard_role = "partner"
-    allowed_roles = (CANONICAL_PARTNER_ROLE,)
-
-    def get_queryset(self, request):
-        return ManagedJob.objects.filter(_partner_managed_job_filter(request.user)).select_related(
-            "client",
-            "assigned_shop",
-            "source_quote",
-            "source_quote__shop",
-            "source_quote__shop__owner",
-        )
-
-    def post(self, request, pk):
-        job = get_object_or_404(self.get_queryset(request), pk=pk)
-        if job.payment_status not in {"confirmed", "release_ready"} and job.status != "payment_confirmed":
-            return Response(
-                {
-                    "error": "payment_required",
-                    "detail": "Client payment must be confirmed before dispatch.",
-                },
-                status=400,
-            )
-        if job.dispatched_at is not None:
-            return Response({"detail": "This job has already been dispatched."}, status=400)
-        source_quote = job.source_quote
-        if source_quote is None or getattr(source_quote, "shop_id", None) is None:
-            return Response(
-                {
-                    "error": "no_shop_selected",
-                    "detail": "Select a production shop before dispatch.",
-                },
-                status=400,
-            )
-        missing_specs = self._dispatch_missing_specs(job)
-        if missing_specs:
-            return Response(
-                {
-                    "error": "missing_specs",
-                    "detail": "Required production specs must be confirmed before dispatch.",
-                    "missing_fields": missing_specs,
-                },
-                status=400,
-            )
-        if not managed_job_has_artwork(managed_job=job):
-            job.artwork_required = True
-            job.save(update_fields=["artwork_required", "updated_at"])
-            notify_missing_artwork(managed_job=job, actor=request.user, source="dispatch_attempt")
-            return Response(
-                {
-                    "error": "artwork_required",
-                    "detail": "Artwork required before dispatch. Client has been notified.",
-                    "client_notified": True,
-                },
-                status=400,
-            )
-        try:
-            require_artwork_confirmation_dispatch_ready(job)
-        except ValidationError as exc:
-            return Response(
-                {
-                    "error": "artwork_confirmation_required",
-                    "detail": str(exc),
-                    "artwork_confirmation": get_artwork_confirmation_payload(job),
-                },
-                status=400,
-            )
-
-        job.assigned_shop = source_quote.shop
-        job.dispatched_at = timezone.now()
-        job.dispatched_by = request.user
-        if job.assignment_status == "unassigned":
-            job.assignment_status = "assignment_pending"
-        job.save(update_fields=["assigned_shop", "dispatched_at", "dispatched_by", "assignment_status", "updated_at"])
-        assignment = create_assignment_for_managed_job(managed_job=job, quote=source_quote)
-        production_recipient = getattr(source_quote.shop, "owner", None)
-        if production_recipient and getattr(production_recipient, "id", None) != request.user.id:
-            notify_quote_event(
-                recipient=production_recipient,
-                notification_type=Notification.JOB_STATUS_UPDATED,
-                message=f"{job.managed_reference or 'Managed job'} has been dispatched to your production queue.",
-                object_type="managed_job",
-                object_id=job.id,
-                actor=request.user,
-            )
-        return Response(
-            {
-                "job_id": job.id,
-                "assignment_id": assignment.id,
-                "dispatched": True,
-                "dispatched_at": job.dispatched_at,
-                "assignment_status": job.assignment_status,
-                "shop_name": getattr(source_quote.shop, "name", "") or "Production Shop",
-                "artwork_verified": True,
-            }
-        )
 
 
 class OfflineQuoteClaimView(BaseRoleDetailView):

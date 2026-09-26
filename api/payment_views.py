@@ -13,6 +13,7 @@ from rest_framework.views import APIView
 from accounts.services.roles import ActorRole, get_actor_role
 from jobs.models import ManagedJob, ManagedJobPayout
 from jobs.services.dispatch import dispatch_job_to_shop
+from jobs.visibility import partner_can_access_managed_job
 from jobs.payout_services import release_managed_job_payouts
 from accounts.serializers import get_or_create_profile
 from payments.models import MpesaSTKRequest, Payment, PaymentPhoneConsent
@@ -632,8 +633,16 @@ class JobDispatchView(APIView):
     def post(self, request, pk):
         managed_job = get_object_or_404(ManagedJob.objects.select_related("source_quote", "assigned_shop"), pk=pk)
         role = get_actor_role(request.user)
-        if role not in {ActorRole.BROKER, ActorRole.MANAGER, ActorRole.ADMIN} and not _is_managed_job_broker(request.user, managed_job):
-            raise PermissionDenied("Only manager, broker, or admin users may dispatch jobs.")
+        # Manager/admin may dispatch any job. Everyone else must be a
+        # broker-shaped actor (a partner, or a shop owner who is also the broker
+        # of record) AND be within scope for THIS job. Checking the role alone
+        # let any partner dispatch any other partner's job; checking scope alone
+        # would let the client who created the quote dispatch their own job.
+        if role not in ActorRole.STAFF_LIKE and not (
+            role in {ActorRole.BROKER, ActorRole.SHOP}
+            and partner_can_access_managed_job(user=request.user, managed_job=managed_job)
+        ):
+            raise PermissionDenied("Only the job's broker, a manager, or an admin may dispatch this job.")
         shop = None
         if request.data.get("shop_id"):
             shop = get_object_or_404(Shop, pk=request.data.get("shop_id"))
@@ -646,12 +655,24 @@ class JobDispatchView(APIView):
             )
         except ValidationError as exc:
             return Response({"detail": "; ".join(exc.messages)}, status=400)
+        # dispatch_job_to_shop re-reads the job under a row lock, so the
+        # instance held by this view is stale. Report the persisted state:
+        # the manager workbench keys off `dispatched` to decide whether to
+        # mirror dispatched_at/assignment_status/shop_name into its job row.
+        managed_job.refresh_from_db()
+        target_shop = managed_job.assigned_shop or assignment.assigned_shop
         return Response(
             {
+                "job_id": managed_job.id,
                 "assignment_id": assignment.id,
                 "managed_job_id": assignment.managed_job_id,
                 "shop_id": assignment.assigned_shop_id,
                 "shop_payout": str(assignment.shop_payout) if assignment.shop_payout is not None else None,
+                "dispatched": True,
+                "dispatched_at": managed_job.dispatched_at,
+                "assignment_status": managed_job.assignment_status,
+                "shop_name": getattr(target_shop, "name", "") or "Production Shop",
+                "artwork_verified": True,
             },
             status=201,
         )
