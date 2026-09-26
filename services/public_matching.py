@@ -126,7 +126,7 @@ def _finishing_selections(shop: Shop, payload: dict[str, Any]) -> tuple[list[dic
     return selections, missing
 
 
-def _public_match(index: int, shop: Shop, preview: dict[str, Any]) -> dict[str, Any]:
+def _public_match(index: int, shop: Shop, preview: dict[str, Any], product_type: str = "") -> dict[str, Any]:
     totals = preview.get("totals") or {}
     total = _positive_money(totals.get("grand_total"))
     return {
@@ -146,12 +146,58 @@ def _public_match(index: int, shop: Shop, preview: dict[str, Any]) -> dict[str, 
         "missing_specs": [] if total else ["pricing_rate"],
         "exact_or_estimated": bool(total),
         "preview": preview,
-        "production_preview": {
-            "pieces_per_sheet": preview.get("copies_per_sheet"),
-            "sheets_required": preview.get("good_sheets"),
-            "parent_sheet": preview.get("parent_sheet_name"),
-        },
+        "production_preview": _production_intelligence(product_type, preview),
         "price_range": str(total) if total else None,
+    }
+
+
+def _production_intelligence(product_type: str, preview: dict[str, Any]) -> dict[str, Any]:
+    """Full sheet-layout disclosure the buyer's price is built from.
+
+    The engine records every number (copies per sheet, cols x rows, bleed, press
+    sheet size, good sheets and the waste-policy spoilage split) inside
+    ``breakdown.imposition``/``breakdown.paper``. This projects the whole spec so
+    the calculator can say exactly how the sheet is laid out — nothing hidden.
+    """
+    breakdown = preview.get("breakdown") or {}
+    imposition = breakdown.get("imposition") or {}
+    paper = breakdown.get("paper") or {}
+    layout = imposition.get("layout") or {}
+    finishings = breakdown.get("finishings") or []
+    warnings = [
+        text
+        for text in (preview.get("explanations") or [])
+        if not (isinstance(text, str) and text.strip().startswith("VAT:"))
+    ]
+    good_sheets = imposition.get("good_sheets") or preview.get("good_sheets")
+    return {
+        "pieces_per_sheet": imposition.get("copies_per_sheet") or preview.get("copies_per_sheet"),
+        "sheets_required": good_sheets,
+        "parent_sheet": paper.get("sheet_size") or preview.get("parent_sheet_name"),
+        "good_sheets": good_sheets,
+        "waste_sheets_added": imposition.get("waste_sheets_added"),
+        "fixed_waste_sheets": imposition.get("fixed_waste_sheets"),
+        "variable_waste_sheets": imposition.get("variable_waste_sheets"),
+        "variable_waste_rate": imposition.get("variable_waste_rate"),
+        "billable_sheets": imposition.get("billable_sheets") or preview.get("billable_sheets"),
+        "layout": {
+            "cols": layout.get("cols") or imposition.get("cols"),
+            "rows": layout.get("rows") or imposition.get("rows"),
+            "orientation": imposition.get("orientation") or ("rotated" if preview.get("rotated") else "normal"),
+        },
+        "bleed_mm": imposition.get("bleed_mm"),
+        "press_sheet": {
+            "label": paper.get("label") or paper.get("sheet_size"),
+            "width_mm": paper.get("width_mm") or imposition.get("sheet_width_mm"),
+            "height_mm": paper.get("height_mm") or imposition.get("sheet_height_mm"),
+        },
+        "imposition_label": imposition.get("explanation") or preview.get("reason"),
+        "size_label": paper.get("label") or paper.get("sheet_size"),
+        "quantity": preview.get("quantity"),
+        "cutting_required": True if str(product_type or "").lower() in {"business_card", "flyer", "label_sticker"} else None,
+        "selected_finishings": [f.get("name") for f in finishings if f.get("name")],
+        "suggested_finishings": [],
+        "warnings": warnings,
     }
 
 
@@ -183,7 +229,7 @@ def build_public_match_payload(payload):
             total = _positive_money((preview.get("totals") or {}).get("grand_total"))
             if not total:
                 continue
-            matches.append(_public_match(len(matches) + 1, shop, preview))
+            matches.append(_public_match(len(matches) + 1, shop, preview, payload.get("product_type")))
             break
         if len(matches) >= MAX_PUBLIC_MATCHES:
             break

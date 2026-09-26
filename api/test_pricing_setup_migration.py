@@ -437,8 +437,8 @@ class PricingSetupMigrationTests(TestCase):
             {
                 "product_type": "business_card",
                 "quantity": 100,
-                "finished_size": "90x55mm",
-                "paper_stock": "300gsm",
+"finished_size": "90x55mm",
+                "requested_gsm": 300,
                 "print_sides": "DUPLEX",
                 "color_mode": "COLOR",
             },

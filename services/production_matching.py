@@ -115,6 +115,9 @@ def _requested_paper_category(payload: dict[str, Any]) -> str:
     explicit = _normal(payload.get("requested_paper_category"))
     if explicit:
         return explicit
+    paper_type = _normal(payload.get("paper_type"))
+    if paper_type:
+        return paper_type
     stock = _normal(payload.get("paper_stock")).lower()
     if "artcard" in stock or "art card" in stock:
         return "artcard"
@@ -567,16 +570,19 @@ def price_single_shop_for_submission(*, shop: Shop, payload: dict[str, Any]) -> 
 
 def _normalized_single_shop_payload(payload: dict[str, Any]) -> dict[str, Any]:
     payload = _imply_paper_defaults(_as_dict(payload))
+    paper_category = _requested_paper_category(payload)
+    paper_gsm = _requested_gsm(payload)
     normalized_payload = {
         **payload,
         "product_type": _normal(payload.get("product_type") or payload.get("job_type")),
         "paper_stock": payload.get("paper_stock")
-        or payload.get("paper_preference")
         or " ".join(
             str(part)
-            for part in (payload.get("paper_gsm"), payload.get("paper_type"))
+            for part in (paper_gsm, paper_category)
             if part not in (None, "")
         ),
+        "requested_paper_category": paper_category,
+        "requested_gsm": paper_gsm,
         "color_mode": payload.get("color_mode") or payload.get("colour_mode") or "COLOR",
         "print_sides": payload.get("print_sides") or payload.get("sides") or "SIMPLEX",
     }

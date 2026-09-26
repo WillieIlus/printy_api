@@ -13,6 +13,8 @@ class ImpositionBreakdown:
     good_sheets: int
     orientation: str
     explanation: str
+    cols: int
+    rows: int
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -60,6 +62,14 @@ def build_imposition_breakdown(
         bleed_mm,
     )
     good_sheets = compute_good_sheets(quantity, copies_per_sheet)
+    piece_width = finished_width_mm + (bleed_mm * 2)
+    piece_height = finished_height_mm + (bleed_mm * 2)
+    if orientation == "rotated":
+        cols = sheet_width_mm // piece_height
+        rows = sheet_height_mm // piece_width
+    else:
+        cols = sheet_width_mm // piece_width
+        rows = sheet_height_mm // piece_height
     explanation = (
         f"{copies_per_sheet} copy/copies per sheet using {orientation} layout; "
         f"{good_sheets} good sheet(s) needed for quantity {quantity}."
@@ -74,4 +84,6 @@ def build_imposition_breakdown(
         good_sheets=good_sheets,
         orientation=orientation,
         explanation=explanation,
+        cols=max(1, cols),
+        rows=max(1, rows),
     )

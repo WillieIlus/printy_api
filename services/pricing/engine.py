@@ -7,6 +7,7 @@ from catalog.choices import PricingMode
 from inventory.models import Machine, Paper
 from pricing.choices import ColorMode, Sides
 from pricing.models import PrintingRate
+from pricing.services.production_cost_calculator import calculate_billable_sheets
 from services.pricing.finishings import compute_finishing_total
 from services.pricing.imposition import build_imposition_breakdown
 from services.pricing.result_contract import build_contract_from_engine_payload
@@ -78,6 +79,11 @@ class PricingEngineResult:
     copies_per_sheet: int | None = None
     good_sheets: int | None = None
     parent_sheets_required: int | None = None
+    billable_sheets: int | None = None
+    fixed_waste_sheets: int | None = None
+    variable_waste_sheets: int | None = None
+    waste_sheets_added: int | None = None
+    variable_waste_rate: str | None = None
     parent_sheet_name: str | None = None
     rotated: bool | None = None
     roll_width_mm: int | None = None
@@ -99,6 +105,24 @@ def _decimal(value, default: str = "0") -> Decimal:
     if value is None:
         return Decimal(default)
     return Decimal(str(value))
+
+
+def _waste_policy_split(quantity: int, copies_per_sheet: int) -> dict:
+    """Spoilage split (fixed setup sheets + variable % of good sheets) plus the
+    billable sheet count. Falls back to zero spoilage if no policy can resolve,
+    so pricing never hard-fails on a missing WastePolicy row."""
+    try:
+        return calculate_billable_sheets(
+            quantity=max(1, int(quantity or 1)),
+            yield_per_sheet=max(1, int(copies_per_sheet or 1)),
+        )
+    except Exception:
+        return {
+            "fixed_waste_sheets": 0,
+            "variable_waste_sheets": 0,
+            "waste_sheets_added": 0,
+            "billable_sheets": 0,
+        }
 
 
 def _format_money(value: Decimal) -> str:
@@ -267,6 +291,30 @@ def calculate_sheet_pricing(
         sheet_height_mm=sheet_height or 0,
         bleed_mm=getattr(product, "default_bleed_mm", 3) or 3,
     )
+    waste = _waste_policy_split(quantity, imposition.copies_per_sheet)
+    billable_sheets = int(waste.get("billable_sheets") or 0) or imposition.good_sheets
+    fixed_waste = int(waste.get("fixed_waste_sheets") or 0)
+    variable_waste = int(waste.get("variable_waste_sheets") or 0)
+    waste_added = int(waste.get("waste_sheets_added") or 0)
+    waste_policy = waste.get("waste_policy")
+    waste_rate = str(waste_policy.variable_waste_rate) if waste_policy is not None else None
+    imposition_payload = {
+        **imposition.to_dict(),
+        "layout": {"cols": imposition.cols, "rows": imposition.rows},
+        "good_sheets": imposition.good_sheets,
+        "fixed_waste_sheets": fixed_waste,
+        "variable_waste_sheets": variable_waste,
+        "waste_sheets_added": waste_added,
+        "billable_sheets": billable_sheets,
+        "variable_waste_rate": waste_rate,
+    }
+    paper_breakdown = {
+        "id": paper.id,
+        "label": f"{paper.sheet_size} {paper.gsm}gsm {paper.get_paper_type_display()}",
+        "sheet_size": paper.sheet_size,
+        "width_mm": sheet_width,
+        "height_mm": sheet_height,
+    }
     resolved_rate, print_rate = PrintingRate.resolve(
         machine,
         paper.sheet_size,
@@ -286,11 +334,8 @@ def calculate_sheet_pricing(
             currency=getattr(shop, "currency", "KES") or "KES",
             totals={},
             breakdown={
-                "paper": {
-                    "id": paper.id,
-                    "label": f"{paper.sheet_size} {paper.gsm}gsm {paper.get_paper_type_display()}",
-                    "sheet_size": paper.sheet_size,
-                },
+                "paper": paper_breakdown,
+                "imposition": imposition_payload,
                 "printing": {
                     "machine_id": machine.id if machine else None,
                     "machine_name": getattr(machine, "name", ""),
@@ -304,6 +349,11 @@ def calculate_sheet_pricing(
             copies_per_sheet=imposition.copies_per_sheet,
             good_sheets=imposition.good_sheets,
             parent_sheets_required=imposition.good_sheets,
+            billable_sheets=billable_sheets,
+            fixed_waste_sheets=fixed_waste,
+            variable_waste_sheets=variable_waste,
+            waste_sheets_added=waste_added,
+            variable_waste_rate=waste_rate,
             parent_sheet_name=paper.sheet_size,
             rotated=imposition.orientation == "rotated",
             explanation_lines=[reason],
@@ -327,8 +377,8 @@ def calculate_sheet_pricing(
             "total_per_sheet": print_rate_value,
         }
     )
-    paper_cost = paper_rate * Decimal(imposition.good_sheets)
-    print_cost = print_rate_value * Decimal(imposition.good_sheets)
+    paper_cost = paper_rate * Decimal(billable_sheets)
+    print_cost = print_rate_value * Decimal(billable_sheets)
     finishing_total, finishing_lines = compute_finishing_total(
         finishing_selections,
         quantity=quantity,
@@ -355,7 +405,7 @@ def calculate_sheet_pricing(
     per_sheet_explanation += f" = {_format_money(total_per_sheet)} per sheet"
 
     printing_explanation_parts = [
-        f"{imposition.good_sheets} sheets",
+        f"{billable_sheets} sheets (incl. {waste_added} spoilage)",
         f"{getattr(shop, 'currency', 'KES') or 'KES'} {_format_money(printing_breakdown['front_side_price'])}",
     ]
     if sides == Sides.DUPLEX:
@@ -364,13 +414,13 @@ def calculate_sheet_pricing(
             printing_explanation_parts.append(f"{getattr(shop, 'currency', 'KES') or 'KES'} {_format_money(printing_breakdown['duplex_surcharge'])} surcharge")
         elif printing_breakdown["duplex_override_used"]:
             printing_explanation_parts = [
-                f"{imposition.good_sheets} sheets",
+                f"{billable_sheets} sheets (incl. {waste_added} spoilage)",
                 f"{getattr(shop, 'currency', 'KES') or 'KES'} {_format_money(printing_breakdown['duplex_override_price'])} duplex override",
             ]
 
     explanations = [
         imposition.explanation,
-        f"Paper: {imposition.good_sheets} sheets x {getattr(shop, 'currency', 'KES') or 'KES'} {_format_money(paper_rate)}.",
+        f"Paper: {billable_sheets} sheets (incl. {waste_added} spoilage) x {getattr(shop, 'currency', 'KES') or 'KES'} {_format_money(paper_rate)}.",
         f"Printing: {' + '.join(printing_explanation_parts)}.",
     ]
     explanations.extend(_humanize_finishing_explanation(line, getattr(shop, "currency", "KES") or "KES") for line in finishing_lines)
@@ -407,11 +457,9 @@ def calculate_sheet_pricing(
                 "formula": per_sheet_formula,
                 "explanation": per_sheet_explanation,
             },
-            "imposition": imposition.to_dict(),
+            "imposition": imposition_payload,
             "paper": {
-                "id": paper.id,
-                "label": f"{paper.sheet_size} {paper.gsm}gsm {paper.get_paper_type_display()}",
-                "sheet_size": paper.sheet_size,
+                **paper_breakdown,
                 "cost_per_sheet": _format_money(paper_rate),
                 "paper_price_per_sheet": _format_money(paper_rate),
                 "paper_price": _format_money(paper_rate),
@@ -456,6 +504,11 @@ def calculate_sheet_pricing(
         copies_per_sheet=imposition.copies_per_sheet,
         good_sheets=imposition.good_sheets,
         parent_sheets_required=imposition.good_sheets,
+        billable_sheets=billable_sheets,
+        fixed_waste_sheets=fixed_waste,
+        variable_waste_sheets=variable_waste,
+        waste_sheets_added=waste_added,
+        variable_waste_rate=waste_rate,
         parent_sheet_name=paper.sheet_size,
         rotated=imposition.orientation == "rotated",
         explanation_lines=explanations + [

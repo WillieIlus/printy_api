@@ -282,10 +282,41 @@ class CalculatorSpecHarmonizationTestCase(TestCase):
         self.assertIsNotNone(payload["market_range"])
         self.assertIsNotNone(payload["market_range"]["min"])
 
+    def test_legacy_paper_stock_draft_is_mapped_to_category_and_gsm(self):
+        """Pre-refactor drafts carried a `paper_stock` key. The public calculator
+        must map it onto the modern paper request vocabulary (category + gsm) at
+        pricing time instead of requiring a paper_stock field, so old drafts keep
+        pricing on the shop's closest available SRA3 stock."""
+        response = self.client.post(
+            "/api/calculator/public-preview/",
+            {
+                "product_type": "business_card",
+                "quantity": 100,
+                "finished_size": "90x55mm",
+                "paper_stock": "300gsm",
+                "print_sides": "SIMPLEX",
+                "color_mode": "COLOR",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200, response.content)
+        payload = response.json()
+        self.assertTrue(payload["can_calculate"], payload)
+        self.assertNotIn("paper_stock", payload["missing_fields"], payload)
+        self.assertGreaterEqual(payload["matches_count"], 1, payload)
+        for match in payload["matches"]:
+            production = match.get("production_preview") or {}
+            self.assertEqual(production.get("parent_sheet"), "SRA3", match)
+            self.assertGreaterEqual(production.get("sheets_required") or 0, 1, match)
+
     def test_public_preview_returns_imposition_preview(self):
-        """The preview must return the imposition preview back to the client:
-        pieces per sheet, sheets required, parent sheet and the cutting flag,
-        so the buyer sees the production economics behind the price."""
+        """The preview must return the full imposition back to the client — the
+        sheet layout the price is built from: pieces per sheet, layout
+        (cols x rows, orientation), bleed, press sheet, good sheets and the
+        spoilage split (fixed + variable) that produce the billable sheet count.
+        This locks in the 'How your sheet is laid out' disclosure so it can
+        never silently drop out of the public response again."""
         response = self.client.post(
             "/api/calculator/public-preview/",
             {
@@ -304,12 +335,86 @@ class CalculatorSpecHarmonizationTestCase(TestCase):
         production = payload.get("production_preview") or {}
         self.assertGreaterEqual(production.get("pieces_per_sheet") or 0, 1, payload)
         self.assertGreaterEqual(production.get("sheets_required") or 0, 1, payload)
+        self.assertGreaterEqual(production.get("good_sheets") or 0, 1, payload)
         self.assertTrue(production.get("parent_sheet"), payload)
         self.assertIn(production.get("cutting_required"), (True, False, None), payload)
+        self.assertEqual(production.get("good_sheets"), production.get("sheets_required"), payload)
+        self.assertEqual(
+            production.get("billable_sheets"),
+            (production.get("good_sheets") or 0) + (production.get("waste_sheets_added") or 0),
+            payload,
+        )
+        self.assertGreaterEqual(production.get("billable_sheets") or 0, production.get("good_sheets") or 0, payload)
+        self.assertGreaterEqual(production.get("bleed_mm") or 0, 0, payload)
+        layout = production.get("layout") or {}
+        self.assertEqual(
+            (layout.get("cols") or 0) * (layout.get("rows") or 0),
+            production.get("pieces_per_sheet"),
+            payload,
+        )
+        self.assertIn(layout.get("orientation"), ("normal", "rotated"), payload)
+        press_sheet = production.get("press_sheet") or {}
+        self.assertGreaterEqual(press_sheet.get("width_mm") or 0, 1, payload)
+        self.assertGreaterEqual(press_sheet.get("height_mm") or 0, 1, payload)
         for match in payload.get("matches") or []:
             row = match.get("production_preview") or {}
             self.assertGreaterEqual(row.get("pieces_per_sheet") or 0, 1, match)
-            self.assertGreaterEqual(row.get("sheets_required") or 0, 1, match)
+            self.assertGreaterEqual(row.get("good_sheets") or 0, 1, match)
+            self.assertGreaterEqual(row.get("billable_sheets") or 0, row.get("good_sheets") or 0, match)
+        first_match = (payload.get("matches") or [{}])[0].get("production_preview") or {}
+        for key in ("good_sheets", "waste_sheets_added", "billable_sheets", "pieces_per_sheet", "sheets_required"):
+            self.assertEqual(production.get(key), first_match.get(key), f"top-level {key} must match the first match")
+
+    def test_public_preview_imposition_discloses_waste_policy_math(self):
+        """The spoilage split the price is built from must be disclosed exactly:
+        good sheets + (fixed setup sheets + variable % of good) = billable
+        sheets. Locked against the seeded default waste policy (2 fixed + 10%)."""
+        from math import ceil
+
+        from decimal import Decimal as D
+
+        response = self.client.post(
+            "/api/calculator/public-preview/",
+            {
+                "product_type": "business_card",
+                "quantity": 100,
+                "finished_size": "90x55mm",
+                "requested_paper_category": "gloss",
+                "requested_gsm": 300,
+                "print_sides": "SIMPLEX",
+                "color_mode": "COLOR",
+            },
+            format="json",
+        )
+        assert response.status_code == 200, response.json()
+        production = response.json()["production_preview"]
+
+        good = production["good_sheets"]
+        copies = production["pieces_per_sheet"]
+        self.assertEqual(good, ceil(100 / copies))
+        self.assertEqual(production["sheets_required"], good)
+        self.assertEqual(production["waste_sheets_added"], production["fixed_waste_sheets"] + production["variable_waste_sheets"])
+        variable_rate = D(str(production["variable_waste_rate"]))
+        self.assertEqual(production["variable_waste_sheets"], ceil(good * variable_rate))
+        self.assertEqual(production["billable_sheets"], good + production["waste_sheets_added"])
+        self.assertGreaterEqual(production["waste_sheets_added"], production["fixed_waste_sheets"])
+
+        same_as_first_match = self.client.post(
+            "/api/calculator/public-preview/",
+            {
+                "product_type": "business_card",
+                "quantity": 100,
+                "finished_size": "90x55mm",
+                "requested_paper_category": "gloss",
+                "requested_gsm": 300,
+                "print_sides": "SIMPLEX",
+                "color_mode": "COLOR",
+            },
+            format="json",
+        ).json()
+        first = (same_as_first_match["matches"] or [{}])[0].get("production_preview") or {}
+        for key in ("good_sheets", "fixed_waste_sheets", "variable_waste_sheets", "waste_sheets_added", "billable_sheets", "pieces_per_sheet"):
+            self.assertEqual(production[key], first[key], key)
 
     def test_calculator_config_advertises_optional_paper_request_fields(self):
         response = self.client.get("/api/calculator/config/")

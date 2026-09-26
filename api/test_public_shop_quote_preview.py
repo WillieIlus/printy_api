@@ -297,7 +297,6 @@ class PublicCalculatorMarketRangeTestCase(TestCase):
                 "product_type": "business_card",
                 "quantity": 100,
                 "finished_size": "90x55mm",
-                "paper_stock": "300gsm",
                 "requested_paper_category": "gloss",
                 "requested_gsm": 300,
                 "print_sides": "SIMPLEX",
@@ -311,10 +310,13 @@ class PublicCalculatorMarketRangeTestCase(TestCase):
         self.assertEqual(payload["matches_count"], 3)
         self.assertEqual(payload["display_mode"], "range_with_median")
         self.assertEqual(payload["market_range"]["display_mode"], "range_with_median")
-        self.assertEqual(payload["market_range"]["min"], "2400.04")
-        self.assertEqual(payload["market_range"]["max"], "3199.96")
-        self.assertEqual(payload["market_range"]["median"], "2699.99")
-        self.assertEqual(payload["estimate_median"], "2699.99")
+        # 5 good sheets (100 @ 21-up) + 2 fixed + 1 variable (10%) = 8 billable
+        # sheets per shop, marked up 1.75: 274.29→3840.06, 308.57→4319.98,
+        # 365.71→5119.94. The market range is built from waste-inclusive prices.
+        self.assertEqual(payload["market_range"]["min"], "3840.06")
+        self.assertEqual(payload["market_range"]["max"], "5119.94")
+        self.assertEqual(payload["market_range"]["median"], "4319.98")
+        self.assertEqual(payload["estimate_median"], "4319.98")
         self.assertNotEqual(payload["market_range"]["min"], payload["market_range"]["max"])
 
         payload_text = str(payload)

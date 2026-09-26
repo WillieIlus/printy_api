@@ -41,6 +41,35 @@ def _parse_tier_gsm(raw: str | None) -> int | None:
         return None
 
 
+def _legacy_stock_gsm(raw: str) -> int | None:
+    return _parse_tier_gsm(str(raw or "").strip())
+
+
+def _map_legacy_paper_request(paper_stock: str) -> tuple[str, int | None]:
+    """Maps a legacy ``paper_stock`` value carried by old drafts onto the modern
+    paper request vocabulary. Returns ``(category, gsm)`` where gsm is ``None``
+    when the stock carries no grammage. The calculator itself never sends
+    ``paper_stock``; this exists so pre-refactor drafts keep pricing while the
+    payload is normalized to category + gsm."""
+    raw = str(paper_stock or "").strip()
+    stock = raw.lower()
+    if "artcard" in stock or "art card" in stock:
+        category = "artcard"
+    elif "gloss" in stock:
+        category = "gloss"
+    elif "matt" in stock or "matte" in stock:
+        category = "matt"
+    elif "bond" in stock:
+        category = "bond"
+    elif "conqueror" in stock:
+        category = "conqueror"
+    elif "tictac" in stock or "sticker" in stock:
+        category = "tictac"
+    else:
+        category = ""
+    return category, _legacy_stock_gsm(raw)
+
+
 PRODUCT_FAMILY_BY_TYPE = {
     "business_card": "flat",
     "flyer": "flat",
@@ -512,16 +541,12 @@ def _sanitize_public_response(response: dict[str, Any]) -> dict[str, Any]:
 def _has_requested_paper(payload: dict[str, Any], *, booklet: bool = False, prefix: str = "") -> bool:
     if booklet:
         return bool(payload.get(f"{prefix}_stock")) or bool(payload.get(f"requested_{prefix}_paper_category")) or bool(payload.get(f"requested_{prefix}_gsm"))
-    return bool(payload.get("paper_stock")) or bool(payload.get("requested_paper_category")) or bool(payload.get("requested_gsm"))
+    return bool(payload.get("requested_paper_category")) or bool(payload.get("requested_gsm"))
 
 
 def _required_missing(payload: dict[str, Any], definition: dict[str, Any]) -> list[str]:
     missing: list[str] = []
     for field in definition["required_fields"]:
-        if field == "paper_stock":
-            if not _has_requested_paper(payload):
-                missing.append(field)
-            continue
         if field == "cover_stock":
             if not _has_requested_paper(payload, booklet=True, prefix="cover"):
                 missing.append(field)
@@ -538,7 +563,6 @@ def _required_missing(payload: dict[str, Any], definition: dict[str, Any]) -> li
 
 def _build_missing_response(product_type: str, missing_fields: list[str]) -> dict[str, Any]:
     field_labels = {
-        "paper_stock": "paper stock or requested paper",
         "cover_stock": "cover stock or requested cover paper",
         "insert_stock": "insert stock or requested insert paper",
         "finished_size": "finished size",
@@ -677,6 +701,23 @@ def _extract_production_preview(matches: list[dict[str, Any]], product_type: str
         "pieces_per_sheet": imposition.get("copies_per_sheet") or preview_data.get("copies_per_sheet"),
         "sheets_required": imposition.get("good_sheets") or preview_data.get("good_sheets"),
         "parent_sheet": imposition.get("sheet_size") or imposition.get("sheet_name") or paper.get("sheet_size") or preview_data.get("parent_sheet_name"),
+        "good_sheets": imposition.get("good_sheets") or preview_data.get("good_sheets"),
+        "waste_sheets_added": imposition.get("waste_sheets_added"),
+        "fixed_waste_sheets": imposition.get("fixed_waste_sheets"),
+        "variable_waste_sheets": imposition.get("variable_waste_sheets"),
+        "variable_waste_rate": imposition.get("variable_waste_rate"),
+        "billable_sheets": imposition.get("billable_sheets") or preview_data.get("billable_sheets"),
+        "layout": {
+            "cols": (imposition.get("layout") or {}).get("cols") or imposition.get("cols"),
+            "rows": (imposition.get("layout") or {}).get("rows") or imposition.get("rows"),
+            "orientation": imposition.get("orientation") or ("rotated" if preview_data.get("rotated") else "normal"),
+        },
+        "bleed_mm": imposition.get("bleed_mm"),
+        "press_sheet": {
+            "label": paper.get("label") or paper.get("sheet_size"),
+            "width_mm": paper.get("width_mm") or imposition.get("sheet_width_mm"),
+            "height_mm": paper.get("height_mm") or imposition.get("sheet_height_mm"),
+        },
         "imposition_label": imposition.get("explanation") or preview_data.get("reason"),
         "size_label": paper.get("label") or paper.get("sheet_size"),
         "quantity": preview_data.get("quantity"),
@@ -1041,14 +1082,13 @@ def build_public_calculator_preview(payload: dict[str, Any]) -> dict[str, Any]:
         response = _attach_canonical_public_price(_attach_public_estimate(response, payload), payload)
         return _sanitize_public_response(response)
 
-    paper_stock_raw = payload.get("paper_stock") or ""
-    stock = resolve_stock_option(paper_stock_raw, usage="sticker" if product_type == "label_sticker" else "")
-    tier_gsm: int | None = None
-    if stock is None and paper_stock_raw.endswith("gsm"):
-        try:
-            tier_gsm = int(paper_stock_raw[:-3])
-        except ValueError:
-            pass
+    paper_category = str(payload.get("requested_paper_category") or "").strip()
+    paper_gsm = payload.get("requested_gsm")
+    legacy_paper_stock = (payload.get("paper_stock") or "").strip()
+    if not paper_category and not paper_gsm and legacy_paper_stock:
+        paper_category, legacy_gsm = _map_legacy_paper_request(legacy_paper_stock)
+        if not paper_gsm:
+            paper_gsm = legacy_gsm
     is_custom_size = finished_size_raw == "custom"
     request_payload = {
         "calculator_mode": "marketplace",
@@ -1063,8 +1103,8 @@ def build_public_calculator_preview(payload: dict[str, Any]) -> dict[str, Any]:
         "height_mm": size["height_mm"],
         "sides": payload.get("print_sides") or definition["defaults"].get("print_sides"),
         "color_mode": payload.get("color_mode") or definition["defaults"].get("color_mode"),
-        "paper_type": payload.get("requested_paper_category") or (stock or {}).get("category"),
-        "paper_gsm": payload.get("requested_gsm") or (stock or {}).get("gsm") or tier_gsm,
+        "paper_type": paper_category or None,
+        "paper_gsm": paper_gsm or None,
         "finishing_slugs": [
             value
             for value in [

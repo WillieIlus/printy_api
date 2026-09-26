@@ -72,7 +72,7 @@ def line_items_from_preview(preview: dict[str, Any]) -> list[dict[str, Any]]:
     paper = _as_dict(breakdown.get("paper"))
     paper_total = paper.get("total") or totals.get("paper_cost")
     if paper_total is not None:
-        qty = paper.get("quantity") or preview.get("good_sheets") or preview.get("parent_sheets_required")
+        qty = paper.get("quantity") or preview.get("billable_sheets") or preview.get("good_sheets") or preview.get("parent_sheets_required")
         items.append(
             _component_line(
                 component="paper",
@@ -89,7 +89,7 @@ def line_items_from_preview(preview: dict[str, Any]) -> list[dict[str, Any]]:
     printing = _as_dict(breakdown.get("printing") or breakdown.get("print"))
     print_total = printing.get("total") or totals.get("print_cost")
     if print_total is not None:
-        qty = printing.get("quantity") or preview.get("good_sheets") or preview.get("parent_sheets_required")
+        qty = printing.get("quantity") or preview.get("billable_sheets") or preview.get("good_sheets") or preview.get("parent_sheets_required")
         print_spec = " ".join(
             part for part in [printing.get("color_mode"), printing.get("sides"), printing.get("machine_name")] if part
         )
