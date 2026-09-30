@@ -188,6 +188,14 @@ def create_managed_job_from_payment(*, payment: Payment) -> ManagedJob:
             payment_status=ManagedJobPaymentStatus.CONFIRMED,
             assignment_status=ManagedJobAssignmentStatus.UNASSIGNED,
             client_total=split.client_total,
+            # The QuoteFinancialSplit is the authority for every party's share.
+            # Copy the exact Decimal values so the payout service never has to
+            # re-derive them: without broker_payout the manager's money silently
+            # resolved to zero and was skipped at release time. The shop share
+            # lives on the JobAssignment, which is populated from this same
+            # split by ensure_job_assignment_for_paid_job/dispatch_job_to_shop.
+            broker_payout=split.broker_payout,
+            printy_fee=split.printy_fee,
             operational_snapshot={
                 "source": "payment_confirmed",
                 "quote_id": quote.id,

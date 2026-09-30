@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from decimal import Decimal
+
+from common.money import money
 from typing import Any
 
 
@@ -12,7 +14,7 @@ def _as_dict(value: Any) -> dict[str, Any]:
 
 def _money(value: Any) -> str:
     try:
-        return str(Decimal(str(value or "0")).quantize(Decimal("0.01")))
+        return str(money(value or "0"))
     except Exception:
         return "0.00"
 

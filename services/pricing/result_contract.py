@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 from decimal import Decimal
+
+from common.money import money
 from typing import Any
 
 
 def _money(value: Any) -> str | None:
     if value is None:
         return None
-    return str(Decimal(str(value)).quantize(Decimal("0.01")))
+    return str(money(value))
 
 
 def _merge_metadata(base: dict[str, Any], extra: dict[str, Any] | None = None) -> dict[str, Any]:

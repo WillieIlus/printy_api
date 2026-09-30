@@ -13,6 +13,12 @@ from django.db import transaction
 from django.utils import timezone
 from requests.auth import HTTPBasicAuth
 
+from common.money import money, require_whole_kes
+from mpesa_payments.services import (
+    DARAAJA_PRODUCTS,
+    DARAAJA_PRODUCTS_WITHOUT_CREDENTIALS,
+    mpesa_product,
+)
 from notifications.models import Notification
 from notifications.services import notify
 from payments.models import MpesaSTKRequest, Payment
@@ -28,7 +34,7 @@ ACTIVE_PAYMENT_STATUSES = {
 
 
 def _money(value) -> Decimal:
-    return Decimal(str(value)).quantize(Decimal("0.01"))
+    return money(value)
 
 def normalize_mpesa_phone(phone_number: str) -> str:
     digits = "".join(ch for ch in str(phone_number or "") if ch.isdigit())
@@ -268,6 +274,12 @@ def _mpesa_environment() -> str:
 
 
 def _is_stub_mode() -> bool:
+    # An explicit force flag wins over everything, including .env, so the
+    # documented stub mode is actually reachable. Previously .env pinned
+    # MPESA_ENVIRONMENT=sandbox and overrode any process-level request to use
+    # it, making the stub path dead code in any deployment that has a .env.
+    if str(getattr(settings, "MPESA_FORCE_STUB", "") or "").strip().lower() in {"1", "true", "yes", "on"}:
+        return True
     return _mpesa_environment() in {"test", "testing", "disabled"}
 
 
@@ -292,12 +304,18 @@ class MpesaDarajaClient:
         self.shortcode = getattr(settings, "MPESA_SHORTCODE", "")
         self.passkey = getattr(settings, "MPESA_PASSKEY", "")
         self.callback_url = getattr(settings, "MPESA_CALLBACK_URL", "")
-        self.transaction_type = getattr(settings, "MPESA_TRANSACTION_TYPE", "CustomerPayBillOnline")
+        self.product = mpesa_product()
+        self.transaction_type = DARAAJA_PRODUCTS[self.product]
         self.environment = _mpesa_environment() or "sandbox"
         self.timeout_seconds = int(getattr(settings, "MPESA_TIMEOUT_SECONDS", 30) or 30)
 
         if not self.consumer_key or not self.consumer_secret:
             raise ImproperlyConfigured("MPESA_CONSUMER_KEY and MPESA_CONSUMER_SECRET are required.")
+        if self.product in DARAAJA_PRODUCTS_WITHOUT_CREDENTIALS and (self.shortcode or self.passkey):
+            raise ImproperlyConfigured(
+                f"MPESA_SHORTCODE_TYPE={self.product} is authenticated by the OAuth token alone: "
+                "MPESA_SHORTCODE and MPESA_PASSKEY must be empty."
+            )
         if self.environment == "production":
             self.base_url = self.PRODUCTION_BASE_URL
         else:
@@ -324,6 +342,8 @@ class MpesaDarajaClient:
 
     def generate_password(self) -> tuple[str, str]:
         timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+        if self.product in DARAAJA_PRODUCTS_WITHOUT_CREDENTIALS:
+            return "", timestamp
         password_str = f"{self.shortcode}{self.passkey}{timestamp}"
         password = base64.b64encode(password_str.encode()).decode()
         return password, timestamp
@@ -339,14 +359,21 @@ class MpesaDarajaClient:
         token = self.get_access_token()
         password, timestamp = self.generate_password()
         url = f"{self.base_url}/mpesa/stkpush/v1/processrequest"
+        # BuyGoodsOnline is authorised by the bearer token alone and rejects a
+        # short code or password, so both are sent empty.
+        business_short_code = "" if self.product in DARAAJA_PRODUCTS_WITHOUT_CREDENTIALS else self.shortcode
         payload = {
-            "BusinessShortCode": self.shortcode,
+            "BusinessShortCode": business_short_code,
             "Password": password,
             "Timestamp": timestamp,
             "TransactionType": self.transaction_type,
-            "Amount": int(amount),
+            # Daraja only accepts whole shillings. The amount is rounded once
+            # upstream (pricing.services.platform_fee_policy) and arrives here
+            # already whole, so this asserts rather than truncates — truncating
+            # would silently under-charge the customer.
+            "Amount": int(require_whole_kes(amount, "STK amount")),
             "PartyA": phone_number,
-            "PartyB": self.shortcode,
+            "PartyB": business_short_code,
             "PhoneNumber": phone_number,
             "CallBackURL": self.callback_url,
             "AccountReference": account_reference,
@@ -436,7 +463,7 @@ def initiate_stk_push(*, payment: Payment, phone_number: str) -> MpesaSTKRequest
         try:
             response = MpesaDarajaClient().initiate_stk_push(
                 phone_number=phone_number,
-                amount=int(amount),
+                amount=require_whole_kes(amount, "STK amount"),
                 account_reference=payment.account_reference,
                 transaction_desc=getattr(settings, "MPESA_TRANSACTION_DESC_DEFAULT", "Printy payment"),
             )

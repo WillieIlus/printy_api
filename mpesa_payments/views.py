@@ -23,7 +23,14 @@ from rest_framework.views import APIView
 
 from .models import MpesaPayment
 from .serializers import MpesaCallbackSerializer, MpesaPaymentReadSerializer, MpesaStkPushSerializer
-from .services import MpesaError, create_payment, initiate_stk_push, process_callback, query_stk_status
+from .services import (
+    MpesaError,
+    create_payment,
+    initiate_stk_push,
+    process_callback,
+    process_transaction_status_result,
+    query_stk_status,
+)
 
 logger = logging.getLogger("payments")
 
@@ -96,6 +103,33 @@ def _callback_checkout_request_id(payload: dict) -> str:
     return str(stk.get("CheckoutRequestID") or "")
 
 
+def _is_status_query_result(payload: dict) -> bool:
+    """True for the ``Result``-shaped body of a Transaction Status Query."""
+    return isinstance(payload, dict) and isinstance(payload.get("Result"), dict)
+
+
+class MpesaTransactionStatusView(APIView):
+    """POST /api/payments/mpesa/result/
+
+    Daraja's ``ResultURL``/``QueueTimeOutURL`` for a Transaction Status Query.
+    Answers asynchronously, unlike the STK callback, and is the only Daraja
+    notification that can confirm a payment whose STK callback was lost.
+
+    Same safety rules as :class:`MpesaCallbackView`: AllowAny, always 200.
+    """
+
+    permission_classes = [AllowAny]
+    authentication_classes: list = []
+
+    def post(self, request):
+        payload = request.data if isinstance(request.data, dict) else {}
+        try:
+            process_transaction_status_result(payload)
+        except Exception:  # noqa: BLE001
+            logger.exception("M-Pesa status-query result processing failed")
+        return Response({"ResultCode": 0, "ResultDesc": "Accepted"})
+
+
 class MpesaCallbackView(APIView):
     """POST /api/payments/mpesa/callback/
 
@@ -121,6 +155,11 @@ class MpesaCallbackView(APIView):
         serializer.is_valid(raise_exception=False)  # Daraja's shape is its own
         payload = serializer.validated_data.get("payload") or request.data
         try:
+            if _is_status_query_result(payload):
+                # A Transaction Status Query pointed at this URL by mistake:
+                # its shape must not be read as an STK callback.
+                process_transaction_status_result(payload)
+                return Response({"ResultCode": 0, "ResultDesc": "Accepted"})
             checkout_id = _callback_checkout_request_id(payload)
             if checkout_id and MpesaPayment.objects.filter(checkout_request_id=checkout_id).exists():
                 process_callback(payload)

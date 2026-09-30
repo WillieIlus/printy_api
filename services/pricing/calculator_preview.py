@@ -1105,6 +1105,11 @@ def build_public_calculator_preview(payload: dict[str, Any]) -> dict[str, Any]:
         "color_mode": payload.get("color_mode") or definition["defaults"].get("color_mode"),
         "paper_type": paper_category or None,
         "paper_gsm": paper_gsm or None,
+        # requested_paper_category/requested_gsm are documented as "shops price
+        # with their nearest available stock", so keep them soft. Without this
+        # the resolver treats them as a hard selection and an unheld grammage
+        # silently drops every shop from the match list.
+        "paper_request_is_soft": True,
         "finishing_slugs": [
             value
             for value in [

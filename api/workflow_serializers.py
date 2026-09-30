@@ -22,7 +22,7 @@ from api.visibility import (
     strip_forbidden_keys,
 )
 from quotes.choices import CalculatorDraftContext, CalculatorDraftIntent, CalculatorDraftStatus, QuoteStatus, QuoteOfferStatus
-from quotes.guardrails import _money, validate_partner_markup_amount
+from quotes.guardrails import _money, resolve_partner_markup_amount, validate_partner_markup_amount
 from quotes.models import CalculatorDraft, ProductionOption, QuoteItem, QuoteRequest, QuoteRequestMessage, Quote
 from quotes.request_brief import build_quote_request_whatsapp_handoff
 from quotes.status_normalization import (
@@ -210,6 +210,10 @@ class CalculatorConfigPreviewSerializer(serializers.Serializer):
     requested_paper_category = serializers.CharField(required=False, allow_blank=True, allow_null=True, help_text="Fallback paper category when the buyer wants the shop to advise.")
     requested_gsm = serializers.IntegerField(required=False, allow_null=True, min_value=1, help_text="Preferred paper gsm.")
     lamination = serializers.CharField(required=False, allow_blank=True, allow_null=True, help_text="Finishing slug such as gloss-lamination or matt-lamination.")
+    # Pin matching to one shop. Previously this key was sent by the manager UI
+    # but never declared, so it was silently dropped by the serializer and every
+    # shop was returned regardless.
+    fixed_shop_slug = serializers.CharField(required=False, allow_blank=True, allow_null=True, max_length=180, help_text="Restrict matching to a single shop slug.")
     corner_rounding = serializers.BooleanField(required=False, allow_null=True, help_text="Business-card corner rounding request.")
     folding = serializers.CharField(required=False, allow_blank=True, allow_null=True, help_text="Optional folding preference for flyers.")
     shape = serializers.CharField(required=False, allow_blank=True, allow_null=True, help_text="Sticker shape.")
@@ -554,7 +558,15 @@ class GuestArtworkUploadSerializer(serializers.Serializer):
 class PartnerQuotePreviewSerializer(serializers.Serializer):
     shop = serializers.PrimaryKeyRelatedField(queryset=Shop.objects.all())
     pricing_snapshot = serializers.JSONField()
-    partner_markup = serializers.DecimalField(max_digits=12, decimal_places=2, min_value=Decimal("0.00"))
+    partner_markup = serializers.DecimalField(
+        max_digits=12, decimal_places=2, min_value=Decimal("0.00"), required=False
+    )
+    # Percentage form of partner_markup, so a manager's stored
+    # UserProfile.default_markup_rate (a fraction, e.g. 0.75) can be submitted
+    # directly. Accepts a fraction (0.75) or a percent (75).
+    partner_markup_rate = serializers.DecimalField(
+        max_digits=8, decimal_places=4, min_value=Decimal("0.00"), required=False
+    )
 
     def validate(self, attrs):
         pricing_snapshot = attrs.get("pricing_snapshot")
@@ -582,7 +594,17 @@ class PartnerQuotePreviewSerializer(serializers.Serializer):
             raise serializers.ValidationError({"pricing_snapshot": ["Production price is not available yet for the selected shop."]})
 
         try:
-            validate_partner_markup_amount(base_price=base_price, markup_amount=attrs["partner_markup"])
+            markup_amount = resolve_partner_markup_amount(
+                base_price=base_price,
+                partner_markup=attrs.get("partner_markup"),
+                partner_markup_rate=attrs.get("partner_markup_rate"),
+            )
+        except ValueError as exc:
+            raise serializers.ValidationError({"partner_markup": [str(exc)]})
+        # Normalise to the amount so downstream pricing is unchanged.
+        attrs["partner_markup"] = markup_amount
+        try:
+            validate_partner_markup_amount(base_price=base_price, markup_amount=markup_amount)
         except ValueError as exc:
             raise serializers.ValidationError({"partner_markup": [str(exc)]})
         return attrs
@@ -674,7 +696,14 @@ class PartnerQuoteCreateSerializer(serializers.Serializer):
     note = serializers.CharField(required=False, allow_blank=True, max_length=1000)
     calculator_inputs_snapshot = serializers.JSONField()
     pricing_snapshot = serializers.JSONField()
-    partner_markup = serializers.DecimalField(max_digits=12, decimal_places=2, min_value=Decimal("0.00"))
+    partner_markup = serializers.DecimalField(
+        max_digits=12, decimal_places=2, min_value=Decimal("0.00"), required=False
+    )
+    # Percentage form of partner_markup so a manager's stored
+    # default_markup_rate can be submitted without hand-conversion.
+    partner_markup_rate = serializers.DecimalField(
+        max_digits=8, decimal_places=4, min_value=Decimal("0.00"), required=False
+    )
     save_as_draft = serializers.BooleanField(required=False, default=False)
 
     def validate(self, attrs):
@@ -690,7 +719,16 @@ class PartnerQuoteCreateSerializer(serializers.Serializer):
         totals = _as_dict(preview.get("totals"))
         base_price = totals.get("shop_total") or totals.get("subtotal") or totals.get("grand_total")
         try:
-            validate_partner_markup_amount(base_price=base_price, markup_amount=attrs["partner_markup"])
+            markup_amount = resolve_partner_markup_amount(
+                base_price=base_price,
+                partner_markup=attrs.get("partner_markup"),
+                partner_markup_rate=attrs.get("partner_markup_rate"),
+            )
+        except ValueError as exc:
+            raise serializers.ValidationError(str(exc))
+        attrs["partner_markup"] = markup_amount
+        try:
+            validate_partner_markup_amount(base_price=base_price, markup_amount=markup_amount)
         except ValueError as exc:
             raise serializers.ValidationError(str(exc))
         if attrs.get("save_as_draft"):

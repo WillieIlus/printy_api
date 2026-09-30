@@ -53,11 +53,81 @@ def _machine_fits(machine: Machine, paper: Paper) -> bool:
     return (width <= max_width and height <= max_height) or (height <= max_width and width <= max_height)
 
 
+# A client may name a paper with either vocabulary, and the two spellings of the
+# same finish differ ("matt" in the category vocabulary vs "MATTE" in the
+# paper_type/finish vocabulary). iexact only folds case, so these aliases have
+# to be expanded explicitly or a "matt" request misses every MATTE finish.
+PAPER_TYPE_ALIASES = {
+    "matt": ("matte",),
+    "matte": ("matt",),
+    "gloss": ("glossy",),
+    "glossy": ("gloss",),
+    "soft-touch": ("softtouch",),
+    "softtouch": ("soft-touch",),
+}
+
+
+def _paper_type_terms(paper_type: str) -> list[str]:
+    """Return every vocabulary/spelling a client may use to name a paper type.
+
+    ``Paper.paper_type`` stores a *finish* (COATED/MATTE/GLOSS/...) while
+    ``Paper.category`` stores the *client-facing* name (matt/gloss/bond/
+    artcard/...). Callers legitimately send either vocabulary in
+    ``paper_type``, so both are matched case-insensitively, including the
+    matt<->matte and gloss<->glossy spelling pairs.
+    """
+    value = (paper_type or "").strip().lower()
+    if not value:
+        return []
+
+    terms: list[str] = []
+
+    def _add(term: str) -> None:
+        if term and term not in terms:
+            terms.append(term)
+
+    _add(value)
+    _add(value.upper())
+    for alias in PAPER_TYPE_ALIASES.get(value, ()):
+        _add(alias)
+        _add(alias.upper())
+    return terms
+
+
+def _paper_type_query(paper_type: str) -> Q:
+    query = Q()
+    for term in _paper_type_terms(paper_type):
+        query |= Q(category__iexact=term) | Q(paper_type__iexact=term)
+    return query
+
+
 def _paper_score(paper: Paper, *, paper_type: str | None, paper_gsm: int | None) -> tuple[int, int, int]:
-    category_penalty = 0 if not paper_type or paper.category == paper_type or paper.paper_type == paper_type else 1000
+    terms = [term.lower() for term in _paper_type_terms(paper_type or "")]
+    if not terms:
+        category_penalty = 0
+    else:
+        category_penalty = 0 if (paper.category or "").lower() in terms or (paper.paper_type or "").lower() in terms else 1000
     gsm_penalty = abs(int(paper.gsm or 0) - int(paper_gsm or paper.gsm or 0))
     default_penalty = 0 if paper.is_default else 1
     return category_penalty, gsm_penalty, default_penalty
+
+
+def _nearest_gsm_subset(qs, target_gsm: int):
+    """Filter ``qs`` down to the papers closest to ``target_gsm``.
+
+    Used for soft paper hints, where the buyer's request is a preference and the
+    shop still prices the job with its closest available stock. Returns a queryset
+    so the caller keeps its existing ordering and slicing.
+    """
+    distances = [(abs(int(row["gsm"] or 0) - target_gsm), row["gsm"]) for row in qs.values("gsm")]
+    if not distances:
+        return qs.none()
+    within_window = [gsm for distance, gsm in distances if distance <= 40]
+    if within_window:
+        return qs.filter(gsm__in=within_window)
+    nearest = min(distance for distance, _ in distances)
+    closest = {gsm for distance, gsm in distances if distance == nearest}
+    return qs.filter(gsm__in=closest)
 
 
 def _candidate_papers(shop: Shop, payload: dict[str, Any]) -> list[Paper]:
@@ -65,14 +135,35 @@ def _candidate_papers(shop: Shop, payload: dict[str, Any]) -> list[Paper]:
     paper_type = (payload.get("paper_type") or "").strip()
     paper_gsm = int(payload.get("paper_gsm") or 0) or None
 
+    # An explicit stock choice from the client always wins. Falling through to
+    # the fuzzy paper_type/paper_gsm resolver used to silently discard it and
+    # price a completely different paper. Conversely, a paper_id that cannot be
+    # honoured (unknown, another shop, inactive, unpriced) must NOT quietly
+    # resolve to a substitute: that is the same silent-substitution bug, so it
+    # reports "no paper matches" instead.
+    paper_id = payload.get("paper_id")
+    if paper_id:
+        try:
+            return list(qs.filter(pk=int(paper_id))[:1])
+        except (TypeError, ValueError):
+            return []
+
+    # A soft hint ("advise me / use the closest stock") must not exclude the shop.
+    # A hard selection must not silently resolve to a different paper.
+    is_soft_request = bool(payload.get("paper_request_is_soft"))
+
     if paper_type:
-        exact_qs = qs.filter(Q(category=paper_type) | Q(paper_type=paper_type))
-        if exact_qs.exists():
-            qs = exact_qs
+        typed_qs = qs.filter(_paper_type_query(paper_type))
+        if typed_qs.exists():
+            qs = typed_qs
     if paper_gsm:
-        close_qs = qs.filter(gsm__gte=max(1, paper_gsm - 40), gsm__lte=paper_gsm + 40)
-        if close_qs.exists():
-            qs = close_qs
+        if is_soft_request:
+            qs = _nearest_gsm_subset(qs, paper_gsm)
+        else:
+            # Never silently widen: if the requested grammage has no match in the
+            # selected family, report "no paper matches" so the caller is forced
+            # to disambiguate instead of receiving a cheaper wrong weight.
+            qs = qs.filter(gsm__gte=max(1, paper_gsm - 40), gsm__lte=paper_gsm + 40)
 
     papers = list(qs.order_by("-is_default", "gsm", "selling_price", "id"))
     return sorted(papers, key=lambda paper: _paper_score(paper, paper_type=paper_type or None, paper_gsm=paper_gsm))
@@ -126,7 +217,13 @@ def _finishing_selections(shop: Shop, payload: dict[str, Any]) -> tuple[list[dic
     return selections, missing
 
 
-def _public_match(index: int, shop: Shop, preview: dict[str, Any], product_type: str = "") -> dict[str, Any]:
+def _public_match(
+    index: int,
+    shop: Shop,
+    preview: dict[str, Any],
+    product_type: str = "",
+    payload: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     totals = preview.get("totals") or {}
     total = _positive_money(totals.get("grand_total"))
     return {
@@ -146,12 +243,52 @@ def _public_match(index: int, shop: Shop, preview: dict[str, Any], product_type:
         "missing_specs": [] if total else ["pricing_rate"],
         "exact_or_estimated": bool(total),
         "preview": preview,
-        "production_preview": _production_intelligence(product_type, preview),
+        "production_preview": _production_intelligence(product_type, preview, payload),
         "price_range": str(total) if total else None,
     }
 
 
-def _production_intelligence(product_type: str, preview: dict[str, Any]) -> dict[str, Any]:
+FINISHED_SIZE_NAME_BY_PRODUCT = {
+    "business_card": "Business Card",
+    "flyer": "Flyer",
+    "poster": "Poster",
+    "letterhead": "Letterhead",
+    "certificate": "Certificate",
+    "invitation_card": "Invitation Card",
+    "brochure": "Brochure",
+    "sticker": "Label / Sticker",
+    "label_sticker": "Label / Sticker",
+    "booklet": "Booklet",
+    "large_format": "Large Format",
+}
+
+
+def _finished_size_label(payload: dict[str, Any] | None, product_type: str = "") -> str:
+    """Human label for the FINISHED product size (e.g. "Business Card 85 x 55 mm").
+
+    This is deliberately distinct from ``press_sheet.label``, which describes
+    the parent sheet the job is imposed on. Reporting the press sheet as the
+    size label made an 85x55mm card job read as "SRA3 350gsm Matte".
+    """
+    payload = payload or {}
+    explicit = str(payload.get("size_label") or payload.get("finished_size") or "").strip()
+    if explicit:
+        return explicit
+
+    width = int(payload.get("width_mm") or 0)
+    height = int(payload.get("height_mm") or 0)
+    dimensions = f"{width} x {height} mm" if width and height else ""
+    name = FINISHED_SIZE_NAME_BY_PRODUCT.get((product_type or "").strip().lower(), "")
+    if name and dimensions:
+        return f"{name} {dimensions}"
+    return dimensions or name or "Custom size"
+
+
+def _production_intelligence(
+    product_type: str,
+    preview: dict[str, Any],
+    payload: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Full sheet-layout disclosure the buyer's price is built from.
 
     The engine records every number (copies per sheet, cols x rows, bleed, press
@@ -192,7 +329,7 @@ def _production_intelligence(product_type: str, preview: dict[str, Any]) -> dict
             "height_mm": paper.get("height_mm") or imposition.get("sheet_height_mm"),
         },
         "imposition_label": imposition.get("explanation") or preview.get("reason"),
-        "size_label": paper.get("label") or paper.get("sheet_size"),
+        "size_label": _finished_size_label(payload, product_type),
         "quantity": preview.get("quantity"),
         "cutting_required": True if str(product_type or "").lower() in {"business_card", "flyer", "label_sticker"} else None,
         "selected_finishings": [f.get("name") for f in finishings if f.get("name")],
@@ -229,7 +366,9 @@ def build_public_match_payload(payload):
             total = _positive_money((preview.get("totals") or {}).get("grand_total"))
             if not total:
                 continue
-            matches.append(_public_match(len(matches) + 1, shop, preview, payload.get("product_type")))
+            matches.append(
+                _public_match(len(matches) + 1, shop, preview, payload.get("product_type"), payload)
+            )
             break
         if len(matches) >= MAX_PUBLIC_MATCHES:
             break

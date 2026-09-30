@@ -4,6 +4,7 @@ from django.core.exceptions import ValidationError
 from django.test import SimpleTestCase, TestCase
 
 from accounts.models import User
+from common.money import is_whole_kes, whole_kes
 from pricing.models import PlatformFeePolicy
 from pricing.services.platform_fee_policy import calculate_financial_split, calculate_quote_financials, create_quote_financial_split
 from quotes.models import ProductionOption, Quote, QuoteRequest
@@ -25,8 +26,12 @@ class PlatformFeePolicyServiceTestCase(SimpleTestCase):
         )
 
         self.assert_money(split.production_fee_component, "50.00")
-        self.assert_money(split.markup_fee_component, "362.50")
-        self.assert_money(split.printy_fee, "362.50")
+        # printy_fee is the residual, so it absorbs the half-shilling that
+        # ROUND_HALF_UP on the manager commission (750 * 0.45 = 337.50 -> 338)
+        # leaves behind, and the split still reconciles to 1750 exactly.
+        self.assert_money(split.manager_payout, "338.00")
+        self.assert_money(split.markup_fee_component, "362.00")
+        self.assert_money(split.printy_fee, "362.00")
         self.assert_money(split.client_total, "1750.00")
         self.assertEqual(split.pricing_tier, "tier_b")
 
@@ -61,7 +66,7 @@ class PlatformFeePolicyServiceTestCase(SimpleTestCase):
             policy=self.policy,
         )
 
-        self.assert_money(split["markup_fee_component"], "390.55")
+        self.assert_money(split["markup_fee_component"], "391.00")
         self.assertEqual(split["pricing_tier"], "tier_b")
 
     def test_10000_does_not_use_high_production_policy(self):
@@ -82,8 +87,8 @@ class PlatformFeePolicyServiceTestCase(SimpleTestCase):
             policy=self.policy,
         )
 
-        self.assert_money(split["production_fee_component"], "800.08")
-        self.assert_money(split["markup_fee_component"], "-150.08")
+        self.assert_money(split["production_fee_component"], "800.00")
+        self.assert_money(split["markup_fee_component"], "-150.00")
         self.assertEqual(split["pricing_tier"], "tier_c")
 
     def test_client_price_above_tier_cap_is_rejected(self):
@@ -103,15 +108,32 @@ class PlatformFeePolicyServiceTestCase(SimpleTestCase):
             calculate_financial_split(production_cost=Decimal("0.00"), manager_markup=Decimal("0.00"), policy=self.policy)
 
     def test_decimal_rounding_is_half_up(self):
+        # M-Pesa STK only accepts whole shillings, so every client-facing
+        # amount is rounded to whole KES, ROUND_HALF_UP, at the single
+        # rounding point in calculate_quote_financials.
+        self.assertEqual(whole_kes("2500.50"), Decimal("2501"))
+        self.assertEqual(whole_kes("2500.49"), Decimal("2500"))
+        self.assertEqual(whole_kes("2116.66"), Decimal("2117"))
+        # Never truncation, and never banker's rounding (which would send
+        # 2500.50 down to 2500).
+        self.assertEqual(whole_kes("0.50"), Decimal("1"))
+
         split = calculate_financial_split(
             production_cost=Decimal("1000.025"),
             manager_markup=Decimal("80.025"),
             policy=self.policy,
         )
 
-        self.assert_money(split["production_cost"], "1000.03")
-        self.assert_money(split["manager_markup"], "80.03")
-        self.assert_money(split["markup_fee_component"], "-5.98")
+        self.assert_money(split["production_cost"], "1000")
+        self.assert_money(split["manager_markup"], "80")
+        self.assert_money(split["markup_fee_component"], "-6")
+        for field in ("production_cost", "manager_markup", "production_fee_component",
+                      "markup_fee_component", "printy_fee", "shop_payout",
+                      "manager_payout", "client_total"):
+            self.assertTrue(
+                is_whole_kes(split[field]),
+                f"{field} is not whole KES: {split[field]!r}",
+            )
 
     def test_legacy_fee_fields_do_not_change_canonical_fee(self):
         policy = PlatformFeePolicy(
@@ -124,7 +146,7 @@ class PlatformFeePolicyServiceTestCase(SimpleTestCase):
             policy=policy,
         )
 
-        self.assert_money(split.printy_fee, "362.50")
+        self.assert_money(split.printy_fee, "362.00")
         self.assert_money(split.client_total, "1750.00")
 
 
@@ -249,7 +271,7 @@ class QuoteFinancialSplitSnapshotTestCase(TestCase):
 
         self.assertEqual(first.pk, second.pk)
         self.assertEqual(self.quote.financial_split.pk, first.pk)
-        self.assertEqual(first.printy_fee, Decimal("362.50"))
+        self.assertEqual(first.printy_fee, Decimal("362.00"))
         self.assertEqual(first.client_total, Decimal("1750.00"))
         self.assertEqual(first.pricing_tier, "tier_b")
 

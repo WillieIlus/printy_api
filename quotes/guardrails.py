@@ -68,11 +68,50 @@ def validate_partner_markup_amount(*, base_price: Decimal | int | float | str, m
     min_rate = get_partner_markup_min_rate()
     production_amount = _money(base_price)
     max_rate = (get_active_platform_fee_policy().get_max_markup_multiple(production_amount) - Decimal("1.00")).quantize(Decimal("0.0001"))
-    if rate < min_rate:
-        raise ValueError(f"Markup cannot be below {int(min_rate * Decimal('100'))}%.")
-    if rate > max_rate:
-        raise ValueError(f"Markup cannot exceed {int(max_rate * Decimal('100'))}%.")
+    if rate < min_rate or rate > max_rate:
+        raise ValueError(markup_range_error_message(base_price=production_amount, min_rate=min_rate, max_rate=max_rate))
     return rate
+
+
+def markup_range_error_message(*, base_price: Decimal, min_rate: Decimal, max_rate: Decimal) -> str:
+    """Explain the accepted markup band in the units the caller actually sent.
+
+    The old text always said "Markup cannot be below N%", which is plainly wrong
+    when the value is a KES amount and the real problem is that it sits outside
+    the allowed band.
+    """
+    min_amount = (base_price * min_rate).quantize(Decimal("0.01"))
+    max_amount = (base_price * max_rate).quantize(Decimal("0.01"))
+    return (
+        f"Markup amount must be between KES {min_amount} and KES {max_amount} "
+        f"for this production cost of KES {_money(base_price)} "
+        f"({int(min_rate * Decimal('100'))}%-{int(max_rate * Decimal('100'))}%). "
+        f"Send partner_markup_rate to use a percentage instead."
+    )
+
+
+def resolve_partner_markup_amount(
+    *,
+    base_price: Decimal | int | float | str,
+    partner_markup: Decimal | int | float | str | None = None,
+    partner_markup_rate: Decimal | int | float | str | None = None,
+) -> Decimal:
+    """Resolve the KES markup amount from either an amount or a rate.
+
+    ``partner_markup`` is a currency amount. ``partner_markup_rate`` is a
+    fraction (0.75 == 75%) or a percent (75), and exists so a manager's stored
+    ``UserProfile.default_markup_rate`` can be submitted directly instead of
+    being hand-multiplied into a KES figure on every job.
+    """
+    if partner_markup_rate is not None:
+        rate = _money(partner_markup_rate)
+        # A value greater than 1 is a percent ("75"), otherwise a fraction.
+        if rate > Decimal("1"):
+            rate = rate / Decimal("100")
+        return (_money(base_price) * rate).quantize(Decimal("0.01"))
+    if partner_markup is None:
+        raise ValueError("Provide partner_markup (KES amount) or partner_markup_rate.")
+    return _money(partner_markup)
 
 
 def build_partner_markup_warning(*, base_price: Decimal | int | float | str, markup_amount: Decimal | int | float | str) -> str:

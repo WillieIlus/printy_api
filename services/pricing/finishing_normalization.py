@@ -24,11 +24,22 @@ LAMINATION_SLUG_MAP = {
     "soft-touch-lamination": "soft-touch-lamination",
     "softtouch-lamination": "soft-touch-lamination",
     "soft-touch-lamination-double": "soft-touch-lamination",
+    # Bare finish words so a plain "matt"/"gloss" selection resolves to the
+    # canonical finishing rate instead of reporting "not configured".
+    "matt": "matt-lamination",
+    "matte": "matt-lamination",
+    "gloss": "gloss-lamination",
+    "glossy": "gloss-lamination",
+    "soft-touch": "soft-touch-lamination",
+    "softtouch": "soft-touch-lamination",
 }
 
 
 def normalize_finishing_slug(value: Any) -> str:
-    slug = slugify(str(value or "").strip()).lower()
+    # slugify() preserves underscores, so "matt_lamination" would miss every
+    # hyphenated key in LAMINATION_SLUG_MAP. Fold underscores to hyphens so
+    # both wire formats resolve to the same canonical slug.
+    slug = slugify(str(value or "").strip()).lower().replace("_", "-")
     return LAMINATION_SLUG_MAP.get(slug, slug)
 
 

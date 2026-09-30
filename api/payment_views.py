@@ -155,13 +155,33 @@ def _role_settlement_status(managed_job: ManagedJob, recipient_role: str, fallba
     return fallback_status
 
 
+def _payout_failures(managed_job: ManagedJob) -> list[dict]:
+    """Failed payouts for this job, so an admin can see what still needs retrying."""
+    return [
+        {
+            "recipient_role": payout.recipient_role,
+            "amount": str(payout.amount),
+            "reason": payout.failure_reason,
+            "failed_at": payout.failed_at.isoformat() if payout.failed_at else None,
+        }
+        for payout in managed_job.payouts.filter(status=ManagedJobPayout.STATUS_FAILED)
+    ]
+
+
 def _settlement_payload(managed_job: ManagedJob, settlement_status: str) -> dict:
+    failures = _payout_failures(managed_job)
     return {
         "managed_job_id": managed_job.id,
         "status": settlement_status,
         "payout_status": settlement_status,
         "payout_status_label": _settlement_status_label(settlement_status),
+        # Printy collects money via Daraja but has no outbound payout provider,
+        # so every disbursement is performed manually by Printy staff. Callers
+        # must not read "paid" as "an API transferred this automatically".
         "disbursement": "manual",
+        "automatic_disbursement_available": ManagedJobPayout.AUTOMATIC_DISBURSEMENT_AVAILABLE,
+        "requires_manual_transfer": settlement_status != "paid" or bool(failures),
+        "payout_failures": failures,
         "disbursed": settlement_status == "paid",
         "payout_disbursed": settlement_status == "paid",
     }
@@ -189,9 +209,12 @@ def _serialize_managed_job_settlement(managed_job: ManagedJob, user) -> dict:
             "broker_payout": str(broker_payout) if broker_payout is not None else None,
             "printy_fee": str(printy_fee) if printy_fee is not None else None,
             "message": (
-                "Expected payout. This amount has been disbursed by manual Printy release."
+                "Expected payout. This amount has been disbursed by manual Printy release. "
+                "No automatic payout provider is configured, so the transfer was made "
+                "manually and its reference is recorded by Printy admin."
                 if settlement_status == "paid"
-                else "Expected payout. This amount is not yet disbursed."
+                else "Expected payout. This amount is not yet disbursed and still requires a "
+                "manual transfer (Printy has no automatic payout provider)."
             ),
         }
     if role == ActorRole.SHOP:
@@ -204,9 +227,12 @@ def _serialize_managed_job_settlement(managed_job: ManagedJob, user) -> dict:
             "expected_production_payout": str(shop_payout) if shop_payout is not None else None,
             "shop_payout": str(shop_payout) if shop_payout is not None else None,
             "message": (
-                "Expected production payout. This amount has been disbursed by manual Printy release."
+                "Expected production payout. This amount has been disbursed by manual Printy release. "
+                "No automatic payout provider is configured, so the transfer was made "
+                "manually and its reference is recorded by Printy admin."
                 if settlement_status == "paid"
-                else "Expected production payout. This amount is not yet disbursed."
+                else "Expected production payout. This amount is not yet disbursed and still requires a "
+                "manual transfer (Printy has no automatic payout provider)."
             ),
         }
     if role == ActorRole.CLIENT:
@@ -484,10 +510,13 @@ class ManagedJobPayoutReleaseView(APIView):
             {
                 "id": payout.id,
                 "recipient_role": payout.recipient_role,
+                "recipient": payout.recipient_id,
                 "amount": str(payout.amount),
                 "currency": payout.currency,
                 "status": payout.status,
                 "released_at": payout.released_at,
+                "disbursement_mode": payout.disbursement_mode,
+                "transfer_reference": payout.transfer_reference,
             }
             for payout in result["payouts"]
         ]
@@ -497,6 +526,14 @@ class ManagedJobPayoutReleaseView(APIView):
                 "payout_status": "paid",
                 "idempotent": not result["created_or_updated"],
                 "payouts": payouts,
+                "reconciliation": result.get("reconciliation"),
+                "disbursement": "manual",
+                "automatic_disbursement_available": ManagedJobPayout.AUTOMATIC_DISBURSEMENT_AVAILABLE,
+                "note": (
+                    "Payout records were created and marked released by manual "
+                    "Printy release. No automatic transfer provider is configured, "
+                    "so the admin must move the money and record the transfer reference."
+                ),
             },
             status=status.HTTP_200_OK,
         )

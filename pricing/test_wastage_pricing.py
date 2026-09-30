@@ -243,11 +243,20 @@ class WastagePricingTestCase(TestCase):
             broker_client_price=pricing["final_client_price"],
             policy=self.platform_policy,
         )
-        self.assertEqual(split.production_cost, Decimal("4724.33"))
-        self.assertEqual(split.broker_client_price, Decimal("9448.66"))
-        self.assertEqual(split.client_total, Decimal("9448.66"))
-        self.assertEqual(split.shop_payout, Decimal("4960.55"))
-        self.assertEqual(split.printy_fee, Decimal("2362.16"))
+        # The markup is the amount rounded at its derivation: 9448.66 - 4724.33
+        # = 4724.33 -> 4724, so the total is 4724 + 4724 = 9448. printy_fee is
+        # the residual, so the components still reconcile exactly.
+        self.assertEqual(split.production_cost, Decimal("4724"))
+        self.assertEqual(split.manager_markup, Decimal("4724"))
+        self.assertEqual(split.broker_client_price, Decimal("9448"))
+        self.assertEqual(split.client_total, Decimal("9448"))
+        self.assertEqual(split.shop_payout, Decimal("4960"))
+        self.assertEqual(split.manager_payout, Decimal("2126"))
+        self.assertEqual(split.printy_fee, Decimal("2362"))
+        self.assertEqual(
+            split.shop_payout + split.manager_payout + split.printy_fee,
+            split.client_total,
+        )
 
     def test_payment_does_not_calculate_pricing(self):
         user = User.objects.create_user(email="payment-no-pricing@test.com", password="pass")

@@ -13,6 +13,7 @@ from api.visibility import (
     TOPOLOGY_MANAGED,
     resolve_topology_mode_for_quote_request,
 )
+from common.money import to_decimal
 from jobs.audit_services import (
     EVENT_ASSIGNMENT_CREATED,
     EVENT_MANAGED_JOB_CREATED,
@@ -30,6 +31,19 @@ from services.pricing.urgency import determine_operational_priority, normalize_u
 
 def _as_dict(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
+
+
+def _split_money(financials, field: str, fallback: dict[str, Any]) -> Any:
+    """Return the exact authoritative Decimal for a split field, or None.
+
+    The QuoteFinancialSplit always wins. The pricing snapshot is only consulted
+    for legacy quotes that predate the split, and its values are stored as
+    strings, so they are normalised back to Decimal rather than trusted as-is.
+    """
+    if financials is not None:
+        return getattr(financials, field, None)
+    raw = fallback.get(field)
+    return to_decimal(raw) if raw not in (None, "") else None
 
 
 def _resolve_source_draft(quote_request: QuoteRequest | None) -> CalculatorDraft | None:
@@ -267,6 +281,13 @@ def create_managed_job_from_accepted_quote(
     customer_pricing = _as_dict(request_snapshot.get("customer_pricing"))
     financials = getattr(quote, "financial_split", None)
     client_total = financials.client_total if financials is not None else customer_pricing.get("final_client_price") or quote.total
+    # The authoritative QuoteFinancialSplit is the single source of truth for every
+    # party share. Copy the exact Decimal values onto the ManagedJob so the payout
+    # service never has to re-derive them (and so a missing copy cannot silently
+    # drop a promised manager payout). printy_fee is Printy's own revenue and is
+    # never a payout, but it is recorded here so the job reconciles end to end.
+    broker_payout = _split_money(financials, "broker_payout", customer_pricing)
+    printy_fee = _split_money(financials, "printy_fee", customer_pricing)
     initial_assigned_shop = quote.shop if broker is None else None
     initial_assignment_status = "assignment_pending" if initial_assigned_shop else "unassigned"
 
@@ -292,6 +313,8 @@ def create_managed_job_from_accepted_quote(
         requested_delivery_time=urgency_payload["requested_delivery_time"],
         operational_priority_level=urgency_payload["operational_priority_level"],
         client_total=client_total,
+        broker_payout=broker_payout,
+        printy_fee=printy_fee,
         operational_snapshot=_build_operational_snapshot(
             quote_request=quote_request,
             quote=quote,

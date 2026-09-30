@@ -105,10 +105,11 @@ Recommended production security flags:
 | --- | --- | --- |
 | `MPESA_ENV` | `production` | `sandbox` for local/testing only. |
 | `MPESA_BASE_URL` | leave unset | Derived from `MPESA_ENV` unless you have a special override. |
-| `MPESA_CONSUMER_KEY` | `replace-with-prod-consumer-key` | Must match the same Daraja environment as the shortcode/passkey. |
+| `MPESA_CONSUMER_KEY` | `replace-with-prod-consumer-key` | Must belong to the same Daraja app as the shortcode/passkey. |
 | `MPESA_CONSUMER_SECRET` | `replace-with-prod-consumer-secret` | |
-| `MPESA_SHORTCODE` | `replace-with-prod-shortcode` | |
-| `MPESA_PASSKEY` | `replace-with-prod-passkey` | |
+| `MPESA_SHORTCODE_TYPE` | `paybill` | Daraja product the app is provisioned for: `paybill`, `till` or `buygoodsonline`. A Daraja app is provisioned for exactly one product and the wrong `TransactionType` is rejected as `Invalid TransactionType`. An unrecognised value fails fast rather than defaulting. |
+| `MPESA_SHORTCODE` | `replace-with-prod-shortcode` | paybill/till only. Must be **empty** for `buygoodsonline`. |
+| `MPESA_PASSKEY` | `replace-with-prod-passkey` | paybill/till only. Must be **empty** for `buygoodsonline`. |
 | `MPESA_CALLBACK_URL` | `https://api.printy.ke/api/payments/mpesa/callback/` | Canonical callback. Backend fails if unsafe in production. |
 | `MPESA_TIMEOUT_SECONDS` | `30` | |
 | `MPESA_ACCOUNT_REFERENCE_DEFAULT` | `PRINTY` | |
@@ -116,8 +117,8 @@ Recommended production security flags:
 | `MPESA_INITIATOR_NAME` | optional | Future B2C/status flows only. |
 | `MPESA_INITIATOR_PASSWORD` | optional | Future B2C/status flows only. |
 | `MPESA_SECURITY_CREDENTIAL` | optional | Future B2C/status flows only. |
-| `MPESA_TIMEOUT_URL` | optional | Future timeout/result flows only. |
-| `MPESA_RESULT_URL` | optional | Future timeout/result flows only. |
+| `MPESA_TIMEOUT_URL` | `https://api.printy.ke/api/payments/mpesa/callback/` | `QueueTimeOutURL` of the Transaction Status Query. Defaults to `MPESA_CALLBACK_URL`; the callback view dispatches on body shape, so one public URL serves both. |
+| `MPESA_RESULT_URL` | `https://api.printy.ke/api/payments/mpesa/callback/` | `ResultURL` of the Transaction Status Query — where Daraja delivers the receipt verdict. Defaults to `MPESA_CALLBACK_URL`. A dedicated route also exists at `/api/payments/mpesa/result/`. |
 
 Production safety behavior already enforced in code:
 - `SECRET_KEY` cannot stay as a placeholder when `DEBUG=False`
@@ -132,6 +133,9 @@ Production safety behavior already enforced in code:
   real — the startup check `printy.E013–E016` fails `manage.py check` on
   missing/placeholder values when `MPESA_ENV=production` (see
   `docs/DARAJA_PRODUCTION_CHECKLIST.md`). Sandbox uses `printy.W902` info only.
+  For `MPESA_SHORTCODE_TYPE=buygoodsonline` the check inverts: `printy.E015`
+  fails when a shortcode or passkey *is* set, because that app is authorised by
+  the OAuth bearer token alone.
 
 ## Frontend required for production
 

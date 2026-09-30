@@ -4,6 +4,7 @@ from decimal import Decimal
 from typing import Any, Optional
 
 from catalog.choices import PricingMode
+from common.money import money
 from inventory.models import Machine, Paper
 from pricing.choices import ColorMode, Sides
 from pricing.models import PrintingRate
@@ -126,7 +127,10 @@ def _waste_policy_split(quantity: int, copies_per_sheet: int) -> dict:
 
 
 def _format_money(value: Decimal) -> str:
-    return str(value.quantize(Decimal("0.01")))
+    # ROUND_HALF_UP via the shared helper. An implicit quantize() here would use
+    # banker's rounding, so exactly-half values would round differently
+    # depending on which module formatted them.
+    return str(money(value))
 
 
 def _humanize_finishing_explanation(line: dict, currency: str) -> str:

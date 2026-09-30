@@ -209,8 +209,15 @@ def _global_missing_fields(payload: dict[str, Any]) -> list[str]:
     return missing
 
 
-def _shop_queryset():
-    return Shop.objects.filter(is_active=True).select_related("owner").order_by("id")[:MAX_MANAGER_MATCHES]
+def _shop_queryset(payload=None):
+    qs = Shop.objects.filter(is_active=True).select_related("owner").order_by("id")
+    # Honour an explicit shop pin so a manager sourcing on behalf of one
+    # printer gets that printer only, instead of every shop in the platform.
+    if isinstance(payload, dict):
+        fixed_slug = str(payload.get("fixed_shop_slug") or "").strip()
+        if fixed_slug:
+            return qs.filter(slug=fixed_slug)
+    return qs[:MAX_MANAGER_MATCHES]
 
 
 def _machine_fits(machine: Machine, paper: Paper) -> bool:
@@ -527,7 +534,7 @@ def build_partner_production_matches(payload):
             },
         }
 
-    rows = [_match_shop(shop, payload) for shop in _shop_queryset()]
+    rows = [_match_shop(shop, payload) for shop in _shop_queryset(payload)]
     priced_rows = sorted(
         [row for row in rows if row.get("price_available")],
         key=lambda row: _decimal(row.get("production_cost")),

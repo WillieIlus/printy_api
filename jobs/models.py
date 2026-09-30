@@ -334,15 +334,31 @@ class ManagedJobPayout(TimeStampedModel):
     ]
 
     STATUS_PENDING = "pending"
+    STATUS_PROCESSING = "processing"
     STATUS_RELEASED = "released"
+    STATUS_FAILED = "failed"
     STATUS_ON_HOLD = "on_hold"
     STATUS_CANCELLED = "cancelled"
     STATUS_CHOICES = [
         (STATUS_PENDING, _("Pending")),
+        (STATUS_PROCESSING, _("Processing")),
         (STATUS_RELEASED, _("Released")),
+        (STATUS_FAILED, _("Failed")),
         (STATUS_ON_HOLD, _("On hold")),
         (STATUS_CANCELLED, _("Cancelled")),
     ]
+
+    DISBURSEMENT_MANUAL = "manual"
+    DISBURSEMENT_AUTOMATIC = "automatic"
+    DISBURSEMENT_MODE_CHOICES = [
+        (DISBURSEMENT_MANUAL, _("Manual")),
+        (DISBURSEMENT_AUTOMATIC, _("Automatic")),
+    ]
+    # Printy currently has no outbound money-movement provider, so every payout
+    # is manual: an admin moves the money out of band and then records the
+    # transfer reference here. "released" therefore attests that the money was
+    # sent by hand, not that an API transferred it.
+    AUTOMATIC_DISBURSEMENT_AVAILABLE = False
 
     managed_job = models.ForeignKey(
         ManagedJob,
@@ -371,6 +387,32 @@ class ManagedJobPayout(TimeStampedModel):
     currency = models.CharField(max_length=3, default="KES")
     status = models.CharField(max_length=16, choices=STATUS_CHOICES, default=STATUS_PENDING)
     release_reference = models.CharField(max_length=100, blank=True, default="")
+    disbursement_mode = models.CharField(
+        max_length=16,
+        choices=DISBURSEMENT_MODE_CHOICES,
+        default=DISBURSEMENT_MANUAL,
+        verbose_name=_("disbursement mode"),
+        help_text=_("How the money reached the recipient. 'manual' means an admin transferred it out of band."),
+    )
+    transfer_reference = models.CharField(
+        max_length=100,
+        blank=True,
+        default="",
+        verbose_name=_("transfer reference"),
+        help_text=_("Bank/M-Pesa confirmation reference for a manual transfer, or the provider reference if automatic."),
+    )
+    provider_response = models.JSONField(
+        default=dict,
+        blank=True,
+        verbose_name=_("provider response"),
+        help_text=_("Raw response from the payout provider, when one is involved."),
+    )
+    failure_reason = models.TextField(
+        blank=True,
+        default="",
+        verbose_name=_("failure reason"),
+    )
+    failed_at = models.DateTimeField(null=True, blank=True)
     released_at = models.DateTimeField(null=True, blank=True)
     released_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,

@@ -1,5 +1,6 @@
 from decimal import Decimal
 
+from common.money import whole_kes
 from django.test import TestCase
 from rest_framework.test import APIClient
 
@@ -754,7 +755,9 @@ class ProductionMatchingPhaseD1TestCase(TestCase):
         quote = Quote.objects.get(pk=response.json()["quote"]["id"])
         split = quote.financial_split
         production = split.production_cost
-        expected_markup = (production * Decimal("99") / Decimal("100")).quantize(Decimal("0.01"))
+        # Rounded once to whole KES at the split, so the expected markup uses
+        # the same rule rather than an independent 2dp quantize.
+        expected_markup = whole_kes(production * Decimal("99") / Decimal("100"))
         self.assertEqual(split.manager_markup, expected_markup, f"{split.production_cost} / {split.manager_markup}")
 
     def test_assigned_prepare_still_rejects_below_five_percent_markup(self):
@@ -763,7 +766,12 @@ class ProductionMatchingPhaseD1TestCase(TestCase):
         self.assertEqual(response.status_code, 400)
         field_errors = response.json()["field_errors"]
         self.assertIn("markup_pct", field_errors)
-        self.assertEqual(field_errors["markup_pct"][0], "Markup cannot be below 5%.")
+        # The message must name the accepted KES band, not just a percentage:
+        # a manager reads this while holding a currency amount, and the old
+        # "Markup cannot be below 5%." said nothing about the KES figure.
+        message = field_errors["markup_pct"][0]
+        self.assertIn("KES", message)
+        self.assertIn("5%", message)
         self.assertEqual(self.quote_request.quotes.count(), 0)
 
     def test_assigned_prepare_requires_selected_shop(self):

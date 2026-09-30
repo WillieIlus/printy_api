@@ -18,6 +18,7 @@ from django.core.exceptions import ValidationError
 from django.db import transaction
 from django.utils import timezone
 
+from common.money import money, require_whole_kes, whole_kes
 from .models import MpesaAccessToken, MpesaCallbackLog, MpesaPayment, MpesaPaymentStatus
 from .signals import mpesa_payment_confirmed, mpesa_payment_failed
 
@@ -63,6 +64,51 @@ def _is_placeholder(value: str) -> bool:
     }
 
 
+# Daraja product (short code type) -> the TransactionType it accepts. A Daraja
+# app is provisioned for ONE product, so sending the wrong TransactionType is
+# rejected by Safaricom as "Invalid TransactionType".
+DARAAJA_PRODUCTS = {
+    "paybill": "CustomerPayBillOnline",
+    "till": "CustomerTillOnline",
+    "buygoodsonline": "CustomerBuyGoodsOnline",
+}
+# Spellings people put in .env, mapped to the canonical product key. Hyphens and
+# underscores are normalised to spaces before lookup, so they are spelled out.
+DARAAJA_PRODUCT_ALIASES = {
+    "paybill": "paybill",
+    "pay bill": "paybill",
+    "customerpaybillonline": "paybill",
+    "till": "till",
+    "agent": "till",
+    "buy goods online": "buygoodsonline",
+    "buygoods": "buygoodsonline",
+    "buygoodsonline": "buygoodsonline",
+    "customerbuygoodsonline": "buygoodsonline",
+}
+# BuyGoodsOnline is authenticated by the OAuth bearer token alone: the app has
+# no short code and no pass key, so those fields must not be sent.
+DARAAJA_PRODUCTS_WITHOUT_CREDENTIALS = {"buygoodsonline"}
+
+
+def mpesa_product() -> str:
+    """Canonical Daraja product key from MPESA_SHORTCODE_TYPE (default paybill).
+
+    Raises on an unrecognised value rather than silently falling back to
+    paybill: a typo here would send a paybill request to a BuyGoodsOnline app
+    and Daraja would answer "Wrong credentials" with no obvious cause.
+    """
+    raw = _setting("MPESA_SHORTCODE_TYPE", "paybill").lower().replace("_", " ")
+    raw = raw.replace("-", " ")
+    raw = " ".join(raw.split())
+    product = DARAAJA_PRODUCT_ALIASES.get(raw)
+    if not product:
+        raise MpesaConfigError(
+            f"MPESA_SHORTCODE_TYPE={raw!r} is not a Daraja product. "
+            f"Use one of: {', '.join(sorted(DARAAJA_PRODUCTS))}."
+        )
+    return product
+
+
 def mpesa_base_url() -> str:
     override = _setting("MPESA_BASE_URL")
     if override:
@@ -79,23 +125,43 @@ def validate_production_config() -> None:
     boot; this is the safety net for runtime loads.
     """
     env = _setting("MPESA_ENV", "sandbox").lower()
+    product = mpesa_product()
     suspicious = [
         name
-        for name in ("MPESA_CONSUMER_KEY", "MPESA_CONSUMER_SECRET", "MPESA_PASSKEY")
+        for name in ("MPESA_CONSUMER_KEY", "MPESA_CONSUMER_SECRET")
         if _is_placeholder(_setting(name))
     ]
+    if product in DARAAJA_PRODUCTS_WITHOUT_CREDENTIALS:
+        # BuyGoodsOnline is authorised by the bearer token alone.
+        suspicious.extend(
+            name
+            for name in ("MPESA_PASSKEY", "MPESA_SHORTCODE")
+            if not _is_placeholder(_setting(name))
+        )
+    else:
+        suspicious.extend(
+            name
+            for name in ("MPESA_PASSKEY", "MPESA_SHORTCODE")
+            if _is_placeholder(_setting(name))
+        )
     if suspicious:
+        if product in DARAAJA_PRODUCTS_WITHOUT_CREDENTIALS:
+            raise MpesaConfigError(
+                f"MPESA_SHORTCODE_TYPE={product} is authenticated by the OAuth token alone: "
+                f"set {', '.join(suspicious)} to an empty value."
+            )
         raise MpesaConfigError(
             f"Missing or placeholder Daraja settings: {', '.join(suspicious)}"
         )
 
-    shortcode = _setting("MPESA_SHORTCODE")
-    digits = "".join(ch for ch in shortcode if ch.isdigit())
-    if not shortcode or _is_placeholder(shortcode) or not (5 <= len(digits) <= 11):
-        raise MpesaConfigError(
-            "MPESA_SHORTCODE is missing, a placeholder, or not a plausible "
-            "paybill/till number."
-        )
+    if product not in DARAAJA_PRODUCTS_WITHOUT_CREDENTIALS:
+        shortcode = _setting("MPESA_SHORTCODE")
+        digits = "".join(ch for ch in shortcode if ch.isdigit())
+        if not shortcode or _is_placeholder(shortcode) or not (5 <= len(digits) <= 11):
+            raise MpesaConfigError(
+                "MPESA_SHORTCODE is missing, a placeholder, or not a plausible "
+                "paybill/till number."
+            )
 
     callback = _setting("MPESA_CALLBACK_URL")
     if not callback:
@@ -189,8 +255,30 @@ def get_access_token(force_refresh: bool = False) -> str:
 # ─────────────────────────────────────────────────────────────
 
 def _stk_password(shortcode: str, passkey: str, timestamp: str) -> str:
-    """Daraja's Lipa na M-Pesa Online password = shortcode + passkey + timestamp."""
+    """Daraja's Lipa na M-Pesa Online password = shortcode + passkey + timestamp.
+
+    BuyGoodsOnline has neither, so its Password is sent empty.
+    """
+    if not shortcode and not passkey:
+        return ""
     return base64.b64encode(f"{shortcode}{passkey}{timestamp}".encode()).decode()
+
+
+def _credential_fields(product: str, timestamp: str) -> dict[str, str]:
+    """BusinessShortCode / Password / PartyB for the app's Daraja product.
+
+    BuyGoodsOnline must send all three empty; a paybill/till app must send its
+    own short code and a shortcode+passkey+timestamp password.
+    """
+    if product in DARAAJA_PRODUCTS_WITHOUT_CREDENTIALS:
+        return {"BusinessShortCode": "", "Password": "", "PartyB": ""}
+    shortcode = _setting("MPESA_SHORTCODE")
+    passkey = _setting("MPESA_PASSKEY")
+    return {
+        "BusinessShortCode": shortcode,
+        "Password": _stk_password(shortcode, passkey, timestamp),
+        "PartyB": shortcode,
+    }
 
 
 def _timestamp(now=None) -> str:
@@ -206,19 +294,18 @@ def initiate_stk_push(payment: MpesaPayment, *, timestamp: str | None = None) ->
     """
     validate_production_config()
 
-    shortcode = _setting("MPESA_SHORTCODE")
-    passkey = _setting("MPESA_PASSKEY")
+    product = mpesa_product()
     callback_url = _setting("MPESA_CALLBACK_URL")
     stamp = timestamp or _timestamp()
 
     payload = {
-        "BusinessShortCode": shortcode,
-        "Password": _stk_password(shortcode, passkey, stamp),
+        **_credential_fields(product, stamp),
         "Timestamp": stamp,
-        "TransactionType": "CustomerPayBillOnline",
-        "Amount": int(payment.amount),  # Daraja expects whole shillings
+        "TransactionType": DARAAJA_PRODUCTS[product],
+        # Daraja only accepts whole shillings. The amount is rounded once
+        # upstream, so this asserts rather than truncates.
+        "Amount": int(require_whole_kes(payment.amount, "STK amount")),
         "PartyA": payment.phone_number,
-        "PartyB": shortcode,
         "PhoneNumber": payment.phone_number,
         "CallBackURL": callback_url,
         "AccountReference": (payment.account_reference or "PRINTY")[:12],
@@ -278,16 +365,14 @@ def query_stk_status(payment: MpesaPayment) -> MpesaPayment:
         return payment
 
     validate_production_config()
-    shortcode = _setting("MPESA_SHORTCODE")
-    passkey = _setting("MPESA_PASSKEY")
+    product = mpesa_product()
     stamp = _timestamp()
 
     try:
         response = requests.post(
             f"{mpesa_base_url()}/mpesa/stkpushquery/v1/query",
             json={
-                "BusinessShortCode": shortcode,
-                "Password": _stk_password(shortcode, passkey, stamp),
+                **_credential_fields(product, stamp),
                 "Timestamp": stamp,
                 "CheckoutRequestID": payment.checkout_request_id,
             },
@@ -324,6 +409,90 @@ def query_stk_status(payment: MpesaPayment) -> MpesaPayment:
 
 
 # ─────────────────────────────────────────────────────────────
+# Transaction Status Query
+# ─────────────────────────────────────────────────────────────
+
+def _result_urls() -> tuple[str, str]:
+    """ResultURL / QueueTimeOutURL for the status-query notification.
+
+    Daraja ignores these fields only if they are valid absolute URLs; a blank
+    one is rejected outright, so fall back to the canonical callback rather
+    than sending an empty string.
+    """
+    fallback = _setting("MPESA_CALLBACK_URL")
+    return (
+        _setting("MPESA_RESULT_URL") or fallback,
+        _setting("MPESA_TIMEOUT_URL") or fallback,
+    )
+
+
+def query_transaction_status(
+    *,
+    transaction_id: str,
+    party_a: str,
+    remarks: str = "Transaction status check",
+) -> dict:
+    """Ask Daraja about a settled transaction by its M-Pesa receipt.
+
+    The STK query answers "did the customer finish the prompt?". This one
+    answers "did this receipt settle, for how much?" — the only way to settle
+    the painful case where money moved but the STK callback never landed.
+
+    Daraja answers this endpoint *asynchronously*: a 0 ResponseCode means
+    "notification sent", and the actual verdict is POSTed to ``ResultURL`` in a
+    ``Result``-shaped body handled by :func:`process_transaction_status_result`.
+    """
+    validate_production_config()
+
+    if mpesa_product() in DARAAJA_PRODUCTS_WITHOUT_CREDENTIALS:
+        # This endpoint is authenticated with shortcode + passkey, which a
+        # BuyGoodsOnline app does not have.
+        raise MpesaConfigError(
+            "Transaction Status Query needs a shortcode and pass key, so it is "
+            "unavailable for MPESA_SHORTCODE_TYPE=buygoodsonline."
+        )
+
+    receipt = str(transaction_id or "").strip()
+    if not receipt:
+        raise MpesaError("An M-Pesa receipt number is required to check a transaction.")
+    phone = normalize_msisdn(party_a)
+
+    product = mpesa_product()
+    stamp = _timestamp()
+    result_url, timeout_url = _result_urls()
+
+    try:
+        response = requests.post(
+            f"{mpesa_base_url()}/mpesa/transactionstatus/v1/query",
+            json={
+                **_credential_fields(product, stamp),
+                "Timestamp": stamp,
+                "TransactionType": "TransactionStatusQuery",
+                "TransactionID": receipt,
+                "PartyA": phone,
+                "IdentifierType": "4",  # 4 = MSISDN
+                "ResultURL": result_url,
+                "QueueTimeOutURL": timeout_url,
+                "Remarks": remarks,
+            },
+            headers={"Authorization": f"Bearer {get_access_token()}"},
+            timeout=_request_timeout(),
+        )
+    except requests.RequestException as exc:
+        logger.error("Daraja status query network error receipt=%s error=%s", receipt, exc)
+        raise MpesaError("Could not reach M-Pesa to check this transaction.") from exc
+
+    data = _safe_json(response)
+    if response.status_code != 200:
+        message = data.get("errorMessage") or data.get("ResponseDescription") or "M-Pesa rejected the status query."
+        logger.warning("Daraja status query rejected receipt=%s status=%s msg=%s", receipt, response.status_code, message)
+        raise MpesaError(str(message))
+
+    logger.info("Daraja status query accepted receipt=%s response=%s", receipt, data.get("ResponseDescription"))
+    return data
+
+
+# ─────────────────────────────────────────────────────────────
 # Callback processing
 # ─────────────────────────────────────────────────────────────
 
@@ -355,7 +524,7 @@ def _decimal(value) -> Decimal | None:
     if value in (None, ""):
         return None
     try:
-        return Decimal(str(value))
+        return money(value)
     except (InvalidOperation, TypeError, ValueError):
         return None
 
@@ -459,6 +628,94 @@ def process_callback(payload: dict) -> MpesaCallbackLog:
         return entry
 
 
+def process_transaction_status_result(payload: dict) -> MpesaCallbackLog:
+    """Apply the ResultURL notification from a Transaction Status Query.
+
+    Daraja POSTs this asynchronously with the verdict at the top level under
+    ``Result`` — a different shape from the STK callback's
+    ``Body.stkCallback``. It is the only Daraja response that both proves money
+    moved and reports the amount for a receipt we never saw a callback for, so
+    it is allowed to settle a payment.
+    """
+    result = payload.get("Result") if isinstance(payload, dict) else None
+    if not isinstance(result, dict):
+        result = {}
+
+    receipt = str(result.get("TransactionID") or "")
+    result_code = str(result.get("ResultCode") if result.get("ResultCode") is not None else "")
+    result_desc = str(result.get("ResultDesc") or "")
+
+    logger.info(
+        "Received M-Pesa status-query result transaction_id=%s result_code=%s",
+        receipt, result_code,
+    )
+
+    entry = MpesaCallbackLog.objects.create(
+        checkout_request_id="",
+        merchant_request_id=str(result.get("MerchantRequestID") or ""),
+        result_code=result_code,
+        result_desc=result_desc,
+        payload=payload,
+    )
+
+    if not receipt:
+        logger.warning("M-Pesa status-query result without TransactionID — logged only.")
+        return entry
+
+    with transaction.atomic():
+        payment = (
+            MpesaPayment.objects.select_for_update()
+            .filter(mpesa_receipt_number=receipt)
+            .order_by("id")
+            .first()
+        )
+        if payment is None:
+            # A receipt we have never seen: someone else's transaction, or one
+            # whose STK callback was lost before we stored the receipt.
+            logger.warning("M-Pesa status-query result for unknown receipt=%s", receipt)
+            return entry
+
+        if payment.is_terminal:
+            entry.duplicate = True
+            entry.save(update_fields=["duplicate"])
+            logger.warning(
+                "Duplicate M-Pesa status-query result ignored receipt=%s status=%s", receipt, payment.status
+            )
+            return entry
+
+        if result_code == RESULT_CODE_SUCCESS:
+            amount = _decimal(result.get("TransactionAmount"))
+            if amount is None:
+                payment.mark_needs_review("Status-query success without a transaction amount.")
+                entry.processed = True
+                entry.save(update_fields=["processed"])
+                return entry
+            changed = payment.mark_confirmed(
+                receipt_number=receipt,
+                paid_amount=amount,
+                transaction_date=_parse_transaction_date(result.get("TransactionDate")),
+                result_code=result_code,
+                result_desc=result_desc,
+                raw=payload,
+            )
+            entry.processed = changed
+            entry.save(update_fields=["processed"])
+            if changed and payment.is_paid:
+                logger.info("M-Pesa payment confirmed by status query payment_id=%s receipt=%s amount=%s",
+                            payment.id, receipt, amount)
+                transaction.on_commit(lambda p=payment: mpesa_payment_confirmed.send(sender=MpesaPayment, payment=p))
+            return entry
+
+        # A failed status query means the *transaction* failed. It must not
+        # overwrite a successful STK callback, hence the is_terminal guard above.
+        changed = payment.mark_failed(result_code=result_code, result_desc=result_desc, raw=payload)
+        entry.processed = changed
+        entry.save(update_fields=["processed"])
+        if changed:
+            transaction.on_commit(lambda p=payment: mpesa_payment_failed.send(sender=MpesaPayment, payment=p))
+        return entry
+
+
 # ─────────────────────────────────────────────────────────────
 # Creation helper — the only thing views should call
 # ─────────────────────────────────────────────────────────────
@@ -472,10 +729,19 @@ def create_payment(
     account_reference: str = "",
     description: str = "",
 ) -> MpesaPayment:
-    """Create an `initiated` payment row with a normalized MSISDN."""
+    """Create an `initiated` payment row with a normalized MSISDN.
+
+    This entry point can be handed a client-supplied amount, so it is the
+    rounding point for that path: the value is rounded to whole KES here
+    (ROUND_HALF_UP) rather than being truncated later at the Daraja call site.
+    Quotes that reach the canonical payment flow are already whole.
+    """
     normalized = normalize_msisdn(phone_number)
     value = _decimal(amount)
     if value is None or value < Decimal("1.00"):
+        raise ValidationError({"amount": "Amount must be at least KES 1.00."})
+    value = whole_kes(value)
+    if value < Decimal("1"):
         raise ValidationError({"amount": "Amount must be at least KES 1.00."})
 
     return MpesaPayment.objects.create(

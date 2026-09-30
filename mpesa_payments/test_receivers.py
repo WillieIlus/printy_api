@@ -23,6 +23,7 @@ DARAJA_SETTINGS = dict(
     MPESA_ENV="sandbox",
     MPESA_CONSUMER_KEY="test-key",
     MPESA_CONSUMER_SECRET="test-secret",
+    MPESA_SHORTCODE_TYPE="paybill",
     MPESA_SHORTCODE="174379",
     MPESA_PASSKEY="test-passkey",
     MPESA_CALLBACK_URL="https://example.com/api/payments/mpesa/callback/",

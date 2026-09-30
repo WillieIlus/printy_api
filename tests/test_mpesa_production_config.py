@@ -146,6 +146,7 @@ class TestRuntimeValidateProductionConfig(TestCase):
             MPESA_ENV=env,
             MPESA_CONSUMER_KEY=user,
             MPESA_CONSUMER_SECRET=secret,
+            MPESA_SHORTCODE_TYPE="paybill",
             MPESA_SHORTCODE=shortcode,
             MPESA_PASSKEY=passkey,
             MPESA_CALLBACK_URL=callback,

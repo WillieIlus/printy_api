@@ -127,6 +127,98 @@ class CanonicalPaymentFlowTestCase(TestCase):
         self.assertEqual(payment.quote, quote)
         self.assertIsNone(payment.managed_job)
 
+    def test_cents_priced_quote_charges_and_reconciles_whole_kes_end_to_end(self):
+        """Displayed price == charged price == confirmed price, for a cents quote.
+
+        The quote is priced at 2116.66 with 75% markup, so every amount in the
+        chain is computed with cents. Before the fix the STK site truncated the
+        charge and the callback guard then rejected its own charge.
+        """
+        from common.money import is_whole_kes
+
+        option = ProductionOption.objects.create(
+            quote_request=self.quote_request,
+            shop=self.shop,
+            production_cost=Decimal("2116.66"),
+            created_by=self.broker,
+            status=ProductionOption.SELECTED,
+        )
+        cents_quote = Quote.objects.create(
+            quote_request=self.quote_request,
+            shop=self.shop,
+            production_option=option,
+            created_by=self.broker,
+            status=QuoteOfferStatus.SENT,
+            total=Decimal("3704.99"),
+            sent_at=timezone.now(),
+            expires_at=timezone.now() + timedelta(days=7),
+        )
+        cents_split = create_quote_financial_split(
+            quote=cents_quote,
+            production_cost=Decimal("2116.66"),
+            manager_markup=Decimal("2116.66") * Decimal("0.75"),
+            production_option=option,
+            policy=self.policy,
+        )
+
+        # (a) client_total and every split component is a whole KES integer.
+        cents_split.refresh_from_db()
+        money_fields = (
+            "production_cost",
+            "manager_markup",
+            "production_fee_component",
+            "markup_fee_component",
+            "printy_fee",
+            "shop_payout",
+            "manager_payout",
+            "broker_payout",
+            "broker_client_price",
+            "client_total",
+        )
+        for field in money_fields:
+            value = getattr(cents_split, field)
+            # The value is a whole shilling. (Its DecimalField is decimal_places=2,
+            # so a DB round-trip renders it "2117.00" — numerically whole, which is
+            # what the charge and the guard compare.)
+            self.assertTrue(
+                is_whole_kes(value), f"{field} not whole KES: {value!r}"
+            )
+        self.assertEqual(cents_split.client_total, Decimal("3704"))
+        # (c) the components reconcile exactly.
+        self.assertEqual(
+            cents_split.shop_payout + cents_split.manager_payout + cents_split.printy_fee,
+            cents_split.client_total,
+        )
+
+        _quote, payment = accept_quote_for_payment(quote=cents_quote, accepted_by=self.client_user)
+        payment.refresh_from_db()
+
+        # (b) the amount handed to Daraja is the exact integer client_total.
+        self.assertEqual(payment.amount, cents_split.client_total)
+        self.assertTrue(is_whole_kes(payment.amount))
+        with patch("payments.services.MpesaDarajaClient") as client:
+            client.return_value.initiate_stk_push.return_value = {
+                "CheckoutRequestID": "ws_CO_CENTS",
+                "MerchantRequestID": "mr_CENTS",
+                "ResponseCode": "0",
+                "ResponseDescription": "Success",
+            }
+            stk = initiate_stk_push(payment=payment, phone_number="+254700000000")
+            charged = client.return_value.initiate_stk_push.call_args[1]["amount"]
+        self.assertEqual(Decimal(charged), cents_split.client_total)
+        self.assertEqual(int(charged), int(cents_split.client_total))
+
+        # (d) the callback guard accepts what Daraja confirms.
+        handle_stk_callback(
+            callback_payload=self._success_callback(
+                stk, amount=str(cents_split.client_total), receipt="QGCENTS1"
+            )
+        )
+        payment.refresh_from_db()
+        self.assertEqual(payment.status, Payment.STATUS_PAID)
+        self.assertEqual(payment.received_amount, cents_split.client_total)
+        self.assertIsNotNone(payment.managed_job)
+
     def test_accepting_quote_creates_split_from_selected_production_option(self):
         other_quote = Quote.objects.create(
             quote_request=self.quote_request,
@@ -656,7 +748,9 @@ class CanonicalPaymentFlowTestCase(TestCase):
         forbidden = {"shop_payout", "broker_payout", "printy_fee", "production_cost", "raw_callback"}
 
         self.assertTrue(forbidden.isdisjoint(payload.keys()))
-        self.assertEqual(payload["amount"], str(self.split.client_total))
+        # The stored split is a whole-KES integer; the API still renders money
+        # at 2dp so the field keeps its currency shape.
+        self.assertEqual(payload["amount"], f"{self.split.client_total:.2f}")
 
     def _paid_dispatched_managed_job(self):
         self.quote_request.assigned_manager = self.broker
@@ -678,7 +772,7 @@ class CanonicalPaymentFlowTestCase(TestCase):
 
         self.assertEqual(response.status_code, 200)
         payload = response.json()
-        self.assertEqual(payload["expected_manager_payout"], str(self.split.broker_payout))
+        self.assertEqual(payload["expected_manager_payout"], f"{self.split.broker_payout:.2f}")
         self.assertEqual(payload["payout_status"], "pending_completion")
         self.assertFalse(payload["disbursed"])
         self.assertFalse(payload["payout_disbursed"])
@@ -686,7 +780,7 @@ class CanonicalPaymentFlowTestCase(TestCase):
         self.assertNotIn("released", payload["message"].lower())
         self.assertNotIn("shop_payout", payload)
         self.assertNotIn("expected_production_payout", payload)
-        self.assertEqual(payload["printy_fee"], str(self.split.printy_fee))
+        self.assertEqual(payload["printy_fee"], f"{self.split.printy_fee:.2f}")
         self.assertNotIn("production_cost", payload)
 
     def test_shop_settlement_shows_expected_production_payout_only(self):

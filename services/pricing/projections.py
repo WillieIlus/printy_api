@@ -3,12 +3,14 @@ from __future__ import annotations
 from typing import Any
 from decimal import Decimal
 
+from common.money import money
+
 
 def _money(value: Any) -> str | None:
     if value is None:
         return None
     try:
-        return str(Decimal(str(value)).quantize(Decimal("0.01")))
+        return str(money(value))
     except (ValueError, TypeError, ArithmeticError):
         return None
 

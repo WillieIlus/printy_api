@@ -311,12 +311,13 @@ class PublicCalculatorMarketRangeTestCase(TestCase):
         self.assertEqual(payload["display_mode"], "range_with_median")
         self.assertEqual(payload["market_range"]["display_mode"], "range_with_median")
         # 5 good sheets (100 @ 21-up) + 2 fixed + 1 variable (10%) = 8 billable
-        # sheets per shop, marked up 1.75: 274.29→3840.06, 308.57→4319.98,
-        # 365.71→5119.94. The market range is built from waste-inclusive prices.
-        self.assertEqual(payload["market_range"]["min"], "3840.06")
-        self.assertEqual(payload["market_range"]["max"], "5119.94")
-        self.assertEqual(payload["market_range"]["median"], "4319.98")
-        self.assertEqual(payload["estimate_median"], "4319.98")
+        # sheets per shop, marked up 1.75: 274.29→3840, 308.57→4320,
+        # 365.71→5120. The market range is built from waste-inclusive prices,
+        # rounded once to whole KES.
+        self.assertEqual(payload["market_range"]["min"], "3840.00")
+        self.assertEqual(payload["market_range"]["max"], "5120.00")
+        self.assertEqual(payload["market_range"]["median"], "4320.00")
+        self.assertEqual(payload["estimate_median"], "4320.00")
         self.assertNotEqual(payload["market_range"]["min"], payload["market_range"]["max"])
 
         payload_text = str(payload)

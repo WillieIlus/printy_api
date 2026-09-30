@@ -84,14 +84,19 @@ def build_partner_quote_preview(*, pricing_snapshot: dict[str, Any], shop: Shop,
         if canonical_pricing
         else _money(broker_projection.get("production_estimate"))
     )
-    broker_client_price = (
-        _money(canonical_pricing["final_client_price"])
-        if canonical_pricing
-        else production_estimate + partner_markup
-    )
-    minimum_price = broker_client_price if canonical_pricing else production_estimate
-    # TODO(batch-6): fallback preview-only range guidance, not authoritative split math.
-    suggested_max = broker_client_price if canonical_pricing else production_estimate + max(partner_markup, production_estimate * Decimal("0.35"))
+    # The manager's markup must always be applied on top of the production cost.
+    # Taking the canonical final_client_price here discarded partner_markup
+    # entirely whenever canonical pricing was available, so the quoted client
+    # price silently ignored the markup the manager entered.
+    broker_client_price = production_estimate + _money(partner_markup)
+    if canonical_pricing:
+        minimum_price = production_estimate
+        suggested_max = broker_client_price
+    else:
+        minimum_price = production_estimate
+        suggested_max = production_estimate + max(
+            partner_markup, production_estimate * Decimal("0.35")
+        )
     split = _financial_split_payload(production_base_price=production_estimate, broker_client_price=broker_client_price)
     broker_projection.update(
         {
@@ -105,6 +110,13 @@ def build_partner_quote_preview(*, pricing_snapshot: dict[str, Any], shop: Shop,
             "broker_client_price": str(split["broker_client_price"]),
             "client_price": str(split["client_total"]),
             "broker_payout": str(split["broker_payout"]),
+            # The printer-side uplift and the printer's net payout were computed
+            # here but never projected, so the visible figures did not sum to the
+            # client price. Publish them so the four-way split reconciles in the
+            # preview itself.
+            "printer_side_fee": str(split["production_fee_component"]),
+            "production_fee_component": str(split["production_fee_component"]),
+            "printer_payout": str(split["shop_payout"]),
             "quantity_pricing": _quantity_pricing_snapshot(canonical_pricing) if canonical_pricing else None,
             "markup_warning": build_partner_markup_warning(
                 base_price=production_estimate,

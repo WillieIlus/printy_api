@@ -15,8 +15,8 @@ exit with these errors so a live server can never silently start without M-Pesa:
 | `printy.E012` | `MPESA_CALLBACK_URL` points at localhost/127.0.0.1 |
 | `printy.E013` | `MPESA_CONSUMER_KEY` missing or `replace-with-*` placeholder |
 | `printy.E014` | `MPESA_CONSUMER_SECRET` missing or placeholder |
-| `printy.E015` | `MPESA_SHORTCODE` missing, placeholder, or not 5–11 digits |
-| `printy.E016` | `MPESA_PASSKEY` missing or placeholder |
+| `printy.E015` | `MPESA_SHORTCODE` missing, placeholder, or not 5–11 digits. **Inverted** for `MPESA_SHORTCODE_TYPE=buygoodsonline`: that product has no short code, so a *set* value is the error. |
+| `printy.E016` | `MPESA_PASSKEY` missing or placeholder. **Inverted** for `MPESA_SHORTCODE_TYPE=buygoodsonline`. |
 
 The runtime guard `mpesa_payments.services.validate_production_config()` applies
 the same checks again before any HTTP call to Daraja (belt and braces).
@@ -41,9 +41,19 @@ python manage.py check            # must exit 0 — no printy.E01x errors
 ## Portal checks
 
 - The Daraja app is in the production environment, not sandbox.
+- `MPESA_SHORTCODE_TYPE` names the **one product the app is provisioned for** —
+  `paybill`, `till` or `buygoodsonline`. A Daraja app is provisioned for a single
+  product and the wrong `TransactionType` is rejected as `Invalid TransactionType`.
 - `MPESA_CONSUMER_KEY`, `MPESA_CONSUMER_SECRET`, `MPESA_SHORTCODE`, and `MPESA_PASSKEY` all belong to the same production app.
 - The shortcode/passkey pair matches the same production paybill or till configured in Daraja.
 - The registered callback URL matches the exact deployed backend route above.
+- For `buygoodsonline`, `MPESA_SHORTCODE` and `MPESA_PASSKEY` are empty — that
+  product is authorised by the OAuth bearer token alone. Transaction Status Query
+  is unavailable for it (it is authenticated with shortcode + pass key).
+- `MPESA_RESULT_URL` (and `MPESA_TIMEOUT_URL`) point at a publicly reachable
+  route. They default to `MPESA_CALLBACK_URL`, and the callback view dispatches
+  on body shape, so one public URL serves STK callbacks and status-query results
+  alike. A dedicated route is also available at `/api/payments/mpesa/result/`.
 
 ## Reachability checks
 
@@ -135,3 +145,28 @@ After amount mismatch:
 Never:
 - fake paid status from STK initiation alone
 - treat missing callback as success
+
+## Recovering a payment whose callback was lost
+
+Daraja occasionally drops an STK callback. Two tools, in order:
+
+```bash
+# 1. Did the customer finish the prompt? (needs checkout_request_id)
+python manage.py mpesa_reconcile
+
+# 2. The customer says they paid and has a receipt. Ask Safaricom directly.
+python manage.py mpesa_verify_receipt --receipt QG1234XY --phone 0712345678
+```
+
+`mpesa_reconcile` can only ever move a payment **out of** `pending`, and on a
+successful query result it parks the payment in `needs_review` rather than
+`paid` — a query proves the prompt was completed, not that our expected amount
+arrived.
+
+`mpesa_verify_receipt` is read-only and uses the Transaction Status Query
+(`/mpesa/transactionstatus/v1/query`). Daraja answers that endpoint
+asynchronously: a `0` ResponseCode means *notification sent*, and the actual
+verdict is POSTed to `MPESA_RESULT_URL`. That notification is the only Daraja
+response that both proves money moved and reports the amount, so it is allowed
+to settle a payment — it reuses `mark_confirmed`, including the amount-mismatch
+guard, and it never overwrites a payment that is already terminal.

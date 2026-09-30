@@ -8,22 +8,32 @@ from django.core.exceptions import ValidationError
 from django.db import transaction
 from django.utils import timezone
 
+from common.money import MONEY_QUANT, RATE_QUANT, money, rate, to_decimal, whole_kes
 from pricing.models import PlatformFeePolicy
 
 
-MONEY_QUANT = Decimal("0.01")
-RATE_QUANT = Decimal("0.0001")
 MIN_MARKUP_MULTIPLE = Decimal("1.05")
 TIER_A_MAX_PRODUCTION_COST = Decimal("1000.00")
 TIER_B_MAX_PRODUCTION_COST = Decimal("10000.00")
 
-
-def money(value: Any) -> Decimal:
-    return Decimal(str(value)).quantize(MONEY_QUANT, rounding=ROUND_HALF_UP)
-
-
-def rate(value: Any) -> Decimal:
-    return Decimal(str(value)).quantize(RATE_QUANT, rounding=ROUND_HALF_UP)
+# Re-exported for the many modules that already import `money` from here. The
+# definitions live in common.money so there is exactly one rounding rule.
+__all__ = [
+    "MONEY_QUANT",
+    "RATE_QUANT",
+    "MIN_MARKUP_MULTIPLE",
+    "TIER_A_MAX_PRODUCTION_COST",
+    "TIER_B_MAX_PRODUCTION_COST",
+    "money",
+    "rate",
+    "whole_kes",
+    "QuoteFinancialResult",
+    "get_active_platform_fee_policy",
+    "calculate_quote_financials",
+    "calculate_financial_split",
+    "create_quote_financial_split",
+    "ensure_quote_financial_split",
+]
 
 
 @dataclass(frozen=True)
@@ -45,7 +55,8 @@ class QuoteFinancialResult:
 
     @property
     def broker_client_price(self) -> Decimal:
-        return money(self.production_cost + self.manager_markup)
+        # Both inputs are whole KES, so this sum is exact.
+        return self.production_cost + self.manager_markup
 
     @property
     def gross_margin(self) -> Decimal:
@@ -121,13 +132,40 @@ def _policy_value(policy: PlatformFeePolicy, field: str, default: str) -> Decima
 
 
 def calculate_quote_financials(*, production_cost, manager_markup, policy: PlatformFeePolicy) -> QuoteFinancialResult:
-    production_cost = money(production_cost)
-    manager_markup = money(manager_markup)
+    """The single rounding point for the client-facing money chain.
 
+    M-Pesa STK Push only accepts whole shillings, so every amount that reaches
+    the client — production cost, markup, shop payout, manager payout, the
+    Printy fee and the client total — is rounded to whole KES here, once, with
+    ROUND_HALF_UP, and stored as that integer. Downstream code (quote display,
+    preview payloads, STK, the callback mismatch guard) then propagates the
+    same integer without rounding again.
+
+    ``printy_fee`` is computed as the residual rather than independently
+    rounded, so ``shop_payout + manager_payout + printy_fee`` always equals
+    ``client_total`` exactly. Rounding the three independently is the classic
+    rounding-split bug where the parts are off by a shilling.
+    """
+    production_cost = to_decimal(production_cost)
+    manager_markup = to_decimal(manager_markup)
+    raw_production_cost = production_cost
+    raw_manager_markup = manager_markup
+
+    # Validate the raw inputs BEFORE rounding. A negative that rounds to zero
+    # (e.g. -0.01) would otherwise slip past the guard below and become a
+    # legitimate-looking 0.
     if production_cost <= 0:
         raise ValidationError("Production cost must be greater than zero.")
     if manager_markup < 0:
         raise ValidationError("Manager markup cannot be negative.")
+
+    production_cost = whole_kes(production_cost)
+    manager_markup = whole_kes(manager_markup)
+
+    # A cost under one shilling rounds to 0, which M-Pesa cannot charge and
+    # which would make the markup multiple undefined.
+    if production_cost <= 0:
+        raise ValidationError("Production cost must be at least KES 1.")
 
     if production_cost < TIER_A_MAX_PRODUCTION_COST:
         pricing_tier = "tier_a"
@@ -145,16 +183,22 @@ def calculate_quote_financials(*, production_cost, manager_markup, policy: Platf
         manager_commission_cap_rate = Decimal("0.35")
         max_client_price_multiple = Decimal("2.00")
 
-    broker_client_price = money(production_cost + manager_markup)
-    max_allowed_client_price = money(production_cost * max_client_price_multiple)
-    if broker_client_price > max_allowed_client_price:
+    # Both inputs are whole KES now, so the sum is exact and needs no rounding.
+    broker_client_price = production_cost + manager_markup
+    max_allowed_client_price = whole_kes(production_cost * max_client_price_multiple)
+    # Guard the cap on the raw input *and* on the rounded price, so rounding can
+    # never let a quote through that policy would have rejected.
+    if broker_client_price > max_allowed_client_price or (
+        raw_production_cost + raw_manager_markup
+    ) > (raw_production_cost * max_client_price_multiple):
         raise ValidationError("Manager markup exceeds the policy cap.")
 
-    gross_margin = money(broker_client_price - production_cost)
-    shop_payout = money(production_cost * shop_floor_multiple)
-    production_fee_component = money(shop_payout - production_cost)
-    manager_payout = money(min(manager_markup, money(gross_margin * manager_commission_cap_rate)))
-    printy_fee = money(gross_margin - production_fee_component - manager_payout)
+    gross_margin = whole_kes(broker_client_price - production_cost)
+    shop_payout = whole_kes(production_cost * shop_floor_multiple)
+    production_fee_component = whole_kes(shop_payout - production_cost)
+    manager_payout = whole_kes(min(manager_markup, whole_kes(gross_margin * manager_commission_cap_rate)))
+    # Residual: guarantees the three payout components sum to client_total.
+    printy_fee = whole_kes(broker_client_price - shop_payout - manager_payout)
     markup_fee_component = printy_fee
     client_total = broker_client_price
     applied_markup_multiple = rate(manager_markup / production_cost) if production_cost else Decimal("0.0000")
@@ -179,11 +223,14 @@ def calculate_quote_financials(*, production_cost, manager_markup, policy: Platf
 
 def calculate_financial_split(*, production_cost, manager_markup=None, broker_client_price=None, policy=None) -> QuoteFinancialResult:
     policy = policy or get_active_platform_fee_policy()
-    production_cost = money(production_cost)
     if manager_markup is None:
         if broker_client_price is None:
             raise ValidationError("Manager markup is required.")
-        manager_markup = money(broker_client_price) - production_cost
+        # Derive the markup from the raw inputs and let calculate_quote_financials
+        # do the rounding, so its cap guard sees the cent-level value the caller
+        # actually asked for. Rounding here would silently accept an over-cap
+        # price such as 2500.01 against a 2500 cap.
+        manager_markup = to_decimal(broker_client_price) - to_decimal(production_cost)
     return calculate_quote_financials(
         production_cost=production_cost,
         manager_markup=manager_markup,

@@ -51,3 +51,13 @@ Thumbs.db
 
 # Local Git metadata backups
 .git.old*
+
+# Forensic verification artifacts - never commit
+# forensic_creds.json holds plaintext passwords for the seeded forensic actors.
+forensic_creds.json
+# API captures produced by rerun_jobab_verification.py (contain share tokens)
+jobA_*.json
+jobB_*.json
+rerun_jobab_output.txt
+rerun_jobab_results.json
+*.pid

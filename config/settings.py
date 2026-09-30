@@ -460,14 +460,37 @@ MPESA_INITIATOR_NAME = _get_env("MPESA_INITIATOR_NAME", default="")
 MPESA_INITIATOR_PASSWORD = _get_env("MPESA_INITIATOR_PASSWORD", default="")
 MPESA_SECURITY_CREDENTIAL = _get_env("MPESA_SECURITY_CREDENTIAL", default="")
 MPESA_TIMEOUT_SECONDS = int(_get_env("MPESA_TIMEOUT_SECONDS", default="30"))
+
+# Stub mode: simulate the outbound Daraja STK call in-process so end-to-end runs
+# can reach job completion and payouts without a human authorizing the prompt.
+# The flag used to be read in payments.services._is_stub_mode() but was never
+# published as a setting, so MPESA_FORCE_STUB=1 silently did nothing. It is
+# wired here, and hard-gated: stub mode can never be active with DEBUG=False,
+# because that would let a deployment fake real payments.
+MPESA_FORCE_STUB = str(_get_env("MPESA_FORCE_STUB", default="") or "").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+if MPESA_FORCE_STUB and not DEBUG:
+    raise ImproperlyConfigured(
+        "MPESA_FORCE_STUB cannot be enabled when DEBUG=False. Stub mode simulates "
+        "M-Pesa payments, which would let a production deployment mark real orders "
+        "as paid without Daraja. Remove MPESA_FORCE_STUB from the production "
+        "environment."
+    )
 MPESA_CALLBACK_URL = _get_env(
     "MPESA_CALLBACK_URL",
     fallback_names=("MPESA_STK_CALLBACK_URL",),
     default="",
 )
 MPESA_STK_CALLBACK_URL = MPESA_CALLBACK_URL
-MPESA_TIMEOUT_URL = _get_env("MPESA_TIMEOUT_URL", default="")
-MPESA_RESULT_URL = _get_env("MPESA_RESULT_URL", default="")
+# Where Daraja POSTs Transaction Status Query verdicts. Default to the canonical
+# callback: the view dispatches on body shape, so one public URL serves both and
+# a blank ResultURL would be rejected by Daraja outright.
+MPESA_TIMEOUT_URL = _get_env("MPESA_TIMEOUT_URL", default=MPESA_CALLBACK_URL)
+MPESA_RESULT_URL = _get_env("MPESA_RESULT_URL", default=MPESA_CALLBACK_URL)
 MPESA_ACCOUNT_REFERENCE_DEFAULT = _get_env(
     "MPESA_ACCOUNT_REFERENCE_DEFAULT",
     fallback_names=("MPESA_ACCOUNT_REFERENCE",),
@@ -498,18 +521,24 @@ if MPESA_ENV == "production":
         )
 
 
-def _evaluate_mpesa_production_config(*, env, consumer_key, consumer_secret, shortcode, passkey, callback_url):
+def _evaluate_mpesa_production_config(*, env, consumer_key, consumer_secret, shortcode, passkey, callback_url, product="paybill"):
     """Pure evaluation of Daraja production readiness (unit-testable).
 
     Mirrors the email guard: a server that boots with MPESA_ENV=production but
     missing/placeholder Daraja credentials fails the system check loudly instead
     of only erroring at the first payment.
+
+    `product` is the Daraja short code type. BuyGoodsOnline apps are authorised
+    by the OAuth token alone, so a short code and pass key are not only
+    unnecessary there but rejected by Daraja if sent.
     """
     from django.core.checks import Error, Info
 
     messages = []
     env = (env or "").strip().lower()
     is_production = env == "production"
+    product = (product or "paybill").strip().lower()
+    credential_free_product = product in {"buygoodsonline", "buy goods online", "buygoods"}
 
     if not is_production:
         messages.append(
@@ -545,25 +574,37 @@ def _evaluate_mpesa_production_config(*, env, consumer_key, consumer_secret, sho
                 )
             )
         digits = "".join(ch for ch in str(shortcode or "") if ch.isdigit())
-        if _missing_or_placeholder(shortcode) or not (5 <= len(digits) <= 11):
-            messages.append(
-                Error(
-                    "MPESA_SHORTCODE is missing, a placeholder, or not a plausible "
-                    "paybill/till number while MPESA_ENV=production.",
-                    hint="Set the production paybill (or till) Number registered in "
-                    "Daraja, e.g. 174379.",
-                    id="printy.E015",
+        if credential_free_product:
+            if not _missing_or_placeholder(shortcode) or not _missing_or_placeholder(passkey):
+                messages.append(
+                    Error(
+                        f"MPESA_SHORTCODE_TYPE={product} is authenticated by the OAuth token "
+                        "alone, but MPESA_SHORTCODE/MPESA_PASSKEY are set. Daraja rejects the "
+                        "request when a BuyGoodsOnline app sends a short code or password.",
+                        hint="Clear MPESA_SHORTCODE and MPESA_PASSKEY in the deployed .env.",
+                        id="printy.E015",
+                    )
                 )
-            )
-        if _missing_or_placeholder(passkey):
-            messages.append(
-                Error(
-                    "MPESA_PASSKEY is missing or a placeholder while MPESA_ENV=production.",
-                    hint="Set the production Lipa na M-Pesa Online passkey from the "
-                    "Daraja portal in the deployed .env.",
-                    id="printy.E016",
+        else:
+            if _missing_or_placeholder(shortcode) or not (5 <= len(digits) <= 11):
+                messages.append(
+                    Error(
+                        "MPESA_SHORTCODE is missing, a placeholder, or not a plausible "
+                        "paybill/till number while MPESA_ENV=production.",
+                        hint="Set the production paybill (or till) Number registered in "
+                        "Daraja, e.g. 174379.",
+                        id="printy.E015",
+                    )
                 )
-            )
+            if _missing_or_placeholder(passkey):
+                messages.append(
+                    Error(
+                        "MPESA_PASSKEY is missing or a placeholder while MPESA_ENV=production.",
+                        hint="Set the production Lipa na M-Pesa Online passkey from the "
+                        "Daraja portal in the deployed .env.",
+                        id="printy.E016",
+                    )
+                )
         callback = (callback_url or "").lower()
         if not callback:
             messages.append(
@@ -605,6 +646,7 @@ def check_mpesa_production_config(app_configs=None, **kwargs):
         shortcode=getattr(_running_settings, "MPESA_SHORTCODE", ""),
         passkey=getattr(_running_settings, "MPESA_PASSKEY", ""),
         callback_url=getattr(_running_settings, "MPESA_CALLBACK_URL", ""),
+        product=getattr(_running_settings, "MPESA_SHORTCODE_TYPE", "paybill"),
     )
 
 # =============================================================================
