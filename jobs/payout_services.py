@@ -194,13 +194,15 @@ def release_managed_job_payouts(*, managed_job: ManagedJob, released_by) -> dict
 
     manager_amount = _money(managed_job.broker_payout)
     promised_manager_amount = _promised_manager_payout(managed_job)
-    if managed_job.broker_id and promised_manager_amount > 0 and manager_amount <= 0:
-        # The split promised this manager money but the job never received the
-        # value. Releasing only the shop would silently swallow the manager's
+    if promised_manager_amount > 0 and (not managed_job.broker_id or manager_amount <= 0):
+        # The split promised this manager money but the job cannot pay it: either
+        # the job never received the value, or it has no manager recipient at
+        # all. Releasing only the shop would silently swallow the manager's
         # share, so refuse the whole release and surface the discrepancy.
         raise ValidationError(
-            "Manager payout is owed but the job carries no broker_payout. "
-            f"Authoritative split promises {promised_manager_amount}. "
+            "Manager payout is owed but this job cannot pay it"
+            + (" (no broker on the job)." if not managed_job.broker_id else " (the job carries no broker_payout).")
+            + f" Authoritative split promises {promised_manager_amount}. "
             "Re-derive the job from its QuoteFinancialSplit before releasing."
         )
     if manager_amount > 0 and managed_job.broker_id:

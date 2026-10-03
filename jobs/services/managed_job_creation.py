@@ -25,6 +25,30 @@ def _client_for_quote_request(quote_request):
     return quote_request.on_behalf_of or quote_request.created_by
 
 
+def _manager_for_quote(*, quote, quote_request):
+    """Resolve the partner who is owed the split's manager share.
+
+    The QuoteFinancialSplit is pure arithmetic and does not record *who* the
+    manager is, so the identity has to come from the quote. quote_request
+    .assigned_manager is authoritative when set. It is not always set: in the
+    partner-led flow the manager creates the quote on a request that was
+    submitted by the client, so the request is unassigned. In that case the
+    party that applied the manager markup - the quote's creator, or the
+    request's creator - is the partner the split priced. Resolving only
+    assigned_manager left those jobs with broker=NULL, which made the
+    manager's promised share unpayable and silently dropped it at release.
+    """
+    from accounts.services.roles import is_broker
+
+    assigned_manager = getattr(quote_request, "assigned_manager", None)
+    if assigned_manager is not None:
+        return assigned_manager
+    for candidate in (getattr(quote, "created_by", None), getattr(quote_request, "created_by", None)):
+        if candidate is not None and is_broker(candidate):
+            return candidate
+    return None
+
+
 def _quote_request_title(quote_request) -> str:
     if quote_request is None:
         return "managed job"
@@ -181,7 +205,7 @@ def create_managed_job_from_payment(*, payment: Payment) -> ManagedJob:
             source_quote_request=quote_request,
             source_quote=quote,
             client=_client_for_quote_request(quote_request),
-            broker=getattr(quote_request, "assigned_manager", None),
+            broker=_manager_for_quote(quote=quote, quote_request=quote_request),
             assigned_shop=assigned_shop,
             created_by=payment.payer,
             status=ManagedJobStatus.PAYMENT_CONFIRMED,

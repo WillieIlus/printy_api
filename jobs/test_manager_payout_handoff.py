@@ -165,9 +165,9 @@ class ManagerPayoutHandoffTestCase(TestCase):
             JOB_A["client_total"],
         )
 
-    def _create_accepted_quote_with_payment(self, split_values):
+    def _create_accepted_quote_with_payment(self, split_values, *, with_manager=True):
         """An accepted, split-backed quote plus the Payment that closes it."""
-        quote, _ = self._create_accepted_quote(split_values)
+        quote, quote_request = self._create_accepted_quote(split_values, with_manager=with_manager)
         payment = Payment.objects.create(
             quote=quote,
             payer=self.client_user,
@@ -178,6 +178,46 @@ class ManagerPayoutHandoffTestCase(TestCase):
             status=Payment.STATUS_PENDING,
         )
         return payment
+
+    def test_a3_partner_led_quote_resolves_its_manager_as_the_broker(self):
+        """The manager must be on the job even when the request is unassigned.
+
+        In the partner-led flow the manager creates the quote on a request the
+        client submitted, so quote_request.assigned_manager is never set. If
+        only assigned_manager is consulted the job gets broker=NULL and the
+        split's promised manager share becomes unpayable.
+        """
+        payment = self._create_accepted_quote_with_payment(JOB_A, with_manager=False)
+        self.assertIsNone(payment.quote.quote_request.assigned_manager_id)
+        # The partner is the one who priced the markup, so they are the manager.
+        self.assertEqual(payment.quote.created_by_id, self.manager.id)
+
+        from payments.services import mark_payment_paid
+
+        mark_payment_paid(payment=payment, receipt_number="HANDOFF-3")
+        managed_job = ManagedJob.objects.get(source_quote=payment.quote)
+
+        self.assertEqual(managed_job.broker_id, self.manager.id)
+        self.assertEqual(managed_job.broker_payout, JOB_A["broker_payout"])
+
+    def test_a4_promised_manager_share_with_no_broker_is_refused(self):
+        """Safety net: a promised manager share must never be silently dropped.
+
+        Even if the job somehow carries neither a broker nor the split value,
+        releasing only the shop would swallow the manager's money.
+        """
+        self.managed_job, self.assignment = self._make_job(JOB_A, populate_broker_payout=False)
+        self.managed_job.broker = None
+        self.managed_job.save(update_fields=["broker", "updated_at"])
+        quote, _ = self._create_accepted_quote(JOB_A)
+        self.managed_job.source_quote = quote
+        self.managed_job.save(update_fields=["source_quote", "updated_at"])
+
+        response = self._release()
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("no broker", response.json()["detail"])
+        self.assertEqual(ManagedJobPayout.objects.count(), 0)
 
     def _create_accepted_quote(self, split_values, *, with_manager=True):
         """Create a minimal accepted quote carrying a real financial split."""
