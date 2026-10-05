@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import re
 from collections import OrderedDict
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from django.db.models import Q
@@ -438,6 +440,125 @@ def resolve_finished_size(product_type: str, finished_size: str | None) -> dict[
         if option["value"] == value:
             return option
     return None
+
+
+# Tokens a client may send to mean "price the dimensions I supplied". The
+# authoritative frontend sends finished_size="custom" together with
+# width_mm/height_mm; these are the tolerated spellings of the same intent.
+CUSTOM_SIZE_TOKENS = {"custom", "custom_size", "custom-size", "customsize"}
+
+# A dimension string is a finished size expressed as millimetres, not a library
+# size: "123x217mm", "106.9x148.9", "106.9 x 148.9 mm". The pattern is anchored on
+# both ends so an arbitrary label ("Premium Matt Card") can never be read as a
+# dimension, and only "x"/"X"/multiplication-sign separators are accepted.
+_DIMENSION_STRING = re.compile(
+    r"^(\d+(?:\.\d+)?)\s*[x×]\s*(\d+(?:\.\d+)?)\s*(?:mm)?$",
+    re.IGNORECASE,
+)
+
+
+def _positive_mm(value: Any) -> Decimal | None:
+    """Coerce a millimetre value to a positive Decimal, keeping its precision."""
+    if value in (None, ""):
+        return None
+    try:
+        parsed = Decimal(str(value).strip())
+    except (ArithmeticError, InvalidOperation, TypeError, ValueError):
+        return None
+    if not parsed.is_finite() or parsed <= 0:
+        return None
+    return parsed
+
+
+def parse_custom_size_dimensions(value: Any) -> tuple[Decimal, Decimal] | None:
+    """Parse a "123x217mm" style string into (width_mm, height_mm).
+
+    Returns None when the string is not a dimension string, so callers can tell
+    "not a custom dimension" apart from "a custom dimension with bad numbers".
+    """
+    text = str(value or "").strip()
+    if not text:
+        return None
+    match = _DIMENSION_STRING.match(text)
+    if not match:
+        return None
+    width = _positive_mm(match.group(1))
+    height = _positive_mm(match.group(2))
+    if width is None or height is None:
+        return None
+    return width, height
+
+
+def looks_like_dimension_string(value: Any) -> bool:
+    """True when the string is dimension-shaped, valid numbers or not.
+
+    Lets "0x0mm" be reported as a bad custom size rather than as an unknown
+    finished size, without accepting it as a usable dimension.
+    """
+    return bool(_DIMENSION_STRING.match(str(value or "").strip()))
+
+
+def resolve_request_finished_size(
+    product_type: str,
+    finished_size: str | None,
+    *,
+    width_mm: Any = None,
+    height_mm: Any = None,
+    size_mode: str | None = None,
+) -> tuple[dict[str, Any] | None, bool]:
+    """Resolve a calculator size request to (size, is_custom).
+
+    This is the single explicit contract for "which finished size did the buyer
+    ask for", so callers never have to guess whether a string is a library size
+    or a custom dimension:
+
+    1. A string that is a real entry in ``SIZE_LIBRARY`` is that predefined size.
+    2. Otherwise explicit ``width_mm``/``height_mm`` win, which is the intended
+       custom representation (``finished_size="custom"``, ``size_mode="custom"``,
+       or the dimension string that matching synthesises from those dimensions).
+    3. Otherwise a dimension string is parsed as custom millimetres.
+    4. Otherwise the request names a custom size it did not supply dimensions
+       for -- return (None, True) so the caller can ask for the dimensions.
+    5. Anything else is not a size at all -- return (None, False) so the caller
+       reports the size as unavailable rather than inventing a size.
+
+    Dimensions stay ``Decimal`` so no precision is lost on the way to the
+    imposition maths.
+    """
+    value = (finished_size or "").strip()
+    mode = (size_mode or "").strip().lower()
+
+    # 1. A genuine library size always wins, so "A5"/"85x55mm" keep working even
+    #    when the payload also carries dimensions.
+    if value:
+        predefined = resolve_finished_size(product_type, value)
+        if predefined:
+            return predefined, False
+
+    # 2. Explicit dimensions.
+    explicit_width = _positive_mm(width_mm)
+    explicit_height = _positive_mm(height_mm)
+    if explicit_width is not None and explicit_height is not None:
+        return {"width_mm": explicit_width, "height_mm": explicit_height}, True
+
+    # 3. A dimension string supplied instead of separate fields.
+    parsed = parse_custom_size_dimensions(value)
+    if parsed:
+        return {"width_mm": parsed[0], "height_mm": parsed[1]}, True
+
+    # 4. Custom was requested but no usable dimensions arrived. A
+    #    dimension-shaped string with unusable numbers ("0x0mm") counts here too,
+    #    so it is reported as a bad custom size rather than an unknown size.
+    #    ``size_mode`` is only trusted when no size string was sent at all: it is
+    #    frequently inferred as "custom" from an absent ``size_label``, so an
+    #    unrecognised non-empty string must not be mistaken for a custom request.
+    if value.lower() in CUSTOM_SIZE_TOKENS or looks_like_dimension_string(value):
+        return None, True
+    if not value and mode == "custom":
+        return None, True
+
+    # 5. Not a size we recognise. Never coerce this into a library size.
+    return None, False
 
 
 def resolve_stock_option(stock_key: str | None, usage: str = "") -> dict[str, Any] | None:

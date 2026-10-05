@@ -258,6 +258,10 @@ def select_paper_for_pricing(
             sheet_height_mm=sheet_height or 0,
             bleed_mm=product.default_bleed_mm or 3,
         )
+        if imposition.copies_per_sheet <= 0:
+            # A sheet the job cannot be imposed on must never win paper
+            # selection on price alone; rank it last.
+            return (Decimal("Infinity"), paper.id)
         _, print_rate = PrintingRate.resolve(
             machine,
             paper.sheet_size,
@@ -295,7 +299,17 @@ def calculate_sheet_pricing(
         sheet_height_mm=sheet_height or 0,
         bleed_mm=getattr(product, "default_bleed_mm", 3) or 3,
     )
-    waste = _waste_policy_split(quantity, imposition.copies_per_sheet)
+    waste = (
+        _waste_policy_split(quantity, imposition.copies_per_sheet)
+        if imposition.copies_per_sheet > 0
+        else {
+            "billable_sheets": 0,
+            "fixed_waste_sheets": 0,
+            "variable_waste_sheets": 0,
+            "waste_sheets_added": 0,
+            "waste_policy": None,
+        }
+    )
     billable_sheets = int(waste.get("billable_sheets") or 0) or imposition.good_sheets
     fixed_waste = int(waste.get("fixed_waste_sheets") or 0)
     variable_waste = int(waste.get("variable_waste_sheets") or 0)
@@ -319,6 +333,43 @@ def calculate_sheet_pricing(
         "width_mm": sheet_width,
         "height_mm": sheet_height,
     }
+    if imposition.copies_per_sheet <= 0:
+        reason = (
+            f"{imposition.finished_width_mm}x{imposition.finished_height_mm} mm finished size "
+            f"(with {imposition.bleed_mm} mm bleed each side) does not fit on the configured "
+            f"{imposition.sheet_width_mm}x{imposition.sheet_height_mm} mm sheet "
+            f"({paper.sheet_size}) in either orientation."
+        )
+        return PricingEngineResult(
+            pricing_mode=PricingMode.SHEET,
+            quantity=quantity,
+            currency=getattr(shop, "currency", "KES") or "KES",
+            totals={},
+            breakdown={
+                "paper": paper_breakdown,
+                "imposition": imposition_payload,
+                "printing": {
+                    "machine_id": machine.id if machine else None,
+                    "machine_name": getattr(machine, "name", ""),
+                    "color_mode": color_mode,
+                    "sides": sides,
+                },
+            },
+            explanations=[reason],
+            can_calculate=False,
+            reason=reason,
+            copies_per_sheet=0,
+            good_sheets=0,
+            parent_sheets_required=0,
+            billable_sheets=0,
+            fixed_waste_sheets=0,
+            variable_waste_sheets=0,
+            waste_sheets_added=0,
+            variable_waste_rate=None,
+            parent_sheet_name=paper.sheet_size,
+            rotated=False,
+            explanation_lines=[reason],
+        )
     resolved_rate, print_rate = PrintingRate.resolve(
         machine,
         paper.sheet_size,

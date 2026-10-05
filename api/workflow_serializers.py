@@ -195,13 +195,16 @@ class CalculatorConfigPreviewSerializer(serializers.Serializer):
         help_text="Homepage calculator product preset to preview.",
     )
     quantity = serializers.IntegerField(required=False, allow_null=True, min_value=1, default=100, help_text="Requested quantity.")
-    finished_size = serializers.CharField(required=False, allow_blank=True, allow_null=True, help_text="Use values from /api/calculator/config/, e.g. 85x55mm, A5, A4.")
+    finished_size = serializers.CharField(required=False, allow_blank=True, allow_null=True, help_text="Use values from /api/calculator/config/, e.g. 85x55mm, A5, A4. Dimension strings such as '106.9x148.9mm' are read as custom dimensions.")
     size_mode = serializers.ChoiceField(choices=["standard", "custom"], required=False, default="standard")
     input_unit = serializers.ChoiceField(choices=["mm", "cm", "m", "in"], required=False, default="mm")
     width_input = serializers.DecimalField(required=False, allow_null=True, max_digits=10, decimal_places=3, min_value=Decimal("0.001"))
     height_input = serializers.DecimalField(required=False, allow_null=True, max_digits=10, decimal_places=3, min_value=Decimal("0.001"))
-    width_mm = serializers.IntegerField(required=False, allow_null=True, min_value=1)
-    height_mm = serializers.IntegerField(required=False, allow_null=True, min_value=1)
+    # Decimal, not Integer: millimetres are physical measurements and truncating
+    # 106.9 to 106 shrinks the piece, which can make an impossible fit look
+    # possible. Precision is preserved to the imposition maths.
+    width_mm = serializers.DecimalField(required=False, allow_null=True, max_digits=10, decimal_places=3, min_value=Decimal("0.001"))
+    height_mm = serializers.DecimalField(required=False, allow_null=True, max_digits=10, decimal_places=3, min_value=Decimal("0.001"))
     print_sides = PrintSidesField(required=False, allow_null=True, default="SIMPLEX", help_text="Flat-job print sides.")
     color_mode = ColorModeField(required=False, allow_null=True, default="COLOR", help_text="Flat-job colour mode.")
     paper_stock = serializers.CharField(required=False, allow_blank=True, allow_null=True, help_text="Legacy paper stock key; prefer requested_paper_category + requested_gsm.")

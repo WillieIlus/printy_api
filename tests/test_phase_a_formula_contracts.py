@@ -274,9 +274,10 @@ class Sra3YieldFormulaContractTests(TestCase):
             sheet_height_mm=450,
             bleed_mm=0,
         )
-        self.assertEqual("BLOCKED BY BUSINESS DECISION", "BLOCKED BY BUSINESS DECISION")
-        self.assertEqual(result.copies_per_sheet, 1)
-        self.assertIn("copy/copies per sheet", result.explanation)
+        self.assertEqual(result.copies_per_sheet, 0)
+        self.assertFalse(result.fits)
+        self.assertEqual(result.orientation, "none")
+        self.assertIn("No fit", result.explanation)
 
     def test_bleed_is_included(self):
         no_bleed = build_imposition_breakdown(

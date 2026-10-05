@@ -499,7 +499,10 @@ MPESA_ACCOUNT_REFERENCE_DEFAULT = _get_env(
 MPESA_TRANSACTION_DESC_DEFAULT = _get_env(
     "MPESA_TRANSACTION_DESC_DEFAULT",
     fallback_names=("MPESA_TRANSACTION_DESC",),
-    default="Printy payment",
+    # Daraja rejects the entire STK Push request when TransactionDesc is longer
+    # than 13 characters, so the default has to fit on its own; the clients
+    # clamp it regardless.
+    default="Printy Order",
 )
 QUOTE_EXPIRY_HOURS = int(_get_env("QUOTE_EXPIRY_HOURS", default="48"))
 PARTNER_MARKUP_WARNING = Decimal(str(_get_env("PARTNER_MARKUP_WARNING", default="1.00")))

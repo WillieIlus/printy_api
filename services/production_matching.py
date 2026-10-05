@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from decimal import Decimal, ROUND_HALF_UP
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from typing import Any
 
 from django.conf import settings
@@ -88,16 +88,34 @@ def _normalized_key(value: Any) -> str:
     return slugify(_normal(value)).replace("-", "_")
 
 
-def _parse_finished_size(payload: dict[str, Any]) -> tuple[int | None, int | None]:
-    width = _int(payload.get("width_mm"))
-    height = _int(payload.get("height_mm"))
+def _millimetres(value: Any) -> Decimal | None:
+    """Coerce a millimetre value to Decimal without discarding supplied precision.
+
+    ``int(Decimal("106.9"))`` is 106, which silently shrinks the piece and can
+    make an impossible imposition fit. Millimetres are physical measurements, so
+    they travel as Decimal all the way to the imposition maths.
+    """
+    if value in (None, ""):
+        return None
+    try:
+        parsed = Decimal(str(value).strip())
+    except (ArithmeticError, InvalidOperation, TypeError, ValueError):
+        return None
+    if not parsed.is_finite() or parsed <= 0:
+        return None
+    return parsed
+
+
+def _parse_finished_size(payload: dict[str, Any]) -> tuple[Decimal | None, Decimal | None]:
+    width = _millimetres(payload.get("width_mm"))
+    height = _millimetres(payload.get("height_mm"))
     if width and height:
         return width, height
     raw = _normal(payload.get("finished_size") or payload.get("size"))
     match = re.search(r"(\d+(?:\.\d+)?)\s*[xX×]\s*(\d+(?:\.\d+)?)", raw)
     if not match:
         return None, None
-    return int(Decimal(match.group(1))), int(Decimal(match.group(2)))
+    return _millimetres(match.group(1)), _millimetres(match.group(2))
 
 
 def _requested_gsm(payload: dict[str, Any]) -> int | None:

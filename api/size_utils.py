@@ -23,6 +23,10 @@ _UNIT_FACTORS = {
     "in": Decimal("25.4"),
 }
 
+# Millimetres are carried as Decimal downstream, so keep three fractional
+# places after a unit conversion rather than collapsing to whole millimetres.
+MM_PRECISION = Decimal("0.001")
+
 
 def _parse_decimal(value) -> Decimal | None:
     if value in (None, ""):
@@ -36,13 +40,20 @@ def _parse_decimal(value) -> Decimal | None:
     return parsed
 
 
-def _to_mm_integer(value, unit: str) -> int | None:
+def _to_mm(value, unit: str) -> Decimal | None:
+    """Convert a supplied dimension to millimetres, preserving precision.
+
+    Unit conversion is the only place rounding is legitimate (inch/cm are not
+    whole millimetres). Millimetre input is returned untouched so a supplied
+    106.9 stays 106.9 -- rounding it to 106 shrinks the piece and can make an
+    otherwise impossible imposition fit.
+    """
     parsed = _parse_decimal(value)
-    factor = _UNIT_FACTORS.get(unit or "mm", _UNIT_FACTORS["mm"])
     if parsed is None:
         return None
-    millimetres = (parsed * factor).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
-    return int(millimetres) if millimetres > 0 else None
+    factor = _UNIT_FACTORS.get(unit or "mm", _UNIT_FACTORS["mm"])
+    millimetres = parsed if factor == 1 else (parsed * factor).quantize(MM_PRECISION, rounding=ROUND_HALF_UP)
+    return millimetres if millimetres > 0 else None
 
 
 def normalize_size_payload(
@@ -88,11 +99,11 @@ def normalize_size_payload(
             normalized["height_mm"] = preset["height_mm"]
     else:
         if normalized.get("width_mm") in (None, ""):
-            converted_width = _to_mm_integer(normalized.get("width_input"), input_unit)
+            converted_width = _to_mm(normalized.get("width_input"), input_unit)
             if converted_width is not None:
                 normalized["width_mm"] = converted_width
         if normalized.get("height_mm") in (None, ""):
-            converted_height = _to_mm_integer(normalized.get("height_input"), input_unit)
+            converted_height = _to_mm(normalized.get("height_input"), input_unit)
             if converted_height is not None:
                 normalized["height_mm"] = converted_height
 

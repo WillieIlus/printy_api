@@ -2,6 +2,7 @@ from decimal import Decimal
 from datetime import timedelta
 from unittest.mock import MagicMock, patch
 
+from django.conf import settings
 from django.contrib.admin.sites import AdminSite
 from django.contrib.auth import get_user_model
 from django.contrib.messages import get_messages
@@ -21,7 +22,14 @@ from payments.admin import PaymentAdmin
 from accounts.models import UserProfile
 from payments.models import MpesaSTKRequest, Payment, PaymentPhoneConsent
 from payments.payment_actor_serializers import PaymentClientSerializer
-from payments.services import create_payment_for_quote, handle_stk_callback, initiate_stk_push, mark_payment_paid, normalize_mpesa_phone
+from payments.services import (
+    DARAJA_ACCOUNT_REFERENCE_MAX,
+    create_payment_for_quote,
+    handle_stk_callback,
+    initiate_stk_push,
+    mark_payment_paid,
+    normalize_mpesa_phone,
+)
 from pricing.models import PlatformFeePolicy
 from pricing.services.platform_fee_policy import create_quote_financial_split
 from quotes.choices import QuoteOfferStatus
@@ -580,8 +588,11 @@ class CanonicalPaymentFlowTestCase(TestCase):
             phone_number="254700000000",
             amount=1750,
             account_reference=payment.account_reference,
-            transaction_desc="Printy payment",
+            # Read from settings rather than hardcoded: the description is an
+            # operator-tunable string and Daraja caps it at 13 characters.
+            transaction_desc=settings.MPESA_TRANSACTION_DESC_DEFAULT,
         )
+        self.assertLessEqual(len(payment.account_reference), DARAJA_ACCOUNT_REFERENCE_MAX)
         self.assertEqual(stk_request.checkout_request_id, "ws_CO_REAL_456")
         self.assertEqual(stk_request.status, MpesaSTKRequest.STATUS_SENT)
 

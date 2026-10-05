@@ -47,9 +47,49 @@ def normalize_mpesa_phone(phone_number: str) -> str:
     return digits
 
 
+# Daraja hard limits on the STK Push request. Exceeding either one makes
+# Safaricom reject the whole request (ResponseCode != "0", errorCode 20003)
+# before the customer is ever prompted, so both are enforced where the value is
+# generated and again where the payload is built.
+DARAJA_ACCOUNT_REFERENCE_MAX = 12
+DARAJA_TRANSACTION_DESC_MAX = 13
+
+
 def _account_reference(quote) -> str:
-    quote_ref = getattr(quote, "quote_reference", "") or quote.id
-    return f"QUOTE-{quote_ref}"
+    """Build a Daraja-legal AccountReference (at most 12 characters).
+
+    ``quote.quote_reference`` is "Q-YYYYMMDD-NNNN" — 15 characters on its own —
+    so prefixing it with "QUOTE-" produced 21 and Daraja rejected every
+    canonical quote payment before the customer saw a prompt.
+
+    Slicing that string down to 12 is not an option: it would keep
+    "QUOTE-Q-2026" and collide every quote in the same year. The reference is
+    therefore rebuilt from its parts and only the redundant century is dropped.
+
+    The quote id is globally unique, so it is the part that must survive whole.
+    The date is decoration and is dropped in one piece rather than trimmed,
+    because trimming it is what would let two quotes collide::
+
+        "Q261003-0001"    id below 10000 — dated, 12 chars
+        "Q-10000"         id of 5+ digits — undated, id intact
+
+    The result is a pure function of the quote (no clock read, no randomness),
+    so retrying a payment reproduces the same reference. Ids are exact up to 10
+    digits, which is the ceiling of a 32-bit AutoField.
+    """
+    quote_id = int(getattr(quote, "id", 0) or 0)
+    created_at = getattr(quote, "created_at", None)
+    if created_at is None:
+        date_digits = ""
+    elif timezone.is_aware(created_at):
+        date_digits = timezone.localtime(created_at).strftime("%y%m%d")
+    else:
+        date_digits = created_at.strftime("%y%m%d")
+    tail = f"-{quote_id:04d}"
+    dated = f"Q{date_digits}{tail}"
+    if len(dated) <= DARAJA_ACCOUNT_REFERENCE_MAX:
+        return dated
+    return f"Q{tail}"[:DARAJA_ACCOUNT_REFERENCE_MAX]
 
 
 def _quote_split(quote):
@@ -376,8 +416,13 @@ class MpesaDarajaClient:
             "PartyB": business_short_code,
             "PhoneNumber": phone_number,
             "CallBackURL": self.callback_url,
-            "AccountReference": account_reference,
-            "TransactionDesc": transaction_desc,
+            # Daraja rejects the entire request if either field is over its
+            # limit, so clamp here as well as at generation time: this is the
+            # single canonical payload site, so every caller of this client is
+            # covered, and rows written before _account_reference() was fixed
+            # are clamped rather than sent as a 21-character reference.
+            "AccountReference": (account_reference or "PRINTY")[:DARAJA_ACCOUNT_REFERENCE_MAX],
+            "TransactionDesc": (transaction_desc or "Printy payment")[:DARAJA_TRANSACTION_DESC_MAX],
         }
         response = requests.post(
             url,

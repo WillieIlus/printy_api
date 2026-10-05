@@ -9,7 +9,7 @@ from pricing.services.production_cost_calculator import calculate_client_price_w
 from quotes.models import Quote
 from services.public_matching import get_booklet_marketplace_matches, get_marketplace_matches
 
-from .calculator_config import get_product_definition, resolve_finished_size, resolve_stock_option
+from .calculator_config import get_product_definition, resolve_request_finished_size, resolve_stock_option
 from .finishing_normalization import is_empty_finishing, normalize_finishing_slug
 from .urgency import apply_priority_pricing
 
@@ -555,6 +555,26 @@ def _required_missing(payload: dict[str, Any], definition: dict[str, Any]) -> li
             if not _has_requested_paper(payload, booklet=True, prefix="insert"):
                 missing.append(field)
             continue
+        if field == "finished_size":
+            # A finished size is satisfied by whichever representation the client
+            # used: a library size, a custom token, a dimension string, or plain
+            # millimetres. Demanding the finished_size key itself is what made the
+            # documented "custom + width_mm/height_mm" flow report a missing size.
+            size, is_custom = resolve_request_finished_size(
+                payload.get("product_type"),
+                payload.get("finished_size"),
+                width_mm=payload.get("custom_width_mm") or payload.get("width_mm"),
+                height_mm=payload.get("custom_height_mm") or payload.get("height_mm"),
+                size_mode=payload.get("size_mode"),
+            )
+            if size is None:
+                if is_custom:
+                    # The client asked for a custom size but sent no usable
+                    # millimetres, so ask for those rather than for a size again.
+                    missing.extend(["custom_width_mm", "custom_height_mm"])
+                else:
+                    missing.append(field)
+            continue
         value = payload.get(field)
         if value in (None, "", []):
             missing.append(field)
@@ -1031,17 +1051,22 @@ def build_public_calculator_preview(payload: dict[str, Any]) -> dict[str, Any]:
     if paper_selection_mode == "custom_request":
         custom_warnings.append("Requested paper needs shop confirmation.")
 
-    if finished_size_raw == "custom":
-        custom_width = payload.get("custom_width_mm") or payload.get("width_mm")
-        custom_height = payload.get("custom_height_mm") or payload.get("height_mm")
-        if not custom_width or not custom_height:
+    # One explicit size-resolution contract: a library size stays a library
+    # size, anything dimension-shaped is read as custom millimetres, and an
+    # unrecognised string is reported as missing rather than reinterpreted.
+    size, is_custom_size = resolve_request_finished_size(
+        product_type,
+        finished_size_raw,
+        width_mm=payload.get("custom_width_mm") or payload.get("width_mm"),
+        height_mm=payload.get("custom_height_mm") or payload.get("height_mm"),
+        size_mode=payload.get("size_mode"),
+    )
+    if size is None:
+        if is_custom_size:
             return _build_missing_response(product_type, ["custom_width_mm", "custom_height_mm"])
-        size = {"width_mm": float(custom_width), "height_mm": float(custom_height)}
+        return _build_missing_response(product_type, ["finished_size"])
+    if is_custom_size:
         custom_warnings.append("Custom size will be priced from actual dimensions.")
-    else:
-        size = resolve_finished_size(product_type, finished_size_raw)
-        if not size:
-            return _build_missing_response(product_type, ["finished_size"])
 
     if product_type == "booklet":
         cover_stock_raw = payload.get("cover_stock") or ""
@@ -1089,7 +1114,6 @@ def build_public_calculator_preview(payload: dict[str, Any]) -> dict[str, Any]:
         paper_category, legacy_gsm = _map_legacy_paper_request(legacy_paper_stock)
         if not paper_gsm:
             paper_gsm = legacy_gsm
-    is_custom_size = finished_size_raw == "custom"
     request_payload = {
         "calculator_mode": "marketplace",
         "product_family": PRODUCT_FAMILY_BY_TYPE[product_type],

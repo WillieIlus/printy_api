@@ -275,9 +275,16 @@ def _finished_size_label(payload: dict[str, Any] | None, product_type: str = "")
     if explicit:
         return explicit
 
-    width = int(payload.get("width_mm") or 0)
-    height = int(payload.get("height_mm") or 0)
-    dimensions = f"{width} x {height} mm" if width and height else ""
+    def _format_mm(value: Decimal) -> str:
+        """Render millimetres without inventing or discarding precision."""
+        normalised = value.normalize()
+        if normalised == normalised.to_integral_value():
+            return str(int(normalised))
+        return format(normalised, "f")
+
+    width = _decimal(payload.get("width_mm"))
+    height = _decimal(payload.get("height_mm"))
+    dimensions = f"{_format_mm(width)} x {_format_mm(height)} mm" if width > 0 and height > 0 else ""
     name = FINISHED_SIZE_NAME_BY_PRODUCT.get((product_type or "").strip().lower(), "")
     if name and dimensions:
         return f"{name} {dimensions}"
@@ -340,6 +347,7 @@ def _production_intelligence(
 
 def build_public_match_payload(payload):
     matches: list[dict[str, Any]] = []
+    unsupported_reasons: list[str] = []
     for shop in _shop_queryset():
         for paper in _candidate_papers(shop, payload)[:6]:
             machine = _resolve_machine(shop, paper, payload)
@@ -357,10 +365,13 @@ def build_public_match_payload(payload):
                 color_mode=payload.get("color_mode") or "COLOR",
                 sides=payload.get("sides") or "SIMPLEX",
                 finishing_selections=finishing_selections,
-                width_mm=int(payload.get("width_mm") or 0),
-                height_mm=int(payload.get("height_mm") or 0),
+                # Forward the supplied millimetre values untouched.
+                width_mm=payload.get("width_mm"),
+                height_mm=payload.get("height_mm"),
             )
             if not result.can_calculate:
+                if result.reason and result.reason not in unsupported_reasons:
+                    unsupported_reasons.append(result.reason)
                 continue
             preview = apply_marketplace_pricing_to_preview(result.to_dict(), shop=shop)
             total = _positive_money((preview.get("totals") or {}).get("grand_total"))
@@ -387,6 +398,7 @@ def build_public_match_payload(payload):
         "max_price": str(max(totals)) if totals else None,
         "exact_or_estimated": bool(matches),
         "currency": matches[0]["currency"] if matches else "KES",
+        "unsupported_reasons": unsupported_reasons,
     }
 
 
