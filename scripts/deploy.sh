@@ -12,7 +12,7 @@
 # relevant service logs, and the command to roll back to the previous commit.
 #
 # Overridable via environment:
-#   PRINTY_APP_DIR      checkout to deploy          (default: ~/printy_api)
+#   PRINTY_APP_DIR      checkout to deploy          (default: ~/apps/printy_api)
 #   PRINTY_BRANCH       branch to deploy            (default: main)
 #   PRINTY_HEALTH_URL   post-restart health probe   (default: https://api.printy.ke/api/public/products/)
 #   PRINTY_RELOAD_NGINX 1 to also reload nginx      (default: skip; see note below)
@@ -22,7 +22,7 @@
 
 set -Eeuo pipefail
 
-APP_DIR="${PRINTY_APP_DIR:-$HOME/printy_api}"
+APP_DIR="${PRINTY_APP_DIR:-$HOME/apps/printy_api}"
 BRANCH="${PRINTY_BRANCH:-main}"
 HEALTH_URL="${PRINTY_HEALTH_URL:-https://api.printy.ke/api/public/products/}"
 RELOAD_NGINX="${PRINTY_RELOAD_NGINX:-0}"

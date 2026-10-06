@@ -26,7 +26,7 @@ Install it once per server (it lives in the repo, so it is reviewed and version-
 
 ```bash
 sudo su - <app-user>
-cd ~/printy_api
+cd ~/apps/printy_api
 git pull origin main
 chmod +x scripts/deploy.sh          # ensure the exec bit survived the checkout
 ln -sf "$PWD/scripts/deploy.sh" ~/deploy_printy.sh
@@ -58,7 +58,7 @@ one-time setup and are intentionally *not* part of the automated script:
 ```bash
 ssh <droplet>
 sudo su - <app-user>
-cd ~/printy_api
+cd ~/apps/printy_api
 git pull origin main
 source env/bin/activate
 pip install -r requirements.txt
