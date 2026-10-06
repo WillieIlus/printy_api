@@ -15,6 +15,46 @@ This runbook documents the deployment flow only. It does not execute deployment.
 
 ## Backend deployment
 
+### One command (preferred)
+
+`scripts/deploy.sh` encodes the manual sequence below into a single fail-fast command. It installs
+dependencies, runs `check --deploy`, applies migrations, refreshes the Sites framework and static
+files, restarts gunicorn, and then probes the live API. On failure it prints the failing step, the
+gunicorn and nginx logs, and the command to roll back to the previous commit.
+
+Install it once per server (it lives in the repo, so it is reviewed and version-controlled):
+
+```bash
+sudo su - <app-user>
+cd ~/printy_api
+git pull origin main
+chmod +x scripts/deploy.sh          # ensure the exec bit survived the checkout
+ln -sf "$PWD/scripts/deploy.sh" ~/deploy_printy.sh
+```
+
+Then, for every deploy:
+
+```bash
+./deploy_printy.sh
+```
+
+Useful overrides:
+
+```bash
+PRINTY_MIGRATE_PLAN=1 ./deploy_printy.sh   # list pending migrations, change nothing
+PRINTY_RELOAD_NGINX=1 ./deploy_printy.sh   # also reload nginx (only after a config change)
+PRINTY_SKIP_PIP=1    ./deploy_printy.sh   # skip dependency install
+```
+
+It refuses to run if `.env` is missing or empty, and takes an exclusive `flock` so two deploys cannot
+race each other through `git pull`, `migrate` and the gunicorn restart. A transcript is appended to
+`deploy.log` in the app directory (`*.log` is gitignored).
+
+### Manual sequence
+
+The equivalent commands, if you need to run them by hand. Note the two `create_*_user` calls are
+one-time setup and are intentionally *not* part of the automated script:
+
 ```bash
 ssh <droplet>
 sudo su - <app-user>
@@ -40,6 +80,9 @@ sudo systemctl status nginx --no-pager
 journalctl -u gunicorn -n 80 --no-pager
 sudo tail -n 80 /var/log/nginx/error.log
 ```
+
+`create_printy_manager_user` and `create_printy_house_broker_user` are one-time setup and are
+intentionally not part of the automated script; running them on every deploy is unnecessary churn.
 
 ## Frontend deployment
 
