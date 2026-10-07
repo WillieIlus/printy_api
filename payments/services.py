@@ -348,6 +348,10 @@ class MpesaDarajaClient:
         self.transaction_type = DARAAJA_PRODUCTS[self.product]
         self.environment = _mpesa_environment() or "sandbox"
         self.timeout_seconds = int(getattr(settings, "MPESA_TIMEOUT_SECONDS", 30) or 30)
+        # Cap the per-request budget well below the gunicorn worker timeout so a
+        # slow/hung Daraja never turns into an upstream nginx 502: the view can
+        # then answer with a controlled JSON error the frontend understands.
+        self.http_timeout = (4, min(self.timeout_seconds, 8))
 
         if not self.consumer_key or not self.consumer_secret:
             raise ImproperlyConfigured("MPESA_CONSUMER_KEY and MPESA_CONSUMER_SECRET are required.")
@@ -364,11 +368,18 @@ class MpesaDarajaClient:
     def get_access_token(self) -> str:
         url = f"{self.base_url}/oauth/v1/generate?grant_type=client_credentials"
         logger.debug("Requesting M-Pesa Daraja access token from %s", url)
-        response = requests.get(
-            url,
-            auth=HTTPBasicAuth(self.consumer_key, self.consumer_secret),
-            timeout=self.timeout_seconds,
-        )
+        try:
+            response = requests.get(
+                url,
+                auth=HTTPBasicAuth(self.consumer_key, self.consumer_secret),
+                timeout=self.http_timeout,
+            )
+        except requests.exceptions.RequestException as exc:
+            raise MpesaDarajaError(
+                f"M-Pesa access token request failed: {exc}",
+                response_code="400",
+                response_payload=str(exc),
+            ) from exc
         if response.status_code != 200:
             raise MpesaDarajaError(
                 f"M-Pesa access token request failed: {response.text}",
@@ -424,15 +435,22 @@ class MpesaDarajaClient:
             "AccountReference": (account_reference or "PRINTY")[:DARAJA_ACCOUNT_REFERENCE_MAX],
             "TransactionDesc": (transaction_desc or "Printy payment")[:DARAJA_TRANSACTION_DESC_MAX],
         }
-        response = requests.post(
-            url,
-            json=payload,
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {token}",
-            },
-            timeout=self.timeout_seconds,
-        )
+        try:
+            response = requests.post(
+                url,
+                json=payload,
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {token}",
+                },
+                timeout=self.http_timeout,
+            )
+        except requests.exceptions.RequestException as exc:
+            raise MpesaDarajaError(
+                f"M-Pesa STK push request failed: {exc}",
+                response_code="400",
+                response_payload=str(exc),
+            ) from exc
         data = _response_json_or_text(response)
         if response.status_code != 200 or not isinstance(data, dict) or data.get("ResponseCode") != "0":
             logger.error("M-Pesa STK push failed status=%s body=%s", response.status_code, data)

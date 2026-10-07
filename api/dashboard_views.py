@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import secrets
 import re
 from decimal import Decimal
@@ -1051,6 +1053,22 @@ class PartnerQuoteListDetailView(ManagerCapablePartnerQuoteView):
         return Response({"role": "partner", "results": [self._quote_row(item, request=request) for item in self.get_queryset(request)]})
 
 
+def _partner_quote_send_key(*, production_cost_inputs, financial_split, gross_margin_type, gross_margin_value, note) -> str:
+    payload = json.dumps(
+        {
+            "production_cost_inputs": production_cost_inputs if isinstance(production_cost_inputs, dict) else None,
+            "production_cost": str(financial_split["production_cost"]),
+            "client_total": str(financial_split["client_total"]),
+            "gross_margin_type": gross_margin_type,
+            "gross_margin_value": str(gross_margin_value or ""),
+            "note": str(note or ""),
+        },
+        sort_keys=True,
+        default=str,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
 class PartnerQuoteSendToClientView(ManagerCapablePartnerQuoteView):
     dashboard_role = "partner"
     allowed_roles = (CANONICAL_PARTNER_ROLE,)
@@ -1150,6 +1168,31 @@ class PartnerQuoteSendToClientView(ManagerCapablePartnerQuoteView):
                 production_cost=base_price,
                 broker_client_price=base_price + gross_margin_amount,
             )
+        client_send_key = _partner_quote_send_key(
+            production_cost_inputs=production_cost_inputs,
+            financial_split=financial_split,
+            gross_margin_type=gross_margin_type,
+            gross_margin_value=request.data.get("broker_margin_value"),
+            note=request.data.get("note"),
+        )
+        stored_snapshot = dict(latest_response.response_snapshot or {})
+        if (
+            latest_response.sent_to_client_at is not None
+            and latest_response.client_quote_status == "sent"
+            and stored_snapshot.get("client_send_key") == client_send_key
+        ):
+            return Response(
+                {
+                    "quote_request_id": quote_request.id,
+                    "quote_id": latest_response.id,
+                    "pricing": stored_snapshot.get("customer_pricing") or {},
+                    "offline_client": is_offline_quote,
+                    "claim_token": request_snapshot.get("offline_claim_token") if is_offline_quote else None,
+                    "payment": None,
+                    "already_sent": True,
+                }
+            )
+
         gross_margin_percent = ((financial_split["gross_margin"] / base_price) * Decimal("100")).quantize(Decimal("0.01")) if base_price > 0 else Decimal("0.00")
 
         response_snapshot = dict(latest_response.response_snapshot or {})
@@ -1167,6 +1210,7 @@ class PartnerQuoteSendToClientView(ManagerCapablePartnerQuoteView):
             "final_client_price": str(financial_split["client_total"]),
         }
         response_snapshot["internal_pricing_snapshot"] = internal_pricing_snapshot
+        response_snapshot["client_send_key"] = client_send_key
         response_snapshot["customer_pricing"] = {
             "currency": response_snapshot.get("currency") or "KES",
             "final_client_price": str(financial_split["client_total"]),

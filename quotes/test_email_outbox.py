@@ -1,3 +1,4 @@
+import time
 from unittest.mock import patch
 
 from django.core.management import call_command
@@ -181,7 +182,7 @@ class EmailOutboxCommandTestCase(TestCase):
                 subject="Failing quote update",
                 body="Your quote should retry.",
                 send_email_copy=True,
-            )
+)
 
         outbox = EmailOutbox.objects.get(message=message)
         message.refresh_from_db()
@@ -192,4 +193,25 @@ class EmailOutboxCommandTestCase(TestCase):
         self.assertEqual(message.email_status, QuoteRequestMessage.EmailStatus.FAILED)
         self.assertEqual(message.email_error, "smtp down")
         mock_send.assert_called_once_with(fail_silently=False)
+
+    @override_settings(EMAIL_OUTBOX_SEND_ASYNC=True)
+    @patch("quotes.messaging.EmailMultiAlternatives.send", side_effect=lambda *args, **kwargs: time.sleep(1))
+    def test_async_email_outbox_does_not_block_the_enqueuing_request(self, mock_send):
+        start = time.monotonic()
+        with self.captureOnCommitCallbacks(execute=True):
+            create_quote_message(
+                quote_request=self.quote_request,
+                sender=self.shop_owner,
+                recipient=self.client_user,
+                sender_role=QuoteRequestMessage.SenderRole.SHOP,
+                recipient_role=QuoteRequestMessage.RecipientRole.CLIENT,
+                message_kind=QuoteRequestMessage.MessageKind.QUOTE,
+                message_type=QuoteRequestMessage.MessageType.QUOTE_RESPONSE_SENT,
+                direction=QuoteRequestMessage.Direction.INBOUND,
+                subject="Async quote update",
+                body="Your quote is ready.",
+                send_email_copy=True,
+            )
+        elapsed = time.monotonic() - start
+        self.assertLess(elapsed, 0.5)
 

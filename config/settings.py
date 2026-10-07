@@ -262,6 +262,12 @@ EMAIL_HOST_USER = os.environ.get("EMAIL_HOST_USER", "")
 EMAIL_HOST_PASSWORD = os.environ.get("EMAIL_HOST_PASSWORD", "")
 EMAIL_TIMEOUT = 10
 EMAIL_OUTBOX_AUTO_SEND = os.environ.get("EMAIL_OUTBOX_AUTO_SEND", "true").lower() in ("1", "true", "yes")
+# Deferred to a background thread outside local/test, so a slow or blocked SMTP
+# host never holds up the request that enqueued the email (e.g. quote accept).
+EMAIL_OUTBOX_SEND_ASYNC = os.environ.get(
+    "EMAIL_OUTBOX_SEND_ASYNC",
+    "false" if EMAIL_IS_LOCAL else "true",
+).lower() in ("1", "true", "yes")
 DEFAULT_FROM_EMAIL = os.environ.get(
     "DEFAULT_FROM_EMAIL",
     # Production uses the printy.ke domain (docs/env_vars.md). Override via .env.

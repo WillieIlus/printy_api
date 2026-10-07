@@ -1,5 +1,6 @@
 from decimal import Decimal, InvalidOperation
 import logging
+import threading
 
 from django.conf import settings
 from django.core.mail import EmailMultiAlternatives
@@ -377,6 +378,14 @@ def process_email_outbox_entry(outbox_entry: EmailOutbox):
 def _auto_send_email_outbox_entry(outbox_entry: EmailOutbox):
     if not getattr(settings, "EMAIL_OUTBOX_AUTO_SEND", True):
         return
+    if getattr(settings, "EMAIL_OUTBOX_SEND_ASYNC", False):
+        threading.Thread(
+            target=_send_email_outbox_entry_in_thread,
+            args=(outbox_entry.pk,),
+            daemon=True,
+            name="printy-email-outbox",
+        ).start()
+        return
     result = process_email_outbox_entry(outbox_entry)
     if result != "sent":
         logger.warning(
@@ -385,6 +394,25 @@ def _auto_send_email_outbox_entry(outbox_entry: EmailOutbox):
             result,
             outbox_entry.last_error,
         )
+
+
+def _send_email_outbox_entry_in_thread(outbox_entry_id: int):
+    from django.db import connection
+
+    try:
+        outbox_entry = EmailOutbox.objects.get(pk=outbox_entry_id)
+        result = process_email_outbox_entry(outbox_entry)
+        if result != "sent":
+            logger.warning(
+                "Quote message email async send failed outbox=%s status=%s error=%s",
+                outbox_entry.id,
+                result,
+                outbox_entry.last_error,
+            )
+    except Exception as exc:
+        logger.warning("Quote message email async send failed outbox=%s error=%s", outbox_entry_id, _safe_email_error(exc))
+    finally:
+        connection.close()
 
 def create_quote_message(
     *,
