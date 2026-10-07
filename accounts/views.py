@@ -168,10 +168,18 @@ class ResendEmailConfirmationView(APIView):
         sent = False
         try:
             email_address = EmailAddress.objects.get(email__iexact=email, verified=False)
-            email_address.send_confirmation(request)
-            sent = True
         except EmailAddress.DoesNotExist:
-            pass
+            email_address = None
+
+        if email_address is not None:
+            try:
+                email_address.send_confirmation(request)
+                sent = True
+            except Exception:
+                logger.exception(
+                    "email_verification_resend_failed email=%s",
+                    _mask_email(email),
+                )
 
         logger.info(
             "email_verification_resend_requested email=%s outcome=%s",

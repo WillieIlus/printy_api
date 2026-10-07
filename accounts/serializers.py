@@ -1,3 +1,5 @@
+import logging
+
 from rest_framework import serializers
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 from rest_framework_simplejwt.settings import api_settings
@@ -12,6 +14,8 @@ from .services.roles import (
     normalize_role_value,
     set_account_role,
 )
+
+logger = logging.getLogger("api.auth")
 
 PROFILE_FIELDS = (
     "bio",
@@ -274,7 +278,13 @@ class UserCreateSerializer(serializers.ModelSerializer):
         )
         if not verified:
             request = self.context.get("request")
-            email_address.send_confirmation(request, signup=True)
+            try:
+                email_address.send_confirmation(request, signup=True)
+            except Exception:
+                logger.exception(
+                    "registration_activation_email_failed user_id=%s",
+                    user.pk,
+                )
         self.claimed_guest_draft = None
         if normalized_role == User.Role.CLIENT and session_key:
             from quotes.models import CalculatorDraft, CalculatorDraftContext, CalculatorDraftIntent
