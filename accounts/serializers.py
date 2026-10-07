@@ -5,6 +5,7 @@ from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 from rest_framework_simplejwt.settings import api_settings
 
 from .models import User, UserProfile
+from shops.models import Shop
 from .services.capabilities import capability_keys, get_account_capabilities, normalize_capability_overrides
 from .services.roles import (
     assign_role,
@@ -46,6 +47,7 @@ class UserSerializer(serializers.ModelSerializer):
 
     is_email_verified = serializers.SerializerMethodField()
     capabilities = serializers.SerializerMethodField()
+    shop_name = serializers.SerializerMethodField()
     dashboard_role = serializers.SerializerMethodField()
     roles = serializers.SerializerMethodField()
     primary_role = serializers.SerializerMethodField()
@@ -83,6 +85,7 @@ class UserSerializer(serializers.ModelSerializer):
             "capabilities",
             "dashboard_role",
             "home_route",
+            "shop_name",
             "can_access_admin_dashboard",
             "can_access_client_dashboard",
             "can_access_partner_dashboard",
@@ -117,6 +120,10 @@ class UserSerializer(serializers.ModelSerializer):
 
     def get_capabilities(self, instance):
         return get_account_capabilities(instance)
+
+    def get_shop_name(self, instance):
+        shop = instance.owned_shops.order_by("id").first()
+        return shop.name if shop else ""
 
     def _role_payload(self, instance):
         request = self.context.get("request")
@@ -214,6 +221,7 @@ class UserCreateSerializer(serializers.ModelSerializer):
     session_key = serializers.CharField(write_only=True, required=False, allow_blank=True, max_length=64)
     guest_session_key = serializers.CharField(write_only=True, required=False, allow_blank=True, max_length=64)
     guest_draft_id = serializers.IntegerField(write_only=True, required=False, allow_null=True)
+    shop_name = serializers.CharField(write_only=True, required=False, allow_blank=True, max_length=255)
 
     class Meta:
         model = User
@@ -230,6 +238,7 @@ class UserCreateSerializer(serializers.ModelSerializer):
             "session_key",
             "guest_session_key",
             "guest_draft_id",
+            "shop_name",
         ]
         read_only_fields = ["id"]
         extra_kwargs = {
@@ -259,12 +268,25 @@ class UserCreateSerializer(serializers.ModelSerializer):
             or ""
         )
         guest_draft_id = validated_data.pop("guest_draft_id", None)
+        shop_name = validated_data.pop("shop_name", "")
         requested_role = validated_data.pop("role", None) or self.context.get("default_role") or User.Role.CLIENT
         normalized_role = _normalize_public_role(requested_role)
         validated_data["role"] = normalized_role
         if normalized_role == User.Role.PARTNER:
             validated_data["partner_profile_enabled"] = True
         user = User.objects.create_user(**validated_data)
+        if normalized_role == User.Role.PRODUCTION and shop_name:
+            shop = Shop.objects.filter(owner=user).first()
+            if shop is None:
+                Shop.objects.create(
+                    owner=user,
+                    name=str(shop_name).strip(),
+                    business_email=user.email or "shop@printy.ke",
+                    public_email=user.email or "",
+                    description="Created from print shop signup.",
+                    is_active=True,
+                    is_public=True,
+                )
         assign_role(user, normalized_role, source=self.context.get("role_source", "signup"))
         from allauth.account.models import EmailAddress
         from django.conf import settings as django_settings

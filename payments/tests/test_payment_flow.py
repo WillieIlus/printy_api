@@ -19,6 +19,7 @@ from jobs.serializers import ManagedJobSerializer
 from jobs.services.dispatch import dispatch_job_to_shop, ensure_job_assignment_for_paid_job
 from notifications.models import Notification
 from payments.admin import PaymentAdmin
+import payments.admin as payments_admin
 from accounts.models import UserProfile
 from payments.models import MpesaSTKRequest, Payment, PaymentPhoneConsent
 from payments.payment_actor_serializers import PaymentClientSerializer
@@ -752,6 +753,64 @@ class CanonicalPaymentFlowTestCase(TestCase):
         self.assertTrue(
             any(f"Error processing payment {payment.id}: callback exploded" in text for text in self._message_texts(response))
         )
+
+    @override_settings(MPESA_ENV="sandbox", MPESA_ENVIRONMENT="test")
+    def test_admin_action_is_not_reachable_by_non_staff_users(self):
+        _quote, payment = accept_quote_for_payment(quote=self.quote, accepted_by=self.client_user)
+        initiate_stk_push(payment=payment, phone_number="+254700000000")
+
+        self.client.force_login(self.client_user)
+        response = self.client.post(
+            reverse("admin:payments_payment_changelist"),
+            {
+                "action": "simulate_sandbox_payment_confirmation",
+                "_selected_action": [payment.id],
+            },
+        )
+
+        self.assertIn(response.status_code, {302, 403})
+        payment.refresh_from_db()
+        self.assertNotEqual(payment.status, Payment.STATUS_PAID)
+        self.assertFalse(ManagedJob.objects.filter(source_quote=self.quote).exists())
+
+    @override_settings(MPESA_ENV="sandbox", MPESA_ENVIRONMENT="test")
+    def test_admin_action_reuses_real_callback_service_and_test_markers(self):
+        _quote, payment = accept_quote_for_payment(quote=self.quote, accepted_by=self.client_user)
+        initiate_stk_push(payment=payment, phone_number="+254700000000")
+
+        real_callback = payments_admin.handle_stk_callback
+        calls = []
+
+        def spy(callback_payload):
+            calls.append(callback_payload)
+            return real_callback(callback_payload=callback_payload)
+
+        with patch.object(payments_admin, "handle_stk_callback", side_effect=spy):
+            response = self._run_payment_admin_action(payment)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(calls), 1)
+        stk_callback = calls[0]["Body"]["stkCallback"]
+        self.assertTrue(stk_callback["CheckoutRequestID"].startswith("TEST-"))
+        self.assertEqual(stk_callback["ResultCode"], 0)
+        self.assertTrue(stk_callback["ResultDesc"].startswith("Sandbox simulation by admin user"))
+        self.assertEqual(calls[0]["SandboxSimulation"]["admin_user_id"], self.admin_user.id)
+        payment.refresh_from_db()
+        self.assertEqual(payment.status, Payment.STATUS_PAID)
+        self.assertIsNotNone(payment.confirmed_at)
+        self.assertTrue(ManagedJob.objects.filter(source_quote=self.quote).exists())
+
+    @override_settings(MPESA_ENV="sandbox", MPESA_ENVIRONMENT="test")
+    def test_admin_action_is_idempotent_across_repeated_runs(self):
+        _quote, payment = accept_quote_for_payment(quote=self.quote, accepted_by=self.client_user)
+        initiate_stk_push(payment=payment, phone_number="+254700000000")
+
+        self._run_payment_admin_action(payment)
+        self._run_payment_admin_action(payment)
+
+        payment.refresh_from_db()
+        self.assertEqual(payment.status, Payment.STATUS_PAID)
+        self.assertEqual(ManagedJob.objects.filter(source_quote=self.quote).count(), 1)
 
     def test_payment_client_serializer_hides_split_fields(self):
         _quote, payment = accept_quote_for_payment(quote=self.quote, accepted_by=self.client_user)

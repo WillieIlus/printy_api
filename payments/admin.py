@@ -76,7 +76,7 @@ class PaymentAdmin(admin.ModelAdmin):
             },
         }
 
-    @admin.action(description="Simulate sandbox payment confirmation")
+    @admin.action(description="Simulate successful M-Pesa payment (TEST)")
     def simulate_sandbox_payment_confirmation(self, request, queryset):
         if not _sandbox_mpesa_enabled():
             self.message_user(
