@@ -8,6 +8,7 @@ regressing.
 import io
 import uuid
 from contextlib import redirect_stdout
+from unittest.mock import patch
 
 from django.core import checks
 from django.core import mail
@@ -119,8 +120,10 @@ class TestSystemCheckIsWired(TestCase):
         assert _error_ids(findings) == set()
 
         # run_checks must actually execute our check; W901/E001 is produced
-        # by check_email_delivery_config only.
-        reports = checks.run_checks(tags=[checks.Tags.compatibility])
+        # by check_email_delivery_config only. It reads the import-time module
+        # globals, so pin the backend there rather than depending on .env.
+        with patch("config.settings.EMAIL_BACKEND", CONSOLE):
+            reports = checks.run_checks(tags=[checks.Tags.compatibility])
         produced = {r.id for r in reports if r.id in {"printy.W901", "printy.E001"}}
         assert "printy.W901" in produced
 
