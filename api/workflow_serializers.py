@@ -1456,6 +1456,7 @@ class ClientResponseListItemSerializer(serializers.ModelSerializer):
     status = serializers.SerializerMethodField()
     latest_message = serializers.SerializerMethodField()
     unread_count = serializers.SerializerMethodField()
+    payment = serializers.SerializerMethodField()
 
     class Meta:
         model = Quote
@@ -1469,9 +1470,20 @@ class ClientResponseListItemSerializer(serializers.ModelSerializer):
             "status",
             "latest_message",
             "unread_count",
+            "payment",
             "created_at",
             "updated_at",
         ]
+
+    def get_payment(self, obj):
+        payment = obj.payments.order_by("-created_at", "-id").first()
+        if payment is None:
+            return None
+        return {
+            "id": payment.id,
+            "status": payment.status,
+            "payer_phone": payment.payer_phone,
+        }
 
     def get_latest_message(self, obj):
         latest = obj.messages.order_by("-created_at", "-id").first()

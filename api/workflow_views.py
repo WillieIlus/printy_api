@@ -5,7 +5,7 @@ from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.http import FileResponse
 from django.db import OperationalError, ProgrammingError, transaction
-from django.db.models import Count, OuterRef, Q, Subquery
+from django.db.models import Count, OuterRef, Prefetch, Q, Subquery
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from rest_framework import generics, status
@@ -24,6 +24,7 @@ from notifications.services import notify_quote_event
 from jobs.managed_services import create_assignment_for_managed_job, create_managed_job_from_accepted_quote
 from jobs.models import ManagedJob
 from payments.serializers import PaymentSerializer
+from payments.models import Payment
 from quotes.choices import CalculatorDraftContext, CalculatorDraftIntent, QuoteStatus, QuoteOfferStatus
 from quotes.guardrails import expire_quote
 from quotes.messaging import create_quote_message
@@ -1850,6 +1851,7 @@ class ClientResponseListView(APIView):
             "quote_request", "shop",
         ).prefetch_related(
             "messages",
+            Prefetch("payments", queryset=Payment.objects.order_by("-created_at", "-id")),
         ).order_by("-updated_at", "-created_at")
         return Response(ClientResponseListItemSerializer(responses, many=True, context={"request": request}).data)
 
