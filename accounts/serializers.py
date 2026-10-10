@@ -4,9 +4,12 @@ from rest_framework import serializers
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 from rest_framework_simplejwt.settings import api_settings
 
+from django.core.exceptions import ValidationError as DjangoValidationError
+
 from .models import User, UserProfile
 from shops.models import Shop
 from .services.capabilities import capability_keys, get_account_capabilities, normalize_capability_overrides
+from payments.services import normalize_mpesa_phone
 from .services.roles import (
     assign_role,
     build_auth_role_payload,
@@ -222,6 +225,7 @@ class UserCreateSerializer(serializers.ModelSerializer):
     guest_session_key = serializers.CharField(write_only=True, required=False, allow_blank=True, max_length=64)
     guest_draft_id = serializers.IntegerField(write_only=True, required=False, allow_null=True)
     shop_name = serializers.CharField(write_only=True, required=False, allow_blank=True, max_length=255)
+    phone = serializers.CharField(write_only=True, required=False, allow_blank=True, allow_null=True, max_length=20)
 
     class Meta:
         model = User
@@ -239,6 +243,7 @@ class UserCreateSerializer(serializers.ModelSerializer):
             "guest_session_key",
             "guest_draft_id",
             "shop_name",
+            "phone",
         ]
         read_only_fields = ["id"]
         extra_kwargs = {
@@ -261,7 +266,18 @@ class UserCreateSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError(f"Unsupported capability override keys: {', '.join(unknown_keys)}.")
         return normalized
 
+    def validate_phone(self, value):
+        if value in (None, ""):
+            return ""
+        try:
+            return normalize_mpesa_phone(str(value))
+        except DjangoValidationError:
+            raise serializers.ValidationError(
+                "Enter a valid Kenyan M-Pesa phone number, for example 2547XXXXXXXX."
+            )
+
     def create(self, validated_data):
+        phone = validated_data.pop("phone", "")
         session_key = (
             validated_data.pop("session_key", "")
             or validated_data.pop("guest_session_key", "")
@@ -307,6 +323,10 @@ class UserCreateSerializer(serializers.ModelSerializer):
                     "registration_activation_email_failed user_id=%s",
                     user.pk,
                 )
+        if phone:
+            profile, _ = UserProfile.objects.get_or_create(user=user)
+            profile.phone = phone
+            profile.save(update_fields=["phone", "updated_at"])
         self.claimed_guest_draft = None
         if normalized_role == User.Role.CLIENT and session_key:
             from quotes.models import CalculatorDraft, CalculatorDraftContext, CalculatorDraftIntent

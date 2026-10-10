@@ -315,6 +315,13 @@ def _remember_payment_phone(payment: Payment, phone: str) -> None:
     payment.save(update_fields=["payer_phone", "updated_at"])
 
 
+def _save_phone_to_profile(request, phone: str) -> None:
+    profile = get_or_create_profile(request.user)
+    if profile.phone != phone:
+        profile.phone = phone
+        profile.save(update_fields=["phone", "updated_at"])
+
+
 class QuoteAcceptView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -323,12 +330,15 @@ class QuoteAcceptView(APIView):
             Quote.objects.select_related("quote_request", "shop", "production_option"),
             pk=quote_id,
         )
+        phone = str(request.data.get("phone_number") or "").strip()
         try:
             quote, payment = accept_quote_for_payment(
                 quote=quote,
                 accepted_by=request.user,
-                payer_phone=str(request.data.get("phone_number") or ""),
+                payer_phone=phone,
             )
+            if phone and _truthy(request.data.get("save_phone_to_profile")):
+                _save_phone_to_profile(request, phone)
         except ValidationError as exc:
             return Response({"detail": "; ".join(exc.messages)}, status=400)
         return Response(

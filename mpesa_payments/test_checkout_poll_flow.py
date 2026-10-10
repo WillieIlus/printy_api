@@ -20,6 +20,7 @@ from django.test import TestCase, override_settings
 from rest_framework.test import APIClient
 from unittest.mock import patch
 
+from accounts.models import UserProfile
 from mpesa_payments.models import MpesaPayment, MpesaPaymentStatus
 
 User = get_user_model()
@@ -57,6 +58,29 @@ class CheckoutPollLoopTests(TestCase):
         self.assertEqual(Decimal(str(data["amount"])), Decimal("1250.00"))
         self.assertEqual(data["status"], "initiated")
         mock_initiate.assert_called_once()
+
+    @patch("mpesa_payments.views.initiate_stk_push")
+    def test_stk_push_with_save_flag_persists_phone_to_profile(self, mock_initiate):
+        response = self.client.post(
+            "/api/payments/mpesa/stk-push/",
+            {"phone_number": "0722 111 222", "amount": "1250.00", "save_phone_to_profile": True},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 201)
+        profile = UserProfile.objects.get(user=self.buyer)
+        self.assertEqual(profile.phone, "254722111222")
+
+    @patch("mpesa_payments.views.initiate_stk_push")
+    def test_stk_push_without_save_flag_leaves_profile_untouched(self, mock_initiate):
+        response = self.client.post(
+            "/api/payments/mpesa/stk-push/",
+            {"phone_number": "0733 111 222", "amount": "1250.00"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 201)
+        self.assertFalse(UserProfile.objects.filter(user=self.buyer, phone="254733111222").exists())
 
     def test_simulate_command_flips_the_payment_the_ui_polls_to_paid(self):
         payment = MpesaPayment.objects.create(

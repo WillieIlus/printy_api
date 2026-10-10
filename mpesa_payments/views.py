@@ -21,6 +21,8 @@ from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from accounts.serializers import get_or_create_profile
+
 from .models import MpesaPayment
 from .serializers import MpesaCallbackSerializer, MpesaPaymentReadSerializer, MpesaStkPushSerializer
 from .services import (
@@ -55,6 +57,26 @@ def _resolve_payable(data: dict):
     return None
 
 
+def _truthy(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(value)
+
+
+def _save_profile_phone(request, phone: str) -> None:
+    """Persist the paying number to the user's profile so the next checkout
+    can be prefilled. Explicit consent gate keeps the payment flow unchanged
+    for callers that do not ask to remember the number."""
+    if not _truthy(request.data.get("save_phone_to_profile")):
+        return
+    profile = get_or_create_profile(request.user)
+    if profile.phone != phone:
+        profile.phone = phone
+        profile.save(update_fields=["phone", "updated_at"])
+
+
 class MpesaStkPushView(APIView):
     """POST /api/payments/mpesa/stk-push/
 
@@ -84,6 +106,7 @@ class MpesaStkPushView(APIView):
                 description=data.get("description", ""),
             )
             initiate_stk_push(payment)
+            _save_profile_phone(request, data["phone_number"])
         except MpesaError as exc:
             # Payment row has already been marked failed where relevant.
             return Response({"detail": str(exc)}, status=status.HTTP_502_BAD_GATEWAY)
