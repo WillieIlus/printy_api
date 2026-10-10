@@ -727,6 +727,11 @@ def _extract_production_preview(matches: list[dict[str, Any]], product_type: str
         "variable_waste_sheets": imposition.get("variable_waste_sheets"),
         "variable_waste_rate": imposition.get("variable_waste_rate"),
         "billable_sheets": imposition.get("billable_sheets") or preview_data.get("billable_sheets"),
+        "production_sheets": imposition.get("production_sheets"),
+        "max_billable_sheets": imposition.get("max_billable_sheets"),
+        "maximum_spoilage_rate": imposition.get("maximum_spoilage_rate"),
+        "maximum_spoilage_sheets": imposition.get("maximum_spoilage_sheets"),
+        "spoilage_capped": imposition.get("spoilage_capped"),
         "layout": {
             "cols": (imposition.get("layout") or {}).get("cols") or imposition.get("cols"),
             "rows": (imposition.get("layout") or {}).get("rows") or imposition.get("rows"),

@@ -91,11 +91,21 @@ def _production(preview: dict) -> dict:
         except (TypeError, ValueError):
             waste = None
 
+    production_sheets = (
+        engine_imposition.get("production_sheets")
+        or result_imposition.get("total_sheets_needed")
+        or preview.get("production_sheets")
+    )
     return {
         "copies_per_sheet": copies,
         "good_sheets": good,
+        "production_sheets": production_sheets,
         "waste_sheets": waste,
         "billable_sheets": billable,
+        "max_billable_sheets": engine_imposition.get("max_billable_sheets"),
+        "maximum_spoilage_rate": engine_imposition.get("maximum_spoilage_rate"),
+        "maximum_spoilage_sheets": engine_imposition.get("maximum_spoilage_sheets"),
+        "spoilage_capped": engine_imposition.get("spoilage_capped"),
         "orientation": engine_imposition.get("orientation") or preview.get("rotated"),
         "parent_sheet": (
             preview.get("parent_sheet_name")

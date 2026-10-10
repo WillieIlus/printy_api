@@ -84,7 +84,12 @@ def calculate_billable_sheets(
     raw_sheets = _ceil(Decimal(quantity) / Decimal(yield_per_sheet))
     variable_waste_sheets = _ceil(Decimal(raw_sheets) * Decimal(waste_policy.variable_waste_rate))
     total_sheets_needed = raw_sheets + int(waste_policy.fixed_waste_sheets) + variable_waste_sheets
-    billable_sheets = max(total_sheets_needed, int(waste_policy.minimum_billable_sheets))
+    production_billable_sheets = max(total_sheets_needed, int(waste_policy.minimum_billable_sheets))
+
+    maximum_spoilage_rate = Decimal(waste_policy.maximum_spoilage_rate)
+    maximum_spoilage_sheets = _ceil(Decimal(raw_sheets) * maximum_spoilage_rate)
+    max_billable_sheets = raw_sheets + maximum_spoilage_sheets
+    billable_sheets = min(production_billable_sheets, max_billable_sheets)
 
     return {
         "waste_policy": waste_policy,
@@ -94,6 +99,11 @@ def calculate_billable_sheets(
         "waste_sheets_added": int(waste_policy.fixed_waste_sheets) + variable_waste_sheets,
         "total_sheets_needed": total_sheets_needed,
         "minimum_billable_sheets": int(waste_policy.minimum_billable_sheets),
+        "production_billable_sheets": production_billable_sheets,
+        "maximum_spoilage_rate": maximum_spoilage_rate,
+        "maximum_spoilage_sheets": maximum_spoilage_sheets,
+        "max_billable_sheets": max_billable_sheets,
+        "spoilage_capped": billable_sheets < production_billable_sheets,
         "billable_sheets": billable_sheets,
     }
 

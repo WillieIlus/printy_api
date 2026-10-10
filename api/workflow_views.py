@@ -716,6 +716,12 @@ class DashboardCalculatorPreviewView(APIView):
                 "production_preview": {
                     "pieces_per_sheet": result.copies_per_sheet,
                     "sheets_required": result.good_sheets,
+                    "good_sheets": result.good_sheets,
+                    "billable_sheets": result.billable_sheets,
+                    "production_sheets": result.production_sheets,
+                    "max_billable_sheets": result.max_billable_sheets,
+                    "maximum_spoilage_rate": result.maximum_spoilage_rate,
+                    "spoilage_capped": result.spoilage_capped,
                     "parent_sheet": result.parent_sheet_name,
                     "quantity": result.quantity,
                     "cutting_required": result.breakdown.get("imposition", {}).get("cutting_required", True),

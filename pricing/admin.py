@@ -61,6 +61,7 @@ class WastePolicyAdmin(admin.ModelAdmin):
         "fixed_waste_sheets",
         "variable_waste_rate",
         "minimum_billable_sheets",
+        "maximum_spoilage_rate",
         "updated_at",
     ]
     list_filter = ["is_active"]

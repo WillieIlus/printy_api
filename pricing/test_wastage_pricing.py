@@ -1,6 +1,7 @@
 from decimal import Decimal
 from unittest.mock import patch
 
+from django.core.exceptions import ValidationError
 from django.test import TestCase
 
 from accounts.models import User
@@ -97,10 +98,12 @@ class WastagePricingTestCase(TestCase):
     def test_one_sheet_sample_order_uses_tier_one_and_floor(self):
         payload = self._price()
         self.assertEqual(payload["raw_sheets"], 1)
-        self.assertEqual(payload["billable_sheets"], 4)
-        self.assertEqual(payload["production_cost"], Decimal("480.33"))
+        self.assertEqual(payload["production_billable_sheets"], 4)
+        self.assertEqual(payload["max_billable_sheets"], 2)
+        self.assertEqual(payload["billable_sheets"], 2)
+        self.assertEqual(payload["production_cost"], Decimal("394.33"))
         self.assertEqual(payload["volume_multiplier"], Decimal("6.00"))
-        self.assertEqual(payload["final_client_price"], Decimal("2881.98"))
+        self.assertEqual(payload["final_client_price"], Decimal("2365.98"))
 
     def test_ten_card_order_uses_low_volume_penalty(self):
         payload = self._price(
@@ -110,10 +113,12 @@ class WastagePricingTestCase(TestCase):
             click_charge_per_sheet=Decimal("45.00"),
         )
         self.assertEqual(payload["raw_sheets"], 1)
-        self.assertEqual(payload["billable_sheets"], 4)
-        self.assertEqual(payload["production_cost"], Decimal("584.33"))
+        self.assertEqual(payload["production_billable_sheets"], 4)
+        self.assertEqual(payload["max_billable_sheets"], 2)
+        self.assertEqual(payload["billable_sheets"], 2)
+        self.assertEqual(payload["production_cost"], Decimal("446.33"))
         self.assertEqual(payload["volume_multiplier"], Decimal("6.00"))
-        self.assertEqual(payload["final_client_price"], Decimal("3505.98"))
+        self.assertEqual(payload["final_client_price"], Decimal("2677.98"))
 
     def test_one_hundred_card_order_uses_mid_tier(self):
         payload = self._price(
@@ -160,9 +165,90 @@ class WastagePricingTestCase(TestCase):
             variable_waste_rate=Decimal("0.0000"),
             minimum_billable_sheets=5,
         )
-        payload = calculate_billable_sheets(quantity=1, yield_per_sheet=10, waste_policy=policy)
-        self.assertEqual(payload["total_sheets_needed"], 1)
+        payload = calculate_billable_sheets(quantity=30, yield_per_sheet=10, waste_policy=policy)
+        self.assertEqual(payload["total_sheets_needed"], 3)
+        self.assertEqual(payload["max_billable_sheets"], 5)
         self.assertEqual(payload["billable_sheets"], 5)
+
+    def test_minimum_billable_sheets_cannot_exceed_spoilage_cap(self):
+        policy = WastePolicy.objects.create(
+            name="Minimum Billable Capped Policy",
+            fixed_waste_sheets=0,
+            variable_waste_rate=Decimal("0.0000"),
+            minimum_billable_sheets=5,
+        )
+        payload = calculate_billable_sheets(quantity=1, yield_per_sheet=10, waste_policy=policy)
+        self.assertEqual(payload["production_billable_sheets"], 5)
+        self.assertEqual(payload["max_billable_sheets"], 2)
+        self.assertEqual(payload["billable_sheets"], 2)
+        self.assertTrue(payload["spoilage_capped"])
+
+    def test_spoilage_cap_formula_matches_theoretical_plus_half(self):
+        # Default policy (fixed=2, var=10%, min=3, cap=50%) -> cap = theoretical + ceil(theoretical*0.5).
+        expected_caps = {1: 2, 2: 3, 3: 5, 4: 6, 10: 15, 100: 150}
+        for theoretical, cap in expected_caps.items():
+            with self.subTest(theoretical=theoretical):
+                payload = calculate_billable_sheets(
+                    quantity=theoretical,
+                    yield_per_sheet=1,
+                    waste_policy=self.waste_policy,
+                )
+                self.assertEqual(payload["raw_sheets"], theoretical)
+                self.assertEqual(payload["max_billable_sheets"], cap)
+                self.assertEqual(
+                    payload["billable_sheets"],
+                    min(payload["production_billable_sheets"], cap),
+                )
+
+    def test_spoilage_cap_rounds_fractional_allowance_up(self):
+        payload = calculate_billable_sheets(quantity=3, yield_per_sheet=1, waste_policy=self.waste_policy)
+        self.assertEqual(payload["raw_sheets"], 3)
+        self.assertEqual(payload["maximum_spoilage_sheets"], 2)
+        self.assertEqual(payload["max_billable_sheets"], 5)
+
+    def test_spoilage_cap_is_configurable(self):
+        policy = WastePolicy.objects.create(
+            name="Zero Spoilage Cap Policy",
+            fixed_waste_sheets=2,
+            variable_waste_rate=Decimal("0.1000"),
+            minimum_billable_sheets=3,
+            maximum_spoilage_rate=Decimal("0.0000"),
+        )
+        payload = calculate_billable_sheets(quantity=10, yield_per_sheet=1, waste_policy=policy)
+        self.assertEqual(payload["raw_sheets"], 10)
+        self.assertEqual(payload["max_billable_sheets"], 10)
+        self.assertEqual(payload["billable_sheets"], 10)
+        self.assertTrue(payload["spoilage_capped"])
+
+    def test_spoilage_cap_does_not_reduce_allowance_within_cap(self):
+        payload = calculate_billable_sheets(quantity=100, yield_per_sheet=1, waste_policy=self.waste_policy)
+        self.assertEqual(payload["total_sheets_needed"], 112)
+        self.assertEqual(payload["max_billable_sheets"], 150)
+        self.assertEqual(payload["billable_sheets"], 112)
+        self.assertFalse(payload["spoilage_capped"])
+
+    def test_production_sheets_are_never_below_billable(self):
+        payload = calculate_billable_sheets(quantity=2, yield_per_sheet=1, waste_policy=self.waste_policy)
+        self.assertEqual(payload["total_sheets_needed"], 5)
+        self.assertEqual(payload["billable_sheets"], 3)
+        self.assertGreaterEqual(payload["total_sheets_needed"], payload["billable_sheets"])
+
+    def test_invalid_quantities_are_rejected(self):
+        with self.assertRaises(ValidationError):
+            calculate_billable_sheets(quantity=0, yield_per_sheet=1, waste_policy=self.waste_policy)
+        with self.assertRaises(ValidationError):
+            calculate_billable_sheets(quantity=1, yield_per_sheet=0, waste_policy=self.waste_policy)
+
+    def test_maximum_spoilage_rate_validation_rejects_negative(self):
+        policy = WastePolicy(
+            name="Invalid Cap Policy",
+            fixed_waste_sheets=2,
+            variable_waste_rate=Decimal("0.1000"),
+            minimum_billable_sheets=3,
+            maximum_spoilage_rate=Decimal("-0.1000"),
+        )
+        with self.assertRaises(ValidationError):
+            policy.full_clean()
 
     def test_setup_time_labor_cost_is_included(self):
         payload = calculate_setup_cost(setup_policy=self.setup_policy)
@@ -189,7 +275,8 @@ class WastagePricingTestCase(TestCase):
             waste_policy=self.waste_policy,
             setup_policy=policy,
         )
-        self.assertEqual(payload["calculated_client_price"], Decimal("48.00"))
+        self.assertEqual(payload["billable_sheets"], 2)
+        self.assertEqual(payload["calculated_client_price"], Decimal("24.00"))
         self.assertEqual(payload["final_client_price"], Decimal("1500.00"))
 
     def test_quantity_tier_boundaries(self):

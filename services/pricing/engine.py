@@ -85,6 +85,11 @@ class PricingEngineResult:
     variable_waste_sheets: int | None = None
     waste_sheets_added: int | None = None
     variable_waste_rate: str | None = None
+    production_sheets: int | None = None
+    max_billable_sheets: int | None = None
+    maximum_spoilage_rate: str | None = None
+    maximum_spoilage_sheets: int | None = None
+    spoilage_capped: bool | None = None
     parent_sheet_name: str | None = None
     rotated: bool | None = None
     roll_width_mm: int | None = None
@@ -119,9 +124,16 @@ def _waste_policy_split(quantity: int, copies_per_sheet: int) -> dict:
         )
     except Exception:
         return {
+            "raw_sheets": 0,
             "fixed_waste_sheets": 0,
             "variable_waste_sheets": 0,
             "waste_sheets_added": 0,
+            "total_sheets_needed": 0,
+            "production_billable_sheets": 0,
+            "maximum_spoilage_rate": None,
+            "maximum_spoilage_sheets": 0,
+            "max_billable_sheets": 0,
+            "spoilage_capped": False,
             "billable_sheets": 0,
         }
 
@@ -316,6 +328,14 @@ def calculate_sheet_pricing(
     waste_added = int(waste.get("waste_sheets_added") or 0)
     waste_policy = waste.get("waste_policy")
     waste_rate = str(waste_policy.variable_waste_rate) if waste_policy is not None else None
+    production_sheets = int(waste.get("total_sheets_needed") or 0)
+    max_billable_raw = waste.get("max_billable_sheets")
+    max_billable_sheets = int(max_billable_raw) if max_billable_raw else None
+    maximum_spoilage_rate_raw = waste.get("maximum_spoilage_rate")
+    maximum_spoilage_rate = str(maximum_spoilage_rate_raw) if maximum_spoilage_rate_raw is not None else None
+    maximum_spoilage_sheets = int(waste.get("maximum_spoilage_sheets") or 0)
+    spoilage_capped = bool(waste.get("spoilage_capped") or False)
+    billed_spoilage_sheets = max(0, billable_sheets - imposition.good_sheets)
     imposition_payload = {
         **imposition.to_dict(),
         "layout": {"cols": imposition.cols, "rows": imposition.rows},
@@ -325,6 +345,11 @@ def calculate_sheet_pricing(
         "waste_sheets_added": waste_added,
         "billable_sheets": billable_sheets,
         "variable_waste_rate": waste_rate,
+        "production_sheets": production_sheets,
+        "max_billable_sheets": max_billable_sheets,
+        "maximum_spoilage_rate": maximum_spoilage_rate,
+        "maximum_spoilage_sheets": maximum_spoilage_sheets,
+        "spoilage_capped": spoilage_capped,
     }
     paper_breakdown = {
         "id": paper.id,
@@ -366,6 +391,11 @@ def calculate_sheet_pricing(
             variable_waste_sheets=0,
             waste_sheets_added=0,
             variable_waste_rate=None,
+            production_sheets=0,
+            max_billable_sheets=0,
+            maximum_spoilage_rate=None,
+            maximum_spoilage_sheets=0,
+            spoilage_capped=False,
             parent_sheet_name=paper.sheet_size,
             rotated=False,
             explanation_lines=[reason],
@@ -409,6 +439,11 @@ def calculate_sheet_pricing(
             variable_waste_sheets=variable_waste,
             waste_sheets_added=waste_added,
             variable_waste_rate=waste_rate,
+            production_sheets=production_sheets,
+            max_billable_sheets=max_billable_sheets,
+            maximum_spoilage_rate=maximum_spoilage_rate,
+            maximum_spoilage_sheets=maximum_spoilage_sheets,
+            spoilage_capped=spoilage_capped,
             parent_sheet_name=paper.sheet_size,
             rotated=imposition.orientation == "rotated",
             explanation_lines=[reason],
@@ -460,7 +495,7 @@ def calculate_sheet_pricing(
     per_sheet_explanation += f" = {_format_money(total_per_sheet)} per sheet"
 
     printing_explanation_parts = [
-        f"{billable_sheets} sheets (incl. {waste_added} spoilage)",
+        f"{billable_sheets} sheets (incl. {billed_spoilage_sheets} spoilage)",
         f"{getattr(shop, 'currency', 'KES') or 'KES'} {_format_money(printing_breakdown['front_side_price'])}",
     ]
     if sides == Sides.DUPLEX:
@@ -469,13 +504,13 @@ def calculate_sheet_pricing(
             printing_explanation_parts.append(f"{getattr(shop, 'currency', 'KES') or 'KES'} {_format_money(printing_breakdown['duplex_surcharge'])} surcharge")
         elif printing_breakdown["duplex_override_used"]:
             printing_explanation_parts = [
-                f"{billable_sheets} sheets (incl. {waste_added} spoilage)",
+                f"{billable_sheets} sheets (incl. {billed_spoilage_sheets} spoilage)",
                 f"{getattr(shop, 'currency', 'KES') or 'KES'} {_format_money(printing_breakdown['duplex_override_price'])} duplex override",
             ]
 
     explanations = [
         imposition.explanation,
-        f"Paper: {billable_sheets} sheets (incl. {waste_added} spoilage) x {getattr(shop, 'currency', 'KES') or 'KES'} {_format_money(paper_rate)}.",
+        f"Paper: {billable_sheets} sheets (incl. {billed_spoilage_sheets} spoilage) x {getattr(shop, 'currency', 'KES') or 'KES'} {_format_money(paper_rate)}.",
         f"Printing: {' + '.join(printing_explanation_parts)}.",
     ]
     explanations.extend(_humanize_finishing_explanation(line, getattr(shop, "currency", "KES") or "KES") for line in finishing_lines)
@@ -564,6 +599,11 @@ def calculate_sheet_pricing(
         variable_waste_sheets=variable_waste,
         waste_sheets_added=waste_added,
         variable_waste_rate=waste_rate,
+        production_sheets=production_sheets,
+        max_billable_sheets=max_billable_sheets,
+        maximum_spoilage_rate=maximum_spoilage_rate,
+        maximum_spoilage_sheets=maximum_spoilage_sheets,
+        spoilage_capped=spoilage_capped,
         parent_sheet_name=paper.sheet_size,
         rotated=imposition.orientation == "rotated",
         explanation_lines=explanations + [

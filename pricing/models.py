@@ -173,6 +173,15 @@ class WastePolicy(models.Model):
     fixed_waste_sheets = models.PositiveIntegerField(default=2)
     variable_waste_rate = models.DecimalField(max_digits=6, decimal_places=4, default=Decimal("0.1000"))
     minimum_billable_sheets = models.PositiveIntegerField(default=3)
+    maximum_spoilage_rate = models.DecimalField(
+        max_digits=6,
+        decimal_places=4,
+        default=Decimal("0.5000"),
+        help_text=_(
+            "Hard cap on billable spoilage. The maximum billable sheets are the theoretical "
+            "sheets plus this fraction of the theoretical sheets (rounded up)."
+        ),
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -191,6 +200,8 @@ class WastePolicy(models.Model):
             errors["variable_waste_rate"] = _("Variable waste rate cannot be negative.")
         if self.minimum_billable_sheets <= 0:
             errors["minimum_billable_sheets"] = _("Minimum billable sheets must be greater than zero.")
+        if self.maximum_spoilage_rate < 0:
+            errors["maximum_spoilage_rate"] = _("Maximum spoilage rate cannot be negative.")
         if errors:
             raise ValidationError(errors)
 

@@ -341,7 +341,10 @@ class CalculatorSpecHarmonizationTestCase(TestCase):
         self.assertEqual(production.get("good_sheets"), production.get("sheets_required"), payload)
         self.assertEqual(
             production.get("billable_sheets"),
-            (production.get("good_sheets") or 0) + (production.get("waste_sheets_added") or 0),
+            min(
+                (production.get("good_sheets") or 0) + (production.get("waste_sheets_added") or 0),
+                production.get("max_billable_sheets") or (10**9),
+            ),
             payload,
         )
         self.assertGreaterEqual(production.get("billable_sheets") or 0, production.get("good_sheets") or 0, payload)
@@ -396,7 +399,10 @@ class CalculatorSpecHarmonizationTestCase(TestCase):
         self.assertEqual(production["waste_sheets_added"], production["fixed_waste_sheets"] + production["variable_waste_sheets"])
         variable_rate = D(str(production["variable_waste_rate"]))
         self.assertEqual(production["variable_waste_sheets"], ceil(good * variable_rate))
-        self.assertEqual(production["billable_sheets"], good + production["waste_sheets_added"])
+        self.assertEqual(
+            production["billable_sheets"],
+            min(good + production["waste_sheets_added"], production["max_billable_sheets"]),
+        )
         self.assertGreaterEqual(production["waste_sheets_added"], production["fixed_waste_sheets"])
 
         same_as_first_match = self.client.post(
@@ -415,6 +421,36 @@ class CalculatorSpecHarmonizationTestCase(TestCase):
         first = (same_as_first_match["matches"] or [{}])[0].get("production_preview") or {}
         for key in ("good_sheets", "fixed_waste_sheets", "variable_waste_sheets", "waste_sheets_added", "billable_sheets", "pieces_per_sheet"):
             self.assertEqual(production[key], first[key], key)
+
+    def test_public_preview_caps_billable_spoilage(self):
+        """The public preview must never bill spoilage beyond the configured cap:
+        max billable = theoretical (good) sheets + ceil(theoretical * rate)."""
+        from math import ceil
+
+        response = self.client.post(
+            "/api/calculator/public-preview/",
+            {
+                "product_type": "business_card",
+                "quantity": 100,
+                "finished_size": "90x55mm",
+                "requested_paper_category": "gloss",
+                "requested_gsm": 300,
+                "print_sides": "SIMPLEX",
+                "color_mode": "COLOR",
+            },
+            format="json",
+        )
+        assert response.status_code == 200, response.json()
+        production = response.json()["production_preview"]
+        good = production["good_sheets"]
+        self.assertEqual(production["max_billable_sheets"], good + ceil(good * 0.5))
+        self.assertLessEqual(production["billable_sheets"], production["max_billable_sheets"], production)
+        self.assertGreaterEqual(production["billable_sheets"], good, production)
+        self.assertIn("production_sheets", production)
+        self.assertIn("spoilage_capped", production)
+        for match in response.json().get("matches") or []:
+            row = match.get("production_preview") or {}
+            self.assertEqual(row.get("max_billable_sheets"), good + ceil(good * 0.5), match)
 
     def test_calculator_config_advertises_optional_paper_request_fields(self):
         response = self.client.get("/api/calculator/config/")

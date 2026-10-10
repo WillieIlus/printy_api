@@ -324,6 +324,11 @@ def _production_intelligence(
         "variable_waste_sheets": imposition.get("variable_waste_sheets"),
         "variable_waste_rate": imposition.get("variable_waste_rate"),
         "billable_sheets": imposition.get("billable_sheets") or preview.get("billable_sheets"),
+        "production_sheets": imposition.get("production_sheets"),
+        "max_billable_sheets": imposition.get("max_billable_sheets"),
+        "maximum_spoilage_rate": imposition.get("maximum_spoilage_rate"),
+        "maximum_spoilage_sheets": imposition.get("maximum_spoilage_sheets"),
+        "spoilage_capped": imposition.get("spoilage_capped"),
         "layout": {
             "cols": layout.get("cols") or imposition.get("cols"),
             "rows": layout.get("rows") or imposition.get("rows"),
