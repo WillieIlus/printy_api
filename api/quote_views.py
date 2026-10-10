@@ -144,7 +144,7 @@ class CustomerQuoteRequestViewSet(viewsets.ModelViewSet):
             "shop"
         ).prefetch_related(
             "items__product", "items__paper", "items__finishings__finishing_rate",
-            "services__service_rate", "attachments", "messages__sender",
+            "services", "attachments", "messages__sender",
         ).order_by("-created_at")
 
     def get_serializer_class(self):
@@ -432,7 +432,7 @@ class IncomingRequestViewSet(viewsets.ReadOnlyModelViewSet):
             "shop"
         ).prefetch_related(
             "items__product", "items__paper", "items__finishings__finishing_rate",
-            "services__service_rate", "quotes", "attachments", "messages__sender",
+            "services", "quotes", "attachments", "messages__sender",
         ).order_by("-created_at")
 
     def get_serializer_class(self):

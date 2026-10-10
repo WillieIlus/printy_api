@@ -278,6 +278,19 @@ def calculate_quote_item(item: QuoteItem, force: bool = False) -> tuple[Decimal,
     return unit_price, line_total
 
 
+def _get_service_price(price_override, distance_km=None):
+    """
+    Price for a deprecated service selection (QuoteItemService/QuoteRequestService).
+
+    These transitional models carry no rate/rate-card FK, so a service only
+    contributes to the total when the seller sets an explicit price override.
+    ``distance_km`` is kept for signature compatibility and is currently unused.
+    """
+    if price_override is None:
+        return None
+    return Decimal(price_override)
+
+
 def _build_item_breakdown_lines(item: QuoteItem) -> list[dict]:
     """
     Build breakdown lines for quote items using the summary layer.
@@ -306,10 +319,11 @@ def _build_item_breakdown_lines(item: QuoteItem) -> list[dict]:
                     break
 
     # Add services (not in summary)
-    for qis in item.services.select_related("service_rate").filter(is_selected=True):
-        price = _get_service_price(qis.service_rate, qis.price_override, None)
+    for qis in item.services.filter(is_selected=True):
+        price = _get_service_price(qis.price_override)
         if price is not None:
-            lines.append({"label": f"Service: {qis.service_rate.name}", "amount": f"{float(price):,.0f}"})
+            label = getattr(qis, "note", "") or "Service"
+            lines.append({"label": f"Service: {label}", "amount": f"{float(price):,.0f}"})
 
     return lines
 
@@ -387,7 +401,7 @@ def build_preview_price_response(quote_request: QuoteRequest) -> dict:
     finishing_total = Decimal("0")
 
     for item in quote_request.items.prefetch_related(
-        "paper", "material", "machine", "product", "finishings__finishing_rate", "services__service_rate"
+        "paper", "material", "machine", "product", "finishings__finishing_rate", "services"
     ):
         missing = get_quote_item_missing_fields(item)
         if missing:
@@ -439,8 +453,8 @@ def build_preview_price_response(quote_request: QuoteRequest) -> dict:
             else:
                 lines.append({"label": item_label, "amount": f"{line_total:,.0f}"})
 
-        for qis in item.services.select_related("service_rate").filter(is_selected=True):
-            if qis.price_override is None and getattr(qis.service_rate, "pricing_type", None) != "FIXED":
+        for qis in item.services.filter(is_selected=True):
+            if qis.price_override is None:
                 has_negotiable = True
 
     can_calculate = len(needs_review_items) == 0
@@ -504,7 +518,7 @@ def calculate_quote_request(quote_request: QuoteRequest, lock: bool = False) -> 
     grand_total = Decimal("0")
 
     for item in quote_request.items.prefetch_related(
-        "paper", "material", "machine", "finishings__finishing_rate", "services__service_rate"
+        "paper", "material", "machine", "finishings__finishing_rate", "services"
     ):
         force = lock  # When locking, always recalc (seller explicitly pricing)
         unit_price, line_total = calculate_quote_item(item, force=force)
@@ -518,10 +532,8 @@ def calculate_quote_request(quote_request: QuoteRequest, lock: bool = False) -> 
         grand_total += line_total
 
     # Add quote-level services (e.g. delivery)
-    for qrs in quote_request.services.select_related("service_rate").filter(is_selected=True):
-        price = _get_service_price(
-            qrs.service_rate, qrs.price_override, qrs.distance_km
-        )
+    for qrs in quote_request.services.filter(is_selected=True):
+        price = _get_service_price(qrs.price_override, qrs.distance_km)
         if price is not None:
             grand_total += price
 

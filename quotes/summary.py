@@ -32,6 +32,7 @@ class QuoteItemSummary:
     sheet_name: Optional[str]
     items_per_sheet: Optional[int]
     sheets_needed: Optional[int]
+    billable_sheets: Optional[int]
     paper_cost: Decimal
     material_cost: Decimal
     print_cost: Decimal
@@ -93,6 +94,7 @@ def build_quote_item_summary(item) -> QuoteItemSummary:
     sheet_name: Optional[str] = None
     items_per_sheet: Optional[int] = None
     sheets_needed_val: Optional[int] = None
+    billable_sheets_val: Optional[int] = None
     paper_cost = Decimal("0")
     material_cost = Decimal("0")
     print_cost = Decimal("0")
@@ -106,6 +108,7 @@ def build_quote_item_summary(item) -> QuoteItemSummary:
             stock_name = result.paper_label or f"{paper.sheet_size} {paper.gsm}gsm {paper.get_paper_type_display()}"
             items_per_sheet = result.copies_per_sheet
             sheets_needed_val = result.sheets_needed
+            billable_sheets_val = getattr(result, "billable_sheets", None) or result.sheets_needed
 
             if not sheet_name:
                 notes.append("Sheet size not resolved from paper.")
@@ -145,6 +148,7 @@ def build_quote_item_summary(item) -> QuoteItemSummary:
         sheet_name=sheet_name,
         items_per_sheet=items_per_sheet,
         sheets_needed=sheets_needed_val,
+        billable_sheets=billable_sheets_val,
         paper_cost=paper_cost,
         material_cost=material_cost,
         print_cost=print_cost,
@@ -172,8 +176,9 @@ def format_quote_item_summary(summary: QuoteItemSummary) -> str:
     if summary.machine_name:
         lines.append(f"  Machine: {summary.machine_name}")
 
-    if summary.items_per_sheet is not None and summary.sheets_needed is not None:
-        lines.append(f"  Imposition: {summary.items_per_sheet} up/sheet → {summary.sheets_needed} sheets")
+    billed_sheets = summary.billable_sheets or summary.sheets_needed
+    if summary.items_per_sheet is not None and billed_sheets is not None:
+        lines.append(f"  Imposition: {summary.items_per_sheet} up/sheet → {billed_sheets} sheets billed")
 
     # Cost breakdown
     if summary.paper_cost > 0:
@@ -203,9 +208,10 @@ def summary_to_breakdown_lines(summary: QuoteItemSummary) -> List[dict]:
     Paper + print combined as "Printing". Finishing items by name (Lamination, etc.).
     """
     result: List[dict] = []
-    if summary.items_per_sheet is not None and summary.sheets_needed is not None:
+    billed_sheets = summary.billable_sheets or summary.sheets_needed
+    if summary.items_per_sheet is not None and billed_sheets is not None:
         result.append({
-            "label": f"Sheets: {summary.sheets_needed} (×{summary.items_per_sheet} up)",
+            "label": f"Sheets: {billed_sheets} (×{summary.items_per_sheet} up)",
             "amount": "",
         })
     # Combine paper + print into one "Printing" line

@@ -53,6 +53,10 @@ class PricingResult:
     # Imposition (SHEET)
     copies_per_sheet: int = 0
     sheets_needed: int = 0
+    # Sheets actually charged for paper + printing (includes spoilage, capped).
+    # ``sheets_needed`` remains the theoretical good-sheet count used for the
+    # finishing basis; ``billable_sheets`` is what paper/printing are billed on.
+    billable_sheets: int = 0
 
     # Area (LARGE_FORMAT)
     area_m2: str = "0"
@@ -415,6 +419,16 @@ def _compute_sheet_pricing(item, product, quantity, sides_count, result: Pricing
         ).to_dict()
     engine_totals = pricing_breakdown.get("totals", {}) if pricing_breakdown else {}
     result.breakdown = pricing_breakdown.get("breakdown", {}) if pricing_breakdown else {}
+    # The engine bills paper + printing on the billed (capped) sheet count, so
+    # the displayed sheet count must come from the same source, not from the
+    # good-sheet imposition used for the finishing basis.
+    try:
+        engine_billable = pricing_breakdown.get("billable_sheets") if pricing_breakdown else None
+        result.billable_sheets = (
+            int(engine_billable) if engine_billable not in (None, "") else (result.sheets_needed or 0)
+        )
+    except (TypeError, ValueError):
+        result.billable_sheets = result.sheets_needed or 0
 
     if pricing_breakdown:
         paper_cost = Decimal(str(engine_totals.get("paper_cost", "0") or "0"))
@@ -531,7 +545,7 @@ def _compute_sheet_pricing(item, product, quantity, sides_count, result: Pricing
     result.explanations.extend(result.layout_notes)
     result.calculation_description = (
         f"Sheet job: {result.copies_per_sheet} up on {paper.sheet_size}, "
-        f"{result.sheets_needed} sheet(s), paper + printing + finishing."
+        f"{result.billable_sheets or result.sheets_needed} sheet(s), paper + printing + finishing."
     )
     result.calculation_result = build_calculation_result(
         quote_type=result.quote_type,
@@ -545,7 +559,7 @@ def _compute_sheet_pricing(item, product, quantity, sides_count, result: Pricing
                 "code": "paper",
                 "label": "Paper",
                 "amount": result.paper_cost,
-                "formula": f"{result.sheets_needed} sheets x {paper.selling_price}",
+                "formula": f"{result.billable_sheets or result.sheets_needed} sheets x {paper.selling_price}",
                 "metadata": {"paper_label": result.paper_label},
             },
             {
@@ -581,7 +595,9 @@ def _compute_sheet_pricing(item, product, quantity, sides_count, result: Pricing
             "printing": result.breakdown.get("printing", {}),
             "imposition": {
                 "copies_per_sheet": result.copies_per_sheet,
-                "sheets_required": result.sheets_needed,
+                "good_sheets": result.sheets_needed,
+                "sheets_required": result.billable_sheets or result.sheets_needed,
+                "billable_sheets": result.billable_sheets or result.sheets_needed,
             },
             "layout_result": result.layout_result,
             "finishing_plan": result.finishing_plan,
@@ -752,15 +768,14 @@ def _compute_services_total(item) -> Decimal:
     services = getattr(item, "services", None)
     if services is None:
         return total
-    if hasattr(services, "select_related"):
-        iterable = services.select_related("service_rate").filter(is_selected=True)
+    if hasattr(services, "filter"):
+        iterable = services.filter(is_selected=True)
     else:
         iterable = services if isinstance(services, (list, tuple)) else []
     for qis in iterable:
-        if qis.price_override is not None:
-            total += qis.price_override
-        elif qis.service_rate.price is not None:
-            total += qis.service_rate.price
+        price = getattr(qis, "price_override", None)
+        if price is not None:
+            total += price
     return total
 
 

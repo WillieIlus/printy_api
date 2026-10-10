@@ -237,12 +237,9 @@ class QuoteSummarySerializer(serializers.ModelSerializer):
 class QuoteRequestServiceReadSerializer(serializers.ModelSerializer):
     """Read-only quote request service (e.g. delivery)."""
 
-    service_rate_name = serializers.CharField(source="service_rate.name", read_only=True)
-    service_rate_code = serializers.CharField(source="service_rate.code", read_only=True)
-
     class Meta:
         model = QuoteRequestService
-        fields = ["id", "service_rate", "service_rate_name", "service_rate_code", "is_selected", "distance_km", "price_override"]
+        fields = ["id", "is_selected", "distance_km", "price_override"]
 
 
 class QuoteRequestAttachmentSerializer(serializers.ModelSerializer):
