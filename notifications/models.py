@@ -3,14 +3,30 @@ Notification model for quote marketplace events.
 """
 from django.conf import settings
 from django.db import models
+from django.db.models import Q
 from django.utils.translation import gettext_lazy as _
 
 
 class Notification(models.Model):
     """
     In-app notification for quote-related events.
+
+    Notifications are structured records, not pre-rendered sentences: the row
+    stores a ``template_key`` plus ``params`` and the human-readable title/body
+    are rendered per recipient-role and per language at read time. This keeps
+    the privacy rule intact (a buyer never sees shop identity, a printer never
+    sees what the client paid) because one event renders differently for each
+    audience, and lets wording (and Swahili) change without migrating old rows.
+
     Recipient = user. Actor = who triggered (optional).
     """
+
+    PRIORITY_ACTION_REQUIRED = "action_required"
+    PRIORITY_INFORMATIONAL = "informational"
+    PRIORITY_CHOICES = [
+        (PRIORITY_ACTION_REQUIRED, _("Action required")),
+        (PRIORITY_INFORMATIONAL, _("Informational")),
+    ]
 
     QUOTE_REQUEST_SUBMITTED = "quote_request_submitted"
     QUOTE_REQUEST_SENT = "quote_request_sent"
@@ -78,6 +94,35 @@ class Notification(models.Model):
     message = models.TextField(
         default="",
         verbose_name=_("message"),
+        help_text=_("Legacy fallback body, used when no template can be rendered."),
+    )
+    template_key = models.CharField(
+        max_length=64,
+        blank=True,
+        default="",
+        verbose_name=_("template key"),
+        help_text=_("Registry key used to render title/body per role and language."),
+    )
+    params = models.JSONField(
+        default=dict,
+        blank=True,
+        verbose_name=_("params"),
+        help_text=_("Structured values interpolated into the template at read time."),
+    )
+    priority = models.CharField(
+        max_length=20,
+        choices=PRIORITY_CHOICES,
+        default=PRIORITY_INFORMATIONAL,
+        verbose_name=_("priority"),
+        help_text=_("``action_required`` items are pinned and accented in the UI."),
+    )
+    idempotency_key = models.CharField(
+        max_length=200,
+        blank=True,
+        default="",
+        db_index=True,
+        verbose_name=_("idempotency key"),
+        help_text=_("Dedupe key such as (event_type, entity_id, recipient)."),
     )
     read_at = models.DateTimeField(
         null=True,
@@ -97,6 +142,13 @@ class Notification(models.Model):
             models.Index(fields=["user", "-created_at"], name="notif_user_created_idx"),
             models.Index(fields=["user", "read_at"], name="notif_user_read_idx"),
         ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["user", "idempotency_key"],
+                condition=~Q(idempotency_key=""),
+                name="notif_user_idempotency_uniq",
+            ),
+        ]
 
     def __str__(self):
         return f"{self.get_notification_type_display()} for {self.user}"
@@ -104,3 +156,7 @@ class Notification(models.Model):
     @property
     def is_read(self):
         return self.read_at is not None
+
+    @property
+    def is_action_required(self):
+        return self.priority == self.PRIORITY_ACTION_REQUIRED

@@ -1,6 +1,7 @@
 """Notification API views."""
 from django.utils import timezone
 from rest_framework.decorators import action
+from rest_framework.pagination import CursorPagination
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.viewsets import ReadOnlyModelViewSet
@@ -13,13 +14,27 @@ from .models import Notification
 from .serializers import NotificationSerializer
 
 
+class NotificationCursorPagination(CursorPagination):
+    """Cursor pagination for the notification feed (stable under new rows)."""
+
+    ordering = "-created_at"
+    page_size = 20
+    page_size_query_param = "page_size"
+    max_page_size = 50
+
+
 class NotificationViewSet(ReadOnlyModelViewSet):
     """
     In-app notifications for the current user.
-    GET /me/notifications/ — list (newest first)
-    GET /me/notifications/{id}/ — retrieve
-    POST /me/notifications/{id}/mark-read/ — mark as read
-    POST /me/notifications/mark-all-read/ — mark all as read
+
+    GET  /me/notifications/                  — list (newest first, page-based)
+    GET  /me/notifications/feed/             — cursor-paginated feed
+    GET  /me/notifications/{id}/             — retrieve
+    PATCH /me/notifications/{id}/mark-read/  — mark as read
+    PATCH /me/notifications/mark-all-read/   — mark all as read
+    GET  /me/notifications/unread-count/     — unread badge count
+
+    List/feed accept ``?filter=all|unread|action_needed``.
     """
 
     permission_classes = [IsAuthenticated]
@@ -27,6 +42,35 @@ class NotificationViewSet(ReadOnlyModelViewSet):
 
     def get_queryset(self):
         return Notification.objects.filter(user=self.request.user).select_related("actor")
+
+    def _apply_filter(self, queryset):
+        flt = (self.request.query_params.get("filter") or "all").strip().lower()
+        if flt == "unread":
+            return queryset.filter(read_at__isnull=True)
+        if flt in {"action_needed", "action-required", "action"}:
+            return queryset.filter(
+                read_at__isnull=True,
+                priority=Notification.PRIORITY_ACTION_REQUIRED,
+            )
+        return queryset
+
+    def list(self, request, *args, **kwargs):
+        queryset = self._apply_filter(self.get_queryset())
+        page = self.paginate_queryset(queryset)
+        if page is not None:
+            serializer = self.get_serializer(page, many=True)
+            return self.get_paginated_response(serializer.data)
+        serializer = self.get_serializer(queryset, many=True)
+        return Response(serializer.data)
+
+    @action(detail=False, methods=["get"], url_path="feed")
+    def feed(self, request):
+        """Cursor-paginated feed for the full /notifications page."""
+        queryset = self._apply_filter(self.get_queryset())
+        paginator = NotificationCursorPagination()
+        page = paginator.paginate_queryset(queryset, request, view=self)
+        serializer = self.get_serializer(page, many=True)
+        return paginator.get_paginated_response(serializer.data)
 
     @action(detail=True, methods=["patch"], url_path="mark-read")
     def mark_read(self, request, pk=None):
