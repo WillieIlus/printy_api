@@ -179,6 +179,16 @@ def _safe_manager_display_name(user: User) -> str:
     return (getattr(user, "name", "") or "").strip() or "Print Manager"
 
 
+def _mask_manager_name(name: str) -> str:
+    """Reduce a manager name to ``First L.`` for unauthenticated social proof."""
+    parts = [part for part in (name or "").split() if part]
+    if not parts:
+        return "Print Manager"
+    if len(parts) == 1:
+        return parts[0]
+    return f"{parts[0]} {parts[-1][0]}."
+
+
 def _manager_location_area(user: User) -> str:
     profile = _safe_manager_profile(user)
     if profile is None:
@@ -1365,6 +1375,33 @@ class RecommendedPrintManagerListView(APIView):
             paper_gsm=serializer.validated_data.get("paper_gsm"),
             size=serializer.validated_data.get("size", ""),
         )
+        payload["results"] = RecommendedPrintManagerSerializer(payload["results"], many=True).data
+        return Response(payload)
+
+
+class PublicRecommendedPrintManagerListView(APIView):
+    """Anonymous social proof for the marketing homepage.
+
+    Same ranking as the authenticated intake endpoint but with manager
+    surnames masked so we never expose real identities to anonymous visitors.
+    """
+
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        serializer = IntakeRecommendedManagerQuerySerializer(data=request.query_params)
+        serializer.is_valid(raise_exception=True)
+        payload = _build_recommended_manager_payloads(
+            request=request,
+            current_user=request.user,
+            product_type=str(serializer.validated_data["product_type"]).strip().lower(),
+            quantity=serializer.validated_data["quantity"],
+            paper_gsm=serializer.validated_data.get("paper_gsm"),
+            size=serializer.validated_data.get("size", ""),
+        )
+        for row in payload["results"]:
+            row["display_name"] = _mask_manager_name(str(row.get("display_name") or ""))
+            row["brand_name"] = row["display_name"]
         payload["results"] = RecommendedPrintManagerSerializer(payload["results"], many=True).data
         return Response(payload)
 

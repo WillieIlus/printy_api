@@ -77,3 +77,30 @@ class Phase2CalculatorManagerSelectionAPITestCase(TestCase):
         self.assertNotIn("platform_service_amount", payload_text)
         self.assertNotIn("broker_margin_amount", payload_text)
         self.assertNotIn("printy_fee", payload_text.lower())
+
+    def test_public_recommended_managers_allow_anonymous_and_mask_names(self):
+        anonymous = APIClient()
+        response = anonymous.get(
+            "/api/public/print-managers/recommended/",
+            {"product_type": "business_card", "quantity": 500, "paper_gsm": 300, "size": "90x55mm"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        result_ids = [row["id"] for row in payload["results"]]
+        self.assertIn(self.manager.id, result_ids)
+        names = [row["display_name"] for row in payload["results"]]
+        self.assertIn("Genuine M.", names)
+        self.assertNotIn("Genuine Manager", names)
+        payload_text = json.dumps(payload)
+        self.assertNotIn("Private Production Shop", payload_text)
+        self.assertNotIn("private-production-shop", payload_text)
+
+    def test_intake_recommended_managers_still_require_authentication(self):
+        anonymous = APIClient()
+        response = anonymous.get(
+            "/api/intake/recommended-managers/",
+            {"product_type": "business_card", "quantity": 500},
+        )
+
+        self.assertIn(response.status_code, (401, 403))
