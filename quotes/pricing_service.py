@@ -19,6 +19,7 @@ from catalog.choices import PricingMode
 from catalog.imposition import sheets_needed as _sheets_needed
 from pricing.choices import ChargeUnit, FinishingBillingBasis, FinishingSideMode, Sides
 from pricing.models import PrintingRate
+from pricing.services.production_cost_calculator import calculate_billable_sheets
 from services.engine.integration import (
     build_job_spec,
     build_media_spec_from_material,
@@ -389,6 +390,10 @@ def _compute_sheet_pricing(item, product, quantity, sides_count, result: Pricing
     sheet_area_sqm = Decimal("0")
     if paper.width_mm and paper.height_mm:
         sheet_area_sqm = (Decimal(str(paper.width_mm)) / Decimal("1000")) * (Decimal(str(paper.height_mm)) / Decimal("1000"))
+    # Finishing is billed on the good (finished) sheet count, not the billed
+    # count: the finishing run processes only the good output, so the spoilage
+    # cap never applies to it. Paper + printing below are the surfaces that use
+    # the capped ``billable_sheets`` count instead.
     local_finishing_total, local_finishing_lines = compute_finishings_cost(
         item.finishings,
         quantity,
@@ -421,20 +426,32 @@ def _compute_sheet_pricing(item, product, quantity, sides_count, result: Pricing
     result.breakdown = pricing_breakdown.get("breakdown", {}) if pricing_breakdown else {}
     # The engine bills paper + printing on the billed (capped) sheet count, so
     # the displayed sheet count must come from the same source, not from the
-    # good-sheet imposition used for the finishing basis.
+    # good-sheet imposition used for the finishing basis. The fallback branch
+    # (no engine breakdown) consults the same canonical cap so no pricing path
+    # can bypass it.
+    canonical_imposition = None
+    canonical_billable = result.sheets_needed or 0
+    try:
+        canonical_imposition = calculate_billable_sheets(
+            quantity=quantity,
+            yield_per_sheet=int(result.copies_per_sheet or 1),
+        )
+        canonical_billable = int(canonical_imposition.get("billable_sheets") or 0) or canonical_billable
+    except (TypeError, ValueError):
+        canonical_imposition = None
     try:
         engine_billable = pricing_breakdown.get("billable_sheets") if pricing_breakdown else None
         result.billable_sheets = (
-            int(engine_billable) if engine_billable not in (None, "") else (result.sheets_needed or 0)
+            int(engine_billable) if engine_billable not in (None, "") else canonical_billable
         )
     except (TypeError, ValueError):
-        result.billable_sheets = result.sheets_needed or 0
+        result.billable_sheets = canonical_billable
 
     if pricing_breakdown:
         paper_cost = Decimal(str(engine_totals.get("paper_cost", "0") or "0"))
         print_cost = Decimal(str(engine_totals.get("print_cost", "0") or "0"))
     else:
-        paper_cost = Decimal(str(paper.selling_price)) * Decimal(result.sheets_needed or 0)
+        paper_cost = Decimal(str(paper.selling_price)) * Decimal(result.billable_sheets or 0)
         print_cost = Decimal("0")
     finishing_total = local_finishing_total
     subtotal = paper_cost + print_cost + finishing_total
@@ -514,6 +531,15 @@ def _compute_sheet_pricing(item, product, quantity, sides_count, result: Pricing
             "imposition": {
                 "copies_per_sheet": result.copies_per_sheet,
                 "good_sheets": result.sheets_needed,
+                "billable_sheets": result.billable_sheets,
+                "production_sheets": (
+                    int(canonical_imposition.get("total_sheets_needed") or 0)
+                    if canonical_imposition else result.billable_sheets
+                ),
+                "waste_sheets_added": (
+                    int(canonical_imposition.get("waste_sheets_added") or 0)
+                    if canonical_imposition else 0
+                ),
             },
             "finishings": [],
             "per_sheet_pricing": {
@@ -596,8 +622,8 @@ def _compute_sheet_pricing(item, product, quantity, sides_count, result: Pricing
             "imposition": {
                 "copies_per_sheet": result.copies_per_sheet,
                 "good_sheets": result.sheets_needed,
-                "sheets_required": result.billable_sheets or result.sheets_needed,
-                "billable_sheets": result.billable_sheets or result.sheets_needed,
+                "sheets_required": result.sheets_needed,
+                "billable_sheets": result.billable_sheets,
             },
             "layout_result": result.layout_result,
             "finishing_plan": result.finishing_plan,

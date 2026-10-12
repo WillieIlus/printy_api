@@ -75,8 +75,9 @@ def _production(preview: dict) -> dict:
     )
     good = (
         preview.get("good_sheets")
-        or result_imposition.get("sheets_required")
         or engine_imposition.get("good_sheets")
+        or result_imposition.get("good_sheets")
+        or result_imposition.get("sheets_required")
     )
     billable = (
         engine_imposition.get("billable_sheets")

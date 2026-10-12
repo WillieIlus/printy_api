@@ -226,6 +226,7 @@ def independent_imposition(
     fixed_waste: int = 2,
     variable_rate: str = "0.05",
     min_billable: int = 3,
+    max_billable: int | None = None,
 ) -> dict:
     """Recompute imposition from first principles, ignoring the engine entirely.
 
@@ -236,6 +237,10 @@ def independent_imposition(
     (both orientations) and re-derives the sheet counts from the live waste
     policy. The engine's output is then compared against this, not against a
     remembered number.
+
+    ``max_billable`` carries the live ``WastePolicy.maximum_spoilage_rate`` cap
+    (good + ceil(good x rate)) so the independent recomputation stops at the
+    capped billable count instead of re-encoding the pre-cap formula.
     """
     piece_w = width_mm + 2 * bleed_mm
     piece_h = height_mm + 2 * bleed_mm
@@ -247,7 +252,8 @@ def independent_imposition(
     from math import ceil
 
     variable = ceil(good * rate) if good > 0 else 0
-    billable = max(good + fixed_waste + variable, min_billable)
+    production_billable = max(good + fixed_waste + variable, min_billable)
+    billed = min(production_billable, max_billable) if max_billable is not None else production_billable
     return {
         "piece_w": piece_w,
         "piece_h": piece_h,
@@ -258,8 +264,11 @@ def independent_imposition(
         "good_sheets": good,
         "variable_sheets": variable,
         "fixed_sheets": fixed_waste,
-        "billable_sheets": billable,
-        "printer_quantity": billable * pps,
+        "production_sheets": production_billable,
+        "max_billable_sheets": max_billable,
+        "spoilage_capped": max_billable is not None and production_billable > max_billable,
+        "billable_sheets": billed,
+        "printer_quantity": billed * pps,
     }
 
 
@@ -275,6 +284,7 @@ def imposition_verdict(engine_imp: dict, *, width_mm: int, height_mm: int, quant
         fixed_waste=engine_imp.get("fixed_waste_sheets") or 0,
         variable_rate=str(engine_imp.get("variable_waste_rate") or "0"),
         min_billable=engine_imp.get("minimum_billable_sheets") or 0,
+        max_billable=engine_imp.get("max_billable_sheets") or None,
     )
     checks = [
         ("pieces_per_sheet", exp["pieces_per_sheet"], engine_imp.get("pieces_per_sheet")),
@@ -296,7 +306,9 @@ def imposition_verdict(engine_imp: dict, *, width_mm: int, height_mm: int, quant
         f'       rotated = {exp["rotated"]}; engine chose "{exp["orientation"]}" -> {exp["pieces_per_sheet"]}/sheet\n'
         f'       {quantity} / {exp["pieces_per_sheet"]} = ceil -> {exp["good_sheets"]} good sheets\n'
         f'       + {exp["fixed_sheets"]} fixed + ceil({exp["good_sheets"]} x {engine_imp.get("variable_waste_rate")}) = '
-        f'{exp["variable_sheets"]} variable -> {exp["billable_sheets"]} billable\n'
+        f'{exp["variable_sheets"]} variable -> {exp["production_sheets"]} production billable\n'
+        f'       capped by max_billable_sheets={exp["max_billable_sheets"]} (spoilage cap) '
+        f'-> {exp["billable_sheets"]} billable\n'
         f'       printer production quantity = {exp["billable_sheets"]} x {exp["pieces_per_sheet"]} = {exp["printer_quantity"]}'
     )
     if mismatches:
@@ -615,6 +627,7 @@ def main() -> int:
         fixed_waste=imp.get("fixed_waste_sheets") or 0,
         variable_rate=str(imp.get("variable_waste_rate") or "0"),
         min_billable=imp.get("minimum_billable_sheets") or 0,
+        max_billable=imp.get("max_billable_sheets") or None,
     )["printer_quantity"]
     # The brief retires the old "390" target (300 x 1.30 was a hardcoded uplift
     # that exists nowhere in the configuration). PASS when the backend produces
@@ -828,6 +841,7 @@ def main() -> int:
         fixed_waste=imp_b.get("fixed_waste_sheets") or 0,
         variable_rate=str(imp_b.get("variable_waste_rate") or "0"),
         min_billable=imp_b.get("minimum_billable_sheets") or 0,
+        max_billable=imp_b.get("max_billable_sheets") or None,
     )
     record("JOB B", "Correct sheet count", "PASS" if bill_b == exp_b["billable_sheets"] else "FAIL",
            f"good_sheets={good_b} (expected {exp_b['good_sheets']}), "
@@ -951,6 +965,7 @@ def main() -> int:
         fixed_waste=imp_a5.get("fixed_waste_sheets") or 0,
         variable_rate=str(imp_a5.get("variable_waste_rate") or "0"),
         min_billable=imp_a5.get("minimum_billable_sheets") or 0,
+        max_billable=imp_a5.get("max_billable_sheets") or None,
     )
     record("A5", "Correct orientation", "PASS" if lay_a5.get("orientation") == exp_a5["orientation"] else "FAIL",
            f'engine chose "{lay_a5.get("orientation")}"; independently normal={exp_a5["normal"]} '

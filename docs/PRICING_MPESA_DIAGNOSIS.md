@@ -210,21 +210,55 @@ make the client-visible total, the split's `client_total`, `Payment.amount`,
 
 ---
 
+## Step 2 — BUG 1 corrections applied
+
+The capped `billable_sheets` from `calculate_billable_sheets` is now the single
+figure for paper/printing on **every** sheet pricing path:
+
+- `quotes/pricing_service.py` — the non-engine fallback branch now derives the
+  canonical billable count (`calculate_billable_sheets`) and bills paper on it
+  instead of the good-sheet `sheets_needed`; `result.billable_sheets` and the
+  fallback `breakdown["imposition"]` (`billable_sheets` / `production_sheets` /
+  `waste_sheets_added`) are populated so the capped figure is what is shown and
+  charged.
+- `quotes/pricing_service.py` — the quote `calculation_result` metadata keeps
+  `sheets_required = good_sheets` (matching the public calculator, workflow,
+  public-matching and calculator-preview contracts) and reports the capped count
+  under `billable_sheets`.
+- `client_calculator/services.py` — good-sheet resolution prefers explicit
+  `good_sheets` fields before the `sheets_required` fallback, so engine metadata
+  can never be mislabelled as the good count.
+- `rerun_jobab_verification.py` — `independent_imposition` accepts the live
+  `max_billable_sheets` cap; `imposition_verdict` and the JOB B / A5 checks pass
+  it, so the harness no longer re-encodes the pre-cap formula.
+- Finishing remains billed on the good (finished) sheet count by design (the
+  finishing run processes only the good output); documented in
+  `_compute_sheet_pricing` and pinned by a regression test.
+
+Regression tests: `quotes/test_waste_billing_consistency.py` (7 tests) plus the
+existing `quotes/test_quote_sheet_count_display.py`.
+
+Unchanged (BUG 2, out of scope for Step 2): the M-Pesa adjusted-amount behaviour.
+
 ## Verification notes / limitations
 
 - Code paths above were read directly (line numbers current as of HEAD `eab699d`).
-- Django tests could **not** be executed in this environment: the test DB
-  connection failed (`FATAL: password authentication failed for user "printy_user"`
-  at `localhost:5432`). Targeted suites `pricing.test_wastage_pricing`,
-  `quotes.test_quote_sheet_count_display`, `payments.tests`,
-  `tests.test_phase_a_formula_contracts` must be run where the DB is reachable.
+- Tests **were** executed for Step 2 via `config.test_settings` (SQLite):
+  `quotes.test_waste_billing_consistency`, `quotes.test_quote_sheet_count_display`,
+  `pricing.test_wastage_pricing`, `api.test_calculator_spec_harmonization`,
+  `tests.test_imposition_http_path`, `tests.test_phase_a_formula_contracts` and the
+  **full suite** (`manage.py test --settings=config.test_settings`) — 871 tests OK.
+  Running against the default Postgres settings is still blocked locally
+  (`FATAL: password authentication failed for user "printy_user"` at
+  `localhost:5432`).
 - The live `WastePolicy.maximum_spoilage_rate` and the deployed commit
   (server at `~/apps/printy_api`) were not verifiable from here (no SSH key).
 
-## Recommended next step (Step 2)
+## Recommended next step (Step 3)
 
-Implement the BUG 1 correction: make the capped `billable_sheets` the single
-figure for pricing **and** all sheet-count surfaces, remove the uncapped fallback
-branch, align the finishing basis, refresh the stale verification harness, and add
-the regression tests above. Run the targeted suites, inspect the diff, commit, and
-stop.
+Implement the BUG 2 correction (attribute the STK amount to the currently accepted
+`quote.total` by reconciling the financial split before it is locked). Step 2
+(BUG 1) is complete: capped `billable_sheets` is now the single figure for pricing
+and all sheet-count surfaces, the uncapped fallback branch is removed, the
+finishing basis is documented, the stale verification harness is refreshed, and the
+regression tests pass.
