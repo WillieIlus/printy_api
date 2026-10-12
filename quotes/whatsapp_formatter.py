@@ -84,7 +84,7 @@ def format_quote_for_whatsapp(
         Plain text message, short and professional. No internal costs.
     """
     if items is None:
-        items = list(quote.items.select_related("product", "paper", "material").prefetch_related(
+        items = list(quote.items.select_related("product", "paper").prefetch_related(
             "finishings__finishing_rate"
         ).all())
 

@@ -19,6 +19,7 @@ from django.urls import reverse
 from django.utils import timezone
 from rest_framework.test import APIClient
 
+from api.quote_serializers import QuoteUpdateSerializer
 from jobs.models import ManagedJob
 from payments.models import Payment
 from payments.services import (
@@ -163,6 +164,42 @@ class AdjustedQuoteMpesaAmountTestCase(TestCase):
 
         _quote, payment = accept_quote_for_payment(quote=self.quote, accepted_by=self.client_user)
         self.assertEqual(payment.amount, Decimal("4500.00"))
+
+    def test_serializer_revise_then_accept_charges_revised_total(self):
+        serializer = QuoteUpdateSerializer(
+            instance=self.quote, data={"total": "3500.00"}, partial=True
+        )
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+
+        self.quote.refresh_from_db()
+        self.assertEqual(self.quote.total, Decimal("3500.00"))
+        # The snapshot must be JSON-safe (the plain JSONField) and hold the
+        # revised price; DjangoJSONEncoder stores the Decimal as a string.
+        self.assertEqual(self.quote.response_snapshot.get("price"), "3500.00")
+
+        _quote, payment = accept_quote_for_payment(quote=self.quote, accepted_by=self.client_user)
+        self.assertEqual(payment.amount, Decimal("3500.00"))
+        self.assertEqual(payment.expected_amount, Decimal("3500.00"))
+
+    def test_view_partial_update_revise_then_accept_charges_revised_total(self):
+        api_client = APIClient()
+        api_client.force_authenticate(user=self.shop_owner)
+
+        response = api_client.patch(
+            reverse("sent-quote-detail", args=[self.quote.id]),
+            {"total": "3500.00"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 200, response.data)
+
+        self.quote.refresh_from_db()
+        self.assertEqual(self.quote.total, Decimal("3500.00"))
+        self.assertEqual(self.quote.status, QuoteOfferStatus.REVISED)
+
+        _quote, payment = accept_quote_for_payment(quote=self.quote, accepted_by=self.client_user)
+        self.assertEqual(payment.amount, Decimal("3500.00"))
+        self.assertEqual(payment.expected_amount, Decimal("3500.00"))
 
     def test_accepted_split_is_locked_and_immutable(self):
         self._adjust_total(Decimal("3500.00"))

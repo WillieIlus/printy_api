@@ -275,10 +275,28 @@ re-ensure, client-submitted amount ignored, duplicate initiation reuses one
 payment, wrong callback amount does not pay, duplicate callbacks apply once)
 plus `api/test_partner_quote_send_to_client.py::test_resend_of_non_pending_quote_keeps_total_and_split_in_lockstep`.
 
-Out of scope (observed while writing tests, not touched): `QuoteUpdateSerializer`
-writes `Decimal` values into the `response_snapshot` JSONField
-(`api/quote_serializers.py:931-935`), which raises on save. This is independent
-of the M-Pesa amount bug.
+Path coverage (added after the initial Step 3 commit). To test the real
+adjustment paths end-to-end — not just acceptance — two adjacent pre-existing
+defects on those paths were repaired, because they made "revise quote total"
+and "send quote" crash outright and blocked the tests:
+
+- `api/quote_serializers.py::QuoteUpdateSerializer.update` wrote `Decimal`
+  values (`total`, `price_min`, `price_max`) into the plain `Quote.response_snapshot`
+  JSONField, so saving raised `Object of type Decimal is not JSON serializable`.
+  It now normalizes the snapshot through `DjangoJSONEncoder` exactly like the
+  create path already did.
+- `quotes/summary_service.py` referenced removed schema: it imported the
+  postponed `CalculatorDraftFile`, filtered `select_related(..., "material")`
+  (the field is `paper`) and read `quote_request.delivery_location`. It now
+  imports only live models, selects `paper`, and uses `delivery_address`.
+  The same stale `select_related("material")` was dropped from
+  `quotes/whatsapp_formatter.py` and `QuoteDetailSerializer.get_items`.
+
+New tests: `test_serializer_revise_then_accept_charges_revised_total` (the
+serializer path) and
+`test_view_partial_update_revise_then_accept_charges_revised_total`
+(`PATCH /sent-quotes/{id}/`, proving the view persists the revised total and
+that acceptance then charges it). Full suite after these fixes: 885 tests OK.
 
 ## Verification notes / limitations
 
@@ -291,7 +309,9 @@ of the M-Pesa amount bug.
 - Step 3 tests were executed the same way: the new
   `payments.test_adjusted_quote_mpesa_amount`, `api.test_partner_quote_send_to_client`,
   `payments.test_payment_flow`, `tests.test_phase_a_formula_contracts`,
-  `pricing.test_whole_kes_rounding`, then the **full suite** — 883 tests OK.
+  `pricing.test_whole_kes_rounding`, then the **full suite** — 883 tests OK
+- followed, after the serializer/summary-service fixes above, by the **full suite
+  again** — 885 tests OK.
   Running against the default Postgres settings is still blocked locally
   (`FATAL: password authentication failed for user "printy_user"` at
   `localhost:5432`).

@@ -947,6 +947,11 @@ class QuoteUpdateSerializer(serializers.ModelSerializer):
             snapshot["shop_note"] = self.validated_data.get("note", "") or ""
         if getattr(instance, "turnaround_label", ""):
             snapshot["turnaround_label"] = instance.turnaround_label
+        # Normalize through DjangoJSONEncoder (Decimal/UUID/datetime -> str) the
+        # same way the create path does. Without this the Decimal `total`,
+        # `price_min` and `price_max` set above make the plain JSONField raise
+        # "Object of type Decimal is not JSON serializable" on save.
+        snapshot = json.loads(json.dumps(snapshot, cls=DjangoJSONEncoder))
         instance.response_snapshot = snapshot
         if revised_pricing_snapshot is not None:
             instance.revised_pricing_snapshot = revised_pricing_snapshot
@@ -1109,7 +1114,7 @@ class QuoteDetailSerializer(serializers.ModelSerializer):
 
     def get_items(self, obj):
         # Items linked to this shop quote (priced items)
-        items = obj.items.select_related("product", "paper", "material", "machine").prefetch_related(
+        items = obj.items.select_related("product", "paper", "machine").prefetch_related(
             "finishings__finishing_rate"
         )
         return QuoteItemCustomerSerializer(items, many=True).data

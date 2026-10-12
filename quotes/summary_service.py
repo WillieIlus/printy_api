@@ -7,7 +7,7 @@ from decimal import Decimal
 from typing import List, Optional
 
 from .draft_files import build_dashboard_quote_file_payload
-from .models import CalculatorDraftFile, QuoteItem, QuoteRequest, Quote
+from .models import QuoteItem, QuoteRequest, Quote
 
 
 def _format_price(value) -> str:
@@ -65,9 +65,7 @@ def _item_finishing_label(item: QuoteItem) -> str:
 
 
 def _get_location_label(quote_request: QuoteRequest) -> str:
-    """Delivery location or address."""
-    if quote_request.delivery_location_id and quote_request.delivery_location:
-        return quote_request.delivery_location.name
+    """Delivery address, if provided."""
     if quote_request.delivery_address:
         return quote_request.delivery_address[:80] + ("..." if len(quote_request.delivery_address) > 80 else "")
     return ""
@@ -126,7 +124,7 @@ def format_quote_request_summary(
     """
     if items is None:
         items = list(
-            quote_request.items.select_related("product", "paper", "material").prefetch_related(
+            quote_request.items.select_related("product", "paper").prefetch_related(
                 "finishings__finishing_rate"
             ).all()
         )
@@ -184,13 +182,13 @@ def format_quote_summary(
     """
     qr = quote.quote_request
     items = list(
-        quote.items.select_related("product", "paper", "material").prefetch_related(
+        quote.items.select_related("product", "paper").prefetch_related(
             "finishings__finishing_rate"
         ).all()
     )
     if not items:
         items = list(
-            qr.items.select_related("product", "paper", "material").prefetch_related(
+            qr.items.select_related("product", "paper").prefetch_related(
                 "finishings__finishing_rate"
             ).all()
         )
@@ -273,7 +271,7 @@ def get_quote_summary_text(quote: Quote, share_url: Optional[str] = None) -> str
     )
 
 
-def get_calculator_draft_file_summary_text(draft_file: CalculatorDraftFile) -> str:
+def get_calculator_draft_file_summary_text(draft_file: "CalculatorDraftFile") -> str:
     """Grouped WhatsApp-ready summary for a quote file across one or more shops."""
     payload = build_dashboard_quote_file_payload(draft_file)
     lines: list[str] = []
@@ -313,7 +311,7 @@ def get_calculator_draft_file_summary_text(draft_file: CalculatorDraftFile) -> s
     return "\n".join(lines).strip()
 
 
-def get_calculator_draft_file_summary_payload(draft_file: CalculatorDraftFile) -> dict:
+def get_calculator_draft_file_summary_payload(draft_file: "CalculatorDraftFile") -> dict:
     """Structured WhatsApp preview payload for grouped quote files."""
     payload = build_dashboard_quote_file_payload(draft_file)
     return {
