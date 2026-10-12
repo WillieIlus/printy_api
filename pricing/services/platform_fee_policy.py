@@ -255,6 +255,29 @@ def _split_matches_result(split, result: QuoteFinancialResult) -> bool:
     return all(getattr(split, field) == getattr(result, field) for field in fields)
 
 
+def _pin_split_to_quote(quote, split) -> None:
+    """Point ``quote.financial_split`` at the freshly persisted split.
+
+    ``Quote.financial_split`` is a reverse one-to-one and Django caches the
+    first instance it loads on the quote. A caller that reconciles the row
+    through a separate instance (as ``create_quote_financial_split`` does, with
+    its own ``select_for_update`` query) would otherwise keep serving the
+    pre-adjustment snapshot from the in-memory cache. ``create_payment_for_quote``
+    reads exactly this attribute, so a stale cache means the customer is charged
+    the old estimate while the row on disk is already correct.
+    """
+    if quote is None:
+        return
+    try:
+        setattr(quote, "financial_split", split)
+    except (AttributeError, TypeError, ValueError):
+        # Fall back to Django's own relation cache if the descriptor rejects the
+        # assignment for any reason.
+        cache = getattr(getattr(quote, "_state", None), "fields_cache", None)
+        if cache is not None:
+            cache["financial_split"] = split
+
+
 @transaction.atomic
 def create_quote_financial_split(
     *,
@@ -279,6 +302,7 @@ def create_quote_financial_split(
     if existing is not None:
         if existing.locked or getattr(quote, "status", "") == "accepted":
             if _split_matches_result(existing, result):
+                _pin_split_to_quote(quote, existing)
                 return existing
             raise ValidationError("Accepted quote financial snapshots are immutable.")
         for field, value in {
@@ -306,8 +330,9 @@ def create_quote_financial_split(
         }.items():
             setattr(existing, field, value)
         existing.save()
+        _pin_split_to_quote(quote, existing)
         return existing
-    return QuoteFinancialSplit.objects.create(
+    created = QuoteFinancialSplit.objects.create(
         quote=quote,
         policy_used=result.policy,
         production_option=production_option,
@@ -331,25 +356,64 @@ def create_quote_financial_split(
         applied_markup_multiple=result.applied_markup_multiple,
         locked=should_lock,
     )
+    _pin_split_to_quote(quote, created)
+    return created
 
 
 def ensure_quote_financial_split(*, quote, policy=None):
+    """Return the quote's financial split, reconciled to the current quote total.
+
+    The split is the single source for the client charge, but it is created once
+    (when the quote is sent) and managers adjust ``Quote.total`` afterwards
+    without touching it. Acceptance used to lock whatever split already existed,
+    so the STK push charged the original estimate instead of the accepted,
+    adjusted amount. This is the one choke point every acceptance path funnels
+    through, so the split is re-derived from the authoritative ``quote.total``
+    here — before it is locked — and only then frozen.
+    """
     existing = getattr(quote, "financial_split", None)
-    if existing:
-        if getattr(quote, "status", "") == "accepted" and not existing.locked:
+    if existing is not None:
+        if existing.locked:
+            return existing
+        already_accepted = (
+            getattr(quote, "status", "") == "accepted"
+            or getattr(quote, "accepted_at", None) is not None
+        )
+        if already_accepted:
+            # An accepted quote's snapshot is final; freeze it and never
+            # re-derive it (that would let a later write change the charge).
             existing.locked = True
             existing.save(update_fields=["locked"])
+            return existing
+        # Re-derive the client-facing chain from the current quote total, keeping
+        # the production cost and fee policy the split was built with. Only the
+        # client price (manager markup) is what an adjustment changes, and the
+        # fee/payout split is recomputed by calculate_quote_financials rather
+        # than overwritten.
+        broker_client_price = getattr(quote, "total", None)
+        production_cost = existing.production_cost
+        if broker_client_price is not None and production_cost is not None and production_cost > 0:
+            return create_quote_financial_split(
+                quote=quote,
+                production_cost=production_cost,
+                broker_client_price=broker_client_price,
+                production_option=getattr(existing, "production_option", None) or getattr(quote, "production_option", None),
+                policy=policy or getattr(existing, "policy_used", None),
+                lock=True,
+            )
+        existing.locked = True
+        existing.save(update_fields=["locked"])
         return existing
+
     production_option = getattr(quote, "production_option", None)
     if production_option is None or getattr(production_option, "production_cost", None) is None:
         raise ValidationError("Quote needs a selected production option or an explicit financial split before acceptance.")
-    production_cost = production_option.production_cost
     broker_client_price = getattr(quote, "total", None)
     if broker_client_price is None:
         raise ValidationError("Quote needs a client total before acceptance.")
     return create_quote_financial_split(
         quote=quote,
-        production_cost=production_cost,
+        production_cost=production_option.production_cost,
         broker_client_price=broker_client_price,
         production_option=production_option,
         policy=policy,

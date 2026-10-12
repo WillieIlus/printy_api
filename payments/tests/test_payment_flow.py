@@ -158,7 +158,10 @@ class CanonicalPaymentFlowTestCase(TestCase):
             production_option=option,
             created_by=self.broker,
             status=QuoteOfferStatus.SENT,
-            total=Decimal("3704.99"),
+            # The persisted quote total is the authoritative client price and the
+            # split is reconciled to it on acceptance, so it must carry the same
+            # whole-KES value the split derives from the cent-level components.
+            total=Decimal("3704.00"),
             sent_at=timezone.now(),
             expires_at=timezone.now() + timedelta(days=7),
         )

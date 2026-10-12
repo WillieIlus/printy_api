@@ -1232,6 +1232,12 @@ class PartnerQuoteSendToClientView(ManagerCapablePartnerQuoteView):
         else:
             latest_response.response_snapshot = response_snapshot
             latest_response.sent_at = latest_response.sent_at or timezone.now()
+        # The split is written below from financial_split; keep the quote's own
+        # total in lockstep so the accepted amount the client is charged cannot
+        # drift from what was just displayed. The `else` branch used to omit this,
+        # leaving `total` at the base estimate while the split held the adjusted
+        # price.
+        latest_response.total = financial_split["client_total"]
         latest_response.expires_at = calculate_quote_expiry(sent_at=latest_response.sent_at)
         latest_response.sent_to_client_at = timezone.now()
         latest_response.sent_to_client_by = request.user
@@ -1239,6 +1245,7 @@ class PartnerQuoteSendToClientView(ManagerCapablePartnerQuoteView):
         latest_response.save(
             update_fields=[
                 "response_snapshot",
+                "total",
                 "sent_at",
                 "expires_at",
                 "sent_to_client_at",

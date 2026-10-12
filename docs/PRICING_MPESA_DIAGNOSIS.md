@@ -240,6 +240,46 @@ existing `quotes/test_quote_sheet_count_display.py`.
 
 Unchanged (BUG 2, out of scope for Step 2): the M-Pesa adjusted-amount behaviour.
 
+## Step 3 — BUG 2 corrections applied
+
+The accepted, adjusted `quote.total` is now the single authoritative client
+amount through the split, `Payment.amount`/`expected_amount` and the STK payload:
+
+- `pricing/services/platform_fee_policy.py::ensure_quote_financial_split` is the
+  one choke point every acceptance path funnels through. When a split already
+  exists and is **not yet frozen** (not locked, quote not accepted), it is
+  re-derived from the current `quote.total` via `create_quote_financial_split`
+  before being locked: production cost and the fee policy are preserved, and the
+  manager markup — hence `printy_fee` / `shop_payout` / `manager_payout` — is
+  recomputed rather than overwritten. A pre-existing split with no usable inputs
+  is still locked, and the "no split and no production option" guard is
+  preserved (`test_quote_without_production_option_cannot_collapse_...`).
+- `pricing/services/platform_fee_policy.py` now re-pins `quote.financial_split`
+  to the freshly persisted row on every `create_quote_financial_split` return
+  (`_pin_split_to_quote`). The reverse one-to-one is cached by Django, and the
+  reconcile runs through a separate locked instance, so without this the caller
+  kept serving the pre-adjustment split and charged the old amount.
+- `payments/services.py::_quote_split` reads the persisted split from the DB
+  instead of the quote's cached relation, so a stale in-memory quote can never
+  drive `Payment.amount`.
+- `api/dashboard_views.py::PartnerQuoteSendToClientView` now persists the
+  adjusted `total` on the resend (`else`) branch too. It previously refreshed
+  only the split, leaving `quote.total` at the base estimate so the two could
+  disagree (the secondary divergence called out in BUG 2).
+
+Regression tests: `payments/tests/test_adjusted_quote_mpesa_amount.py`
+(11 tests: 4,000→3,500 and 4,000→4,500 charge the adjusted amount, reconcile
+preserves cost/policy and re-balances the allocation, STK payload amount, the
+workflow-revise path, accepted snapshot locked/immutable, idempotent
+re-ensure, client-submitted amount ignored, duplicate initiation reuses one
+payment, wrong callback amount does not pay, duplicate callbacks apply once)
+plus `api/test_partner_quote_send_to_client.py::test_resend_of_non_pending_quote_keeps_total_and_split_in_lockstep`.
+
+Out of scope (observed while writing tests, not touched): `QuoteUpdateSerializer`
+writes `Decimal` values into the `response_snapshot` JSONField
+(`api/quote_serializers.py:931-935`), which raises on save. This is independent
+of the M-Pesa amount bug.
+
 ## Verification notes / limitations
 
 - Code paths above were read directly (line numbers current as of HEAD `eab699d`).
@@ -248,6 +288,10 @@ Unchanged (BUG 2, out of scope for Step 2): the M-Pesa adjusted-amount behaviour
   `pricing.test_wastage_pricing`, `api.test_calculator_spec_harmonization`,
   `tests.test_imposition_http_path`, `tests.test_phase_a_formula_contracts` and the
   **full suite** (`manage.py test --settings=config.test_settings`) — 871 tests OK.
+- Step 3 tests were executed the same way: the new
+  `payments.test_adjusted_quote_mpesa_amount`, `api.test_partner_quote_send_to_client`,
+  `payments.test_payment_flow`, `tests.test_phase_a_formula_contracts`,
+  `pricing.test_whole_kes_rounding`, then the **full suite** — 883 tests OK.
   Running against the default Postgres settings is still blocked locally
   (`FATAL: password authentication failed for user "printy_user"` at
   `localhost:5432`).
@@ -256,9 +300,11 @@ Unchanged (BUG 2, out of scope for Step 2): the M-Pesa adjusted-amount behaviour
 
 ## Recommended next step (Step 3)
 
-Implement the BUG 2 correction (attribute the STK amount to the currently accepted
-`quote.total` by reconciling the financial split before it is locked). Step 2
-(BUG 1) is complete: capped `billable_sheets` is now the single figure for pricing
-and all sheet-count surfaces, the uncapped fallback branch is removed, the
-finishing basis is documented, the stale verification harness is refreshed, and the
-regression tests pass.
+Step 3 (BUG 2) is complete: the persisted, accepted `quote.total` is the
+authoritative client amount. Acceptance reconciles the financial split to that
+total before locking it, every price-writing path keeps `quote.total` in
+lockstep (the dashboard resend branch was the only one that did not), the
+charge flows through the split into `Payment.amount`/`expected_amount` and the
+STK payload, and callback/duplicate handling is unchanged and covered by tests.
+Step 2 (BUG 1) remains complete. No further pricing/M-Pesa step is queued.
+

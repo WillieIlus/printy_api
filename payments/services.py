@@ -93,7 +93,13 @@ def _account_reference(quote) -> str:
 
 
 def _quote_split(quote):
-    split = getattr(quote, "financial_split", None)
+    # Read the persisted split rather than whatever the quote instance happens
+    # to have cached. Acceptance reconciles and locks the split through a
+    # separate locked row instance, and a stale cached relation would otherwise
+    # make us charge the pre-adjustment amount.
+    from quotes.models import QuoteFinancialSplit
+
+    split = QuoteFinancialSplit.objects.filter(quote=quote).first()
     if split is None:
         raise ValidationError("Quote must have QuoteFinancialSplit before payment can be created.")
     return split

@@ -139,6 +139,52 @@ format="json",
         mock_initiate_stk_push.assert_called_once_with(payment=payment, phone_number="254700000000")
         self.assertEqual(response.data["payment"]["payer_phone"], "254700000000")
 
+    def test_resend_of_non_pending_quote_keeps_total_and_split_in_lockstep(self):
+        quote_request = QuoteRequest.objects.create(
+            shop=self.shop,
+            created_by=self.partner,
+            on_behalf_of=self.end_client,
+            customer_name="Send Quote Client",
+            customer_email=self.end_client.email,
+            status=QuoteStatus.QUOTED,
+            request_snapshot={"source": "partner_quote_builder"},
+        )
+        quote = Quote.objects.create(
+            quote_request=quote_request,
+            shop=self.shop,
+            created_by=self.partner,
+            status=QuoteOfferStatus.SENT,
+            total=Decimal("1000.00"),
+            response_snapshot={"production_cost_inputs": self._production_cost_inputs()},
+        )
+        from pricing.services.platform_fee_policy import (
+            create_quote_financial_split,
+            get_active_platform_fee_policy,
+        )
+
+        create_quote_financial_split(
+            quote=quote,
+            production_cost=Decimal("500.00"),
+            broker_client_price=Decimal("1000.00"),
+            policy=get_active_platform_fee_policy(),
+        )
+        self.client.force_authenticate(user=self.partner)
+
+        response = self.client.post(
+            f"/api/dashboard/partner/quotes/{quote_request.id}/send-to-client/",
+            {},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        quote.refresh_from_db()
+        self.assertEqual(quote.status, QuoteOfferStatus.SENT)
+        # Regression: the resend path used to refresh only the split, leaving
+        # quote.total at the base estimate, so the two disagreed and a later
+        # acceptance charge could pick either value.
+        self.assertEqual(quote.total, quote.financial_split.client_total)
+        self.assertEqual(str(quote.total), "700.00")
+
     def test_duplicate_send_to_client_is_idempotent_and_sends_exactly_once(self):
         quote_request = QuoteRequest.objects.create(
             shop=self.shop,
