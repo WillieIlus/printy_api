@@ -16,8 +16,6 @@ from inventory.choices import SheetSize
 from inventory.models import Machine, Paper
 from pricing.choices import Sides
 from pricing.models import FinishingRate
-from services.engine.integration import build_job_spec, build_media_spec_from_paper, classify_finishing_spec
-from services.engine.services.quote_calculator import QuoteCalculator as EngineQuoteCalculator
 from services.pricing.engine import calculate_sheet_pricing
 
 
@@ -150,29 +148,13 @@ def calculate_quote_item(
     finishing_rules = list(
         FinishingRate.objects.filter(shop=paper.shop, pk__in=(finishing_ids or []), is_active=True)
     )
-    engine_summary = EngineQuoteCalculator().calculate(
-        build_job_spec(
-            product=product,
-            quantity=quantity,
-            width_mm=resolved_width,
-            height_mm=resolved_height,
-            sides=sides,
-        ),
-        [build_media_spec_from_paper(paper)],
-        classify_finishing_spec(finishing_rules, print_sides=sides),
-    )
-    layout = engine_summary.layout_result
-    if not getattr(layout, "fits", False):
-        result.can_calculate = False
-        result.reason = "Selected sheet does not fit the finished size."
-        return result
 
     machine = None
     if machine_id and sides and color_mode:
         machine = Machine.objects.filter(pk=machine_id, shop=paper.shop, is_active=True).first()
 
     finishings = [{"rule": rule, "selected_side": "both"} for rule in finishing_rules]
-    pricing = calculate_sheet_pricing(
+    engine_result = calculate_sheet_pricing(
         shop=paper.shop,
         product=product,
         quantity=quantity,
@@ -184,20 +166,21 @@ def calculate_quote_item(
         use_cost_price=True,
         width_mm=resolved_width,
         height_mm=resolved_height,
-    ).to_dict()
+    )
+    if not engine_result.can_calculate:
+        result.can_calculate = False
+        result.reason = engine_result.reason or "Selected sheet does not fit the finished size."
+        return result
+    pricing = engine_result.to_dict()
 
-    result.sheets_required = layout.total_sheets
+    result.sheets_required = engine_result.good_sheets or 0
     result.imposition = asdict(
         ImpositionResult(
-            per_sheet=layout.copies_per_sheet,
-            orientation=layout.chosen_orientation,
+            per_sheet=engine_result.copies_per_sheet or 0,
+            orientation="rotated" if engine_result.rotated else "normal",
             sheet_size_used=_best_sheet_size_for_paper(paper),
         )
     )
-    result.imposition["utilization_ratio"] = layout.utilization_ratio
-    result.imposition["waste_area_mm2"] = layout.waste_area_mm2
-    result.imposition["items_across"] = layout.items_across
-    result.imposition["items_down"] = layout.items_down
 
     paper_cost = Decimal(pricing["totals"]["paper_cost"])
     print_cost = Decimal(pricing["totals"]["print_cost"])

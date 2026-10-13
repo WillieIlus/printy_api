@@ -25,6 +25,7 @@ from api.visibility import (
 )
 from pricing.choices import ColorMode, Sides
 from pricing.models import FinishingRate
+from services.pricing.role_projection import ROLE_BUYER
 
 logger = logging.getLogger(__name__)
 from quotes.choices import CalculatorDraftContext, CalculatorDraftIntent, CalculatorDraftStatus, QuoteStatus, QuoteOfferStatus
@@ -216,7 +217,7 @@ def _build_request_snapshot(*, draft: CalculatorDraft, shop: Shop, merged_reques
             "currency": pricing_snapshot.get("currency") or "KES",
             "min_price": pricing_snapshot.get("min_price"),
             "max_price": pricing_snapshot.get("max_price"),
-            "production_preview": project_production_intelligence(pricing_snapshot.get("production_preview")),
+            "production_preview": project_production_intelligence(pricing_snapshot.get("production_preview"), role=ROLE_BUYER),
             "pricing_summary": project_pricing_breakdown(pricing_snapshot.get("pricing_preview"), actor=CLIENT_ACTOR),
             "selected_shop_preview": project_match_summary(
                 selected_shop_preview,
@@ -250,7 +251,7 @@ def _build_manager_intake_snapshot(*, draft: CalculatorDraft, merged_request_det
             "currency": pricing_snapshot.get("currency") or "KES",
             "min_price": pricing_snapshot.get("min_price"),
             "max_price": pricing_snapshot.get("max_price"),
-            "production_preview": project_production_intelligence(pricing_snapshot.get("production_preview")),
+            "production_preview": project_production_intelligence(pricing_snapshot.get("production_preview"), role=ROLE_BUYER),
             "pricing_summary": project_pricing_breakdown(pricing_snapshot.get("pricing_preview"), actor=CLIENT_ACTOR),
             "selected_shop_preview": None,
         },
@@ -297,7 +298,7 @@ def _build_item_spec_snapshot(*, draft: CalculatorDraft, merged_request_details:
         },
         "customer_pricing": {
             "currency": pricing_snapshot.get("currency") or "KES",
-            "production_preview": project_production_intelligence(pricing_snapshot.get("production_preview")),
+            "production_preview": project_production_intelligence(pricing_snapshot.get("production_preview"), role=ROLE_BUYER),
             "pricing_summary": project_pricing_breakdown(pricing_snapshot.get("pricing_preview"), actor=CLIENT_ACTOR),
         },
         "visibility": {
@@ -324,7 +325,7 @@ def _build_manager_intake_item_spec_snapshot(*, draft: CalculatorDraft, merged_r
         "selected_shop_ids": [],
         "customer_pricing": {
             "currency": pricing_snapshot.get("currency") or "KES",
-            "production_preview": project_production_intelligence(pricing_snapshot.get("production_preview")),
+            "production_preview": project_production_intelligence(pricing_snapshot.get("production_preview"), role=ROLE_BUYER),
             "pricing_summary": project_pricing_breakdown(pricing_snapshot.get("pricing_preview"), actor=CLIENT_ACTOR),
         },
         "visibility": {

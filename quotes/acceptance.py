@@ -48,6 +48,11 @@ def accept_quote_for_payment(*, quote: Quote, accepted_by, payer_phone: str = ""
         QuoteStatus.CLOSED,
     } and quote.status != QuoteOfferStatus.ACCEPTED:
         raise ValidationError("This request can no longer be accepted.")
+    if quote_request.price_updated:
+        raise ValidationError(
+            "The price for this quote was updated. Please review and acknowledge "
+            "the new price before payment can start."
+        )
 
     now = timezone.now()
     if quote.status != QuoteOfferStatus.ACCEPTED:

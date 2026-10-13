@@ -10,6 +10,13 @@ from accounts.services.roles import (
     CANONICAL_SUPER_ADMIN_ROLE,
     resolve_user_roles,
 )
+from services.pricing.role_projection import (
+    ROLE_ANONYMOUS,
+    ROLE_BUYER,
+    ROLE_MANAGER,
+    ROLE_PRINTER,
+    projection_role_for_actor,
+)
 
 
 PUBLIC_ACTOR = "public"
@@ -130,6 +137,22 @@ def resolve_actor(user: Any) -> str:
     return CLIENT_ACTOR
 
 
+def projection_role_for_request(request: Any) -> str:
+    """Resolve the projection role for a request (law 1.3 role selector).
+
+    ``X-Printy-Active-Role`` selects among the roles the authenticated user
+    actually holds; unauthenticated requests are always anonymous. This is the
+    single entry point views should use to pick a projection role.
+    """
+    from accounts.services.roles import get_actor_role, get_request_active_role
+
+    user = getattr(request, "user", None)
+    if not user or not getattr(user, "is_authenticated", False):
+        return ROLE_ANONYMOUS
+    actor = get_actor_role(user, get_request_active_role(request))
+    return projection_role_for_actor(actor)
+
+
 def _as_dict(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
@@ -167,6 +190,113 @@ def strip_forbidden_keys(payload: Any, actor: str) -> Any:
     if isinstance(payload, list):
         return [strip_forbidden_keys(item, actor) for item in payload]
     return payload
+
+
+# Law 1.2/1.3: the single role allowlists applied to any raw engine or snapshot
+# payload a view/serializer returns. A buyer/anonymous caller must never see a
+# forbidden field name, even as a null value or nested inside a snapshot dict;
+# a printer sees production detail and its own payout but never the buyer total,
+# per-piece price, manager margin, or fee tier.
+BUYER_ANONYMOUS_FORBIDDEN_RESPONSE_KEYS = frozenset(
+    {
+        "press_sheet",
+        "press_sheet_name",
+        "parent_sheet",
+        "parent_sheet_name",
+        "parent_sheets_required",
+        "layout",
+        "ups",
+        "copies_per_sheet",
+        "pieces_per_sheet",
+        "good_sheets",
+        "billable_sheets",
+        "sheets_billed",
+        "sheets_required",
+        "sheets_needed",
+        "imposition_count",
+        "imposition_label",
+        "production_sheets",
+        "production_preview",
+        "production_summary",
+        "production_description",
+        "spoilage",
+        "waste_sheets_added",
+        "fixed_waste_sheets",
+        "variable_waste_sheets",
+        "variable_waste_rate",
+        "maximum_spoilage_rate",
+        "maximum_spoilage_sheets",
+        "max_billable_sheets",
+        "cost_breakdown",
+        "pricing_breakdown",
+        "manager_margin",
+        "gross_margin",
+        "broker_margin",
+        "broker_margin_amount",
+        "broker_payout",
+        "fee_tier",
+        "printer_payout",
+        "printer_side_fee",
+        "production_cost",
+        "production_base_price",
+        "shop_payout",
+        "printy_fee",
+        "platform_service_amount",
+        "platform_service_percent",
+    }
+)
+
+PRINTER_FORBIDDEN_RESPONSE_KEYS = frozenset(
+    {
+        "grand_total",
+        "total_job_price",
+        "unit_price",
+        "per_piece",
+        "breakdown",
+        "cost_breakdown",
+        "pricing_breakdown",
+        "manager_margin",
+        "gross_margin",
+        "broker_margin",
+        "broker_payout",
+        "fee_tier",
+        "printer_side_fee",
+        "production_cost",
+        "shop_payout",
+        "client_total",
+        "client_price",
+        "printy_fee",
+        "platform_service_amount",
+        "platform_service_percent",
+    }
+)
+
+
+def scrub_forbidden_response_keys(value: Any, forbidden: frozenset[str]) -> Any:
+    """Recursively drop ``forbidden`` keys from a JSON-like payload (law 1.2/1.3)."""
+    if isinstance(value, dict):
+        return {
+            key: scrub_forbidden_response_keys(child, forbidden)
+            for key, child in value.items()
+            if key not in forbidden
+        }
+    if isinstance(value, (list, tuple)):
+        return [scrub_forbidden_response_keys(item, forbidden) for item in value]
+    return value
+
+
+def scrub_response_for_role(value: Any, role: str) -> Any:
+    """Apply the single role allowlist to a response payload (law 1.3)."""
+    if role in {ROLE_BUYER, ROLE_ANONYMOUS}:
+        return scrub_forbidden_response_keys(value, BUYER_ANONYMOUS_FORBIDDEN_RESPONSE_KEYS)
+    if role == ROLE_PRINTER:
+        return scrub_forbidden_response_keys(value, PRINTER_FORBIDDEN_RESPONSE_KEYS)
+    return value
+
+
+def scrub_response_for_request(value: Any, request: Any) -> Any:
+    """Apply :func:`scrub_response_for_role` using the request's active role."""
+    return scrub_response_for_role(value, projection_role_for_request(request))
 
 
 def normalize_topology_mode(value: Any) -> str:
@@ -269,7 +399,15 @@ def project_client_identity(
     return fallback
 
 
-def project_production_intelligence(preview: dict[str, Any] | None) -> dict[str, Any] | None:
+def project_production_intelligence(
+    preview: dict[str, Any] | None,
+    *,
+    role: str = ROLE_MANAGER,
+) -> dict[str, Any] | None:
+    # Law 1.3: buyers and anonymous visitors never see imposition, press sheet,
+    # ups, good sheets, spoilage, or sheets billed.
+    if role in {ROLE_BUYER, ROLE_ANONYMOUS}:
+        return None
     payload = _as_dict(preview)
     if not payload:
         return None
@@ -329,10 +467,48 @@ def project_production_intelligence(preview: dict[str, Any] | None) -> dict[str,
     return projected
 
 
-def project_public_preview(payload: dict[str, Any] | None) -> dict[str, Any] | None:
+def project_public_preview(
+    payload: dict[str, Any] | None,
+    *,
+    role: str = ROLE_ANONYMOUS,
+) -> dict[str, Any] | None:
     preview = _as_dict(payload)
     if not preview:
         return None
+    # Law 1.3/4.3: anonymous and buyer visitors see the spec summary and the
+    # gated price, never imposition, pagination, or sheet counts.
+    if role in {ROLE_BUYER, ROLE_ANONYMOUS}:
+        # Law 1.3: free-text explanations routinely spell out "N copies per
+        # sheet", "N good sheets" and "incl. N spoilage", i.e. imposition and
+        # sheet/spoilage counts. They are withheld from buyers and anonymous
+        # visitors entirely; the gated price + spec summary are enough.
+        projected = _copy_keys(
+            preview,
+            (
+                "quote_type",
+                "product_type",
+                "size_label",
+                "quantity",
+                "matched_stock",
+                "warnings",
+            ),
+        )
+        if "warnings" in projected:
+            projected["warnings"] = _strip_vat_explanation_lines(projected["warnings"])
+        pricing_breakdown = _copy_keys(
+            _as_dict(preview.get("pricing")),
+            (
+                "method",
+                "charged_area_m2",
+                "charged_length_m",
+                "minimum_charge",
+                "minimum_charge_applied",
+                "rate",
+            ),
+        )
+        if pricing_breakdown:
+            projected["pricing_breakdown"] = pricing_breakdown
+        return projected or None
     projected = _copy_keys(
         preview,
         (
@@ -357,7 +533,7 @@ def project_public_preview(payload: dict[str, Any] | None) -> dict[str, Any] | N
         projected["explanations"] = _strip_vat_explanation_lines(projected["explanations"])
     if "warnings" in projected:
         projected["warnings"] = _strip_vat_explanation_lines(projected["warnings"])
-    production_preview = project_production_intelligence(preview)
+    production_preview = project_production_intelligence(preview, role=role)
     if production_preview:
         projected["production_preview"] = production_preview
     pricing_breakdown = _copy_keys(
@@ -374,6 +550,46 @@ def project_public_preview(payload: dict[str, Any] | None) -> dict[str, Any] | N
     if pricing_breakdown:
         projected["pricing_breakdown"] = pricing_breakdown
     return projected or None
+
+
+_ANON_PRICING_RESPONSE_KEYS = (
+    "pricing_mode",
+    "quantity",
+    "currency",
+    "can_calculate",
+    "reason",
+    "summary",
+)
+_ANON_PRICING_TOTALS_KEYS = ("grand_total",)
+
+
+def project_public_pricing_response(
+    payload: dict[str, Any] | None,
+    *,
+    role: str = ROLE_ANONYMOUS,
+) -> dict[str, Any] | None:
+    """Reduce a raw engine response for anonymous/buyer callers (law 1.3/4.3).
+
+    Public calculator endpoints that return the raw engine dictionary must not
+    disclose cost breakdown, imposition, sheet counts or spoilage to a buyer or
+    anonymous visitor. Managers and printers keep the full response.
+    """
+    data = _as_dict(payload)
+    if not data:
+        return data
+    if role in {ROLE_BUYER, ROLE_ANONYMOUS}:
+        totals = _as_dict(data.get("totals"))
+        reduced = _copy_keys(data, _ANON_PRICING_RESPONSE_KEYS)
+        reduced["totals"] = _copy_keys(totals, _ANON_PRICING_TOTALS_KEYS)
+        reduced["total"] = totals.get("grand_total") or data.get("total")
+        reduced["explanations"] = []
+        return scrub_response_for_role(reduced, role)
+    if role == ROLE_PRINTER:
+        # Law 1.3/3.2: the printer keeps the production readout and their own
+        # payout, but never the buyer total, per-piece price, manager margin,
+        # cost breakdown or fee tier.
+        return scrub_response_for_role(data, role)
+    return data
 
 
 def project_pricing_breakdown(payload: dict[str, Any] | None, *, actor: str) -> dict[str, Any] | None:
@@ -424,8 +640,10 @@ def project_match_summary(
     actor: str,
     include_identity: bool = True,
     topology_mode: str = TOPOLOGY_MANAGED,
+    role: str | None = None,
 ) -> dict[str, Any]:
     match = _as_dict(payload)
+    resolved_role = role or projection_role_for_actor(actor)
 
     should_show_identity = (
         include_identity
@@ -470,7 +688,7 @@ def project_match_summary(
         "estimated_price": match.get("estimated_price") if actor != PUBLIC_ACTOR else None,
         "price_range": match.get("price_range"),
         "distance_label": match.get("distance_label") if should_show_identity else None,
-        "production_preview": project_production_intelligence(match.get("production_preview")),
+        "production_preview": project_production_intelligence(match.get("production_preview"), role=resolved_role),
         "pricing_breakdown": project_pricing_breakdown(match.get("pricing_breakdown"), actor=actor),
     }
     if actor == SHOP_ACTOR or actor == OPS_ACTOR:
@@ -560,10 +778,10 @@ def project_public_marketplace_response(payload: dict[str, Any] | None) -> dict[
         "source_label": source_label,
     }
 
-    # Production summary (safe)
-    production_preview = project_production_intelligence(response.get("production_preview"))
+    # Production summary (safe). Law 1.3: no imposition/sheet counts to anonymous.
+    production_preview = project_production_intelligence(response.get("production_preview"), role=ROLE_ANONYMOUS)
 
-    return {
+    result = {
         "mode": response.get("mode"),
         "can_calculate": response.get("can_calculate"),
         "product_type": response.get("product_type"),
@@ -603,6 +821,10 @@ def project_public_marketplace_response(payload: dict[str, Any] | None) -> dict[
             "topology_mode": "managed",
         },
     }
+    # Law 1.3: the public marketplace shape is viewer-safe for anonymous and
+    # buyer callers. One recursive scrub (not per-field picking) guarantees no
+    # imposition/sheet/cost/margin/payout key survives anywhere in the tree.
+    return scrub_response_for_role(result, ROLE_ANONYMOUS)
 
 
 def project_request_snapshot_for_client(payload: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -657,7 +879,7 @@ def project_request_snapshot_for_client(payload: dict[str, Any] | None) -> dict[
         "production_source_label": "Production source selected by your Print Manager",
         "matched_specs": _as_list(snapshot.get("matched_specs")),
         "needs_confirmation": _as_list(snapshot.get("needs_confirmation")),
-        "production_preview_snapshot": project_production_intelligence(snapshot.get("production_preview_snapshot")),
+        "production_preview_snapshot": project_production_intelligence(snapshot.get("production_preview_snapshot"), role=ROLE_BUYER),
         "pricing_preview_snapshot": project_pricing_breakdown(snapshot.get("pricing_preview_snapshot"), actor=CLIENT_ACTOR),
         "selected_shop_preview": projected_selected_shop_preview,
         "customer_pricing": strip_forbidden_keys(_as_dict(snapshot.get("customer_pricing")), CLIENT_ACTOR),
@@ -707,9 +929,9 @@ def project_quote_response_snapshot_for_client(
         return None
 
     production_preview = (
-        project_production_intelligence(snapshot.get("production_preview"))
-        or project_production_intelligence(snapshot.get("production_preview_snapshot"))
-        or project_production_intelligence(revised.get("production_preview"))
+        project_production_intelligence(snapshot.get("production_preview"), role=ROLE_BUYER)
+        or project_production_intelligence(snapshot.get("production_preview_snapshot"), role=ROLE_BUYER)
+        or project_production_intelligence(revised.get("production_preview"), role=ROLE_BUYER)
     )
     pricing_summary = (
         project_pricing_breakdown(snapshot.get("pricing_breakdown"), actor=CLIENT_ACTOR)
@@ -767,7 +989,7 @@ def project_revised_pricing_snapshot_for_client(payload: dict[str, Any] | None) 
     revised = strip_forbidden_keys(_as_dict(payload), CLIENT_ACTOR)
     if not revised:
         return None
-    production_preview = project_production_intelligence(revised.get("production_preview"))
+    production_preview = project_production_intelligence(revised.get("production_preview"), role=ROLE_BUYER)
     pricing_summary = project_pricing_breakdown(revised, actor=CLIENT_ACTOR)
     return {
         "production_preview": production_preview,

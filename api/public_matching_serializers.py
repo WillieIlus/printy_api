@@ -213,29 +213,23 @@ class PublicBookletMatchPayloadSerializer(serializers.Serializer):
     radius_km = serializers.FloatField(required=False, allow_null=True, min_value=0.1, max_value=500)
 
 
-class ProductionPreviewSerializer(serializers.Serializer):
-    pieces_per_sheet = serializers.IntegerField(required=False, allow_null=True)
-    sheets_required = serializers.IntegerField(required=False, allow_null=True)
-    parent_sheet = serializers.CharField(required=False, allow_null=True)
-    imposition_label = serializers.CharField(required=False, allow_null=True)
+class PublicProductionSummarySerializer(serializers.Serializer):
+    """Buyer/anonymous-safe production summary (law 1.3).
+
+    Renamed and shrunk from the former ``ProductionPreviewSerializer``. Every
+    imposition field (pieces_per_sheet, sheets_required, parent_sheet,
+    imposition_label, layout, roll/tiling/area metrics) has been removed so this
+    serializer -- used on the public match/response shapes -- cannot expose
+    imposition, press sheet, ups, good sheets, spoilage or sheets-billed to a
+    buyer or anonymous visitor. Managers and printers receive imposition from
+    the manager/printer projection of the canonical result, never from here.
+    """
+
     size_label = serializers.CharField(required=False, allow_null=True)
     quantity = serializers.IntegerField(required=False, allow_null=True)
-    cutting_required = serializers.BooleanField(required=False, allow_null=True)
     selected_finishings = serializers.ListField(child=serializers.CharField(), default=list)
     suggested_finishings = serializers.ListField(child=serializers.CharField(), default=list)
     warnings = serializers.ListField(child=serializers.CharField(), default=list)
-    roll_width_m = serializers.FloatField(required=False, allow_null=True)
-    roll_width_mm = serializers.FloatField(required=False, allow_null=True)
-    items_per_row = serializers.IntegerField(required=False, allow_null=True)
-    rows = serializers.IntegerField(required=False, allow_null=True)
-    used_length_m = serializers.FloatField(required=False, allow_null=True)
-    orientation = serializers.CharField(required=False, allow_null=True)
-    input_size_m = serializers.JSONField(required=False, allow_null=True)
-    charged_area_m2 = serializers.FloatField(required=False, allow_null=True)
-    printed_area_m2 = serializers.FloatField(required=False, allow_null=True)
-    waste_area_m2 = serializers.FloatField(required=False, allow_null=True)
-    overlap_area_m2 = serializers.FloatField(required=False, allow_null=True)
-    tiling = serializers.JSONField(required=False, allow_null=True)
 
 
 class PricingBreakdownLineSerializer(serializers.Serializer):
@@ -292,7 +286,7 @@ class PublicMatchShopSerializer(serializers.Serializer):
     closest_alternatives = serializers.ListField(child=serializers.JSONField(), default=list)
     alternative_suggestions = serializers.ListField(child=serializers.JSONField(), default=list, source="closest_alternatives")
     price_range = serializers.JSONField(required=False, allow_null=True)
-    production_preview = ProductionPreviewSerializer(required=False, allow_null=True)
+    production_preview = PublicProductionSummarySerializer(required=False, allow_null=True)
     pricing_breakdown = serializers.SerializerMethodField()
 
     def get_pricing_breakdown(self, obj):
@@ -320,7 +314,7 @@ class PublicCalculatorResponseSerializer(serializers.Serializer):
     selected_shops = PublicMatchShopSerializer(many=True)
     shop_matches = PublicMatchShopSerializer(many=True, required=False, source="matches")
     fixed_shop_preview = PublicMatchShopSerializer(required=False, allow_null=True)
-    production_preview = ProductionPreviewSerializer(required=False, allow_null=True)
+    production_preview = PublicProductionSummarySerializer(required=False, allow_null=True)
     pricing_breakdown = serializers.SerializerMethodField()
     missing_requirements = serializers.ListField(child=serializers.CharField(), required=False, default=list)
     missing_fields = serializers.ListField(child=serializers.CharField(), required=False, default=list, source="missing_requirements")

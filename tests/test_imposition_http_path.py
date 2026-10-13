@@ -1,9 +1,12 @@
-"""HTTP-path regression tests for the imposition audit fixes.
+"""Regression tests for the imposition audit fixes.
 
-These do not call the imposition helpers. They POST to the real public endpoint
-``POST /api/calculator/public-preview/`` and assert on the response the buyer
-actually receives, which is the only way to prove the defects are fixed end to
-end (serializer -> size resolution -> matching -> authoritative imposition).
+Changed under law 1.1-1.3 (prompt `[header]` item 5): the anonymous public
+endpoint ``POST /api/calculator/public-preview/`` must NOT expose imposition or
+sheet counts, so these deep imposition-math assertions now run against the
+canonical calculator result (what a manager/printer projection exposes), while
+``test_anonymous_public_preview_hides_imposition`` asserts the public response
+strips it. The math end-to-end path (serializer -> size resolution -> matching
+-> authoritative imposition) is unchanged; only the role projection is applied.
 
 Every case pins the ten fields the audit asks to be reported:
 
@@ -18,10 +21,23 @@ from django.test import TestCase
 from rest_framework.test import APIClient
 
 from accounts.models import User
+from api.workflow_serializers import CalculatorConfigPreviewSerializer
 from inventory.models import Machine, Paper
 from pricing.choices import ChargeUnit, FinishingBillingBasis, FinishingSideMode
 from pricing.models import FinishingRate, PlatformFeePolicy, PrintingRate
+from services.pricing.calculator_preview import build_public_calculator_preview
 from shops.models import Shop
+
+
+class _PreviewResponse:
+    """Response shim so the audit assertions read the canonical result."""
+
+    def __init__(self, payload):
+        self.status_code = 200
+        self._payload = payload
+
+    def json(self):
+        return self._payload
 
 
 ENDPOINT = "/api/calculator/public-preview/"
@@ -131,7 +147,34 @@ class PublicPreviewImpositionHttpTests(TestCase):
             "requested_gsm": 300,
         }
         payload.update(overrides)
-        return self.client.post(ENDPOINT, payload, format="json")
+        serializer = CalculatorConfigPreviewSerializer(data=payload)
+        serializer.is_valid(raise_exception=True)
+        return _PreviewResponse(build_public_calculator_preview(serializer.validated_data))
+
+    def test_anonymous_public_preview_hides_imposition(self):
+        """Law 1.3: an anonymous public response carries no imposition/sheets."""
+        self._sra3_shop()
+        response = self.client.post(
+            ENDPOINT,
+            {
+                "product_type": "business_card",
+                "quantity": QUANTITY,
+                "finished_size": "custom",
+                "print_sides": "SIMPLEX",
+                "color_mode": "COLOR",
+                "requested_paper_category": "gloss",
+                "requested_gsm": 300,
+                "width_mm": 123,
+                "height_mm": 217,
+            },
+            format="json",
+        )
+        self.assertEqual(response.status_code, 200, response.json())
+        payload = response.json()
+        self.assertIsNone(payload.get("production_preview"), payload)
+        blob = str(payload)
+        for forbidden in ("pieces_per_sheet", "good_sheets", "billable_sheets", "sheets_required"):
+            self.assertNotIn(forbidden, blob, payload)
 
     def assert_imposition(self, response, *, width_mm, height_mm, expected_pps, expected_orientation):
         """Assert the ten reported fields on a priced response."""

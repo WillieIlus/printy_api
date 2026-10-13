@@ -19,6 +19,7 @@ from services.pricing.engine import (
     _resolve_vat_summary,
     strip_vat_detail,
 )
+from services.pricing.role_projection import ROLE_MANAGER
 from shops.models import Shop
 
 User = get_user_model()
@@ -103,19 +104,24 @@ class StripVatDetailUnitTests(SimpleTestCase):
 
 class PublicPreviewVatUnitTests(SimpleTestCase):
     def test_project_public_preview_strips_vat_explanation_lines(self):
-        projected = project_public_preview(
-            {
-                "quote_type": "flat",
-                "quantity": 100,
-                "warnings": ["VAT: 80.00 (exclusive)."],
-                "explanations": [
-                    "Paper: 42 sheets x 7.14.",
-                    "VAT: 80.00 (exclusive).",
-                ],
-            }
-        )
-        self.assertEqual(projected["explanations"], ["Paper: 42 sheets x 7.14."])
-        self.assertEqual(projected["warnings"], [])
+        payload = {
+            "quote_type": "flat",
+            "quantity": 100,
+            "warnings": ["VAT: 80.00 (exclusive)."],
+            "explanations": [
+                "Paper: 42 sheets x 7.14.",
+                "VAT: 80.00 (exclusive).",
+            ],
+        }
+        # A manager/printer projection keeps explanations but never the VAT line.
+        manager = project_public_preview(payload, role=ROLE_MANAGER)
+        self.assertEqual(manager["explanations"], ["Paper: 42 sheets x 7.14."])
+        self.assertEqual(manager["warnings"], [])
+        # Law 1.3: the anonymous projection withholds explanations entirely
+        # (they spell out sheet and spoilage counts).
+        anonymous = project_public_preview(payload)
+        self.assertNotIn("explanations", anonymous)
+        self.assertEqual(anonymous["warnings"], [])
 
     def test_project_production_intelligence_strips_vat_warnings(self):
         projected = project_production_intelligence(

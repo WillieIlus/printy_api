@@ -20,15 +20,8 @@ from catalog.imposition import sheets_needed as _sheets_needed
 from pricing.choices import ChargeUnit, FinishingBillingBasis, FinishingSideMode, Sides
 from pricing.models import PrintingRate
 from pricing.services.production_cost_calculator import calculate_billable_sheets
-from services.engine.integration import (
-    build_job_spec,
-    build_media_spec_from_material,
-    build_media_spec_from_paper,
-    classify_finishing_spec,
-    serialize_result,
-)
-from services.engine.services.quote_calculator import QuoteCalculator as EngineQuoteCalculator
 from services.pricing.engine import calculate_sheet_pricing
+from services.pricing.imposition import build_imposition_breakdown
 from services.pricing.result_contract import build_calculation_result
 
 
@@ -222,29 +215,25 @@ def _iter_finishings(finishings):
     return finishings or []
 
 
-def _calculate_engine_summary(item, product=None):
-    product = product or getattr(item, "product", None)
-    finishings = list(_iter_finishings(getattr(item, "finishings", [])))
-    calculator = EngineQuoteCalculator()
+def _canonical_sheet_imposition(product, paper, quantity: int):
+    """Single source of truth for flat-sheet imposition (no engine duplicate).
 
-    if getattr(item, "paper_id", None) and getattr(item, "paper", None):
-        return calculator.calculate(
-            build_job_spec(product=product, item=item),
-            [build_media_spec_from_paper(item.paper)],
-            classify_finishing_spec(finishings, print_sides=getattr(item, "sides", None)),
-        )
-
-    if getattr(item, "material_id", None) and getattr(item, "material", None):
-        media = build_media_spec_from_material(item.material)
-        if media is None:
-            return None
-        return calculator.calculate(
-            build_job_spec(product=product, item=item),
-            [media],
-            classify_finishing_spec(finishings, print_sides=getattr(item, "sides", None)),
-        )
-
-    return None
+    Uses the same canonical ``build_imposition_breakdown`` the pricing engine
+    uses, so the displayed copy/sheet counts can never drift from the counts
+    paper and printing are actually billed on.
+    """
+    if hasattr(paper, "get_dimensions_mm"):
+        sheet_width, sheet_height = paper.get_dimensions_mm()
+    else:
+        sheet_width, sheet_height = paper.width_mm, paper.height_mm
+    return build_imposition_breakdown(
+        quantity=quantity,
+        finished_width_mm=getattr(product, "default_finished_width_mm", 0) or 0,
+        finished_height_mm=getattr(product, "default_finished_height_mm", 0) or 0,
+        sheet_width_mm=sheet_width or 0,
+        sheet_height_mm=sheet_height or 0,
+        bleed_mm=getattr(product, "default_bleed_mm", 3) or 3,
+    )
 
 
 def compute_finishings_cost(
@@ -374,19 +363,12 @@ def _compute_sheet_pricing(item, product, quantity, sides_count, result: Pricing
     if result.missing_fields:
         result.reason = f"Missing: {', '.join(result.missing_fields)}"
 
-    engine_summary = _calculate_engine_summary(item, product)
-    layout = engine_summary.layout_result if engine_summary else None
+    layout_imposition = _canonical_sheet_imposition(product, paper, quantity)
     result.quote_type = "flat"
     result.currency = getattr(getattr(item, "quote_request", None), "shop", None).currency if getattr(getattr(item, "quote_request", None), "shop", None) else "KES"
-    result.engine_type = engine_summary.engine_type if engine_summary else "flat_sheet"
-    result.copies_per_sheet = (
-        getattr(layout, "copies_per_sheet", 0)
-        or compute_imposition(product, paper)["copies_per_sheet"]
-    )
-    result.sheets_needed = (
-        getattr(layout, "total_sheets", 0)
-        or compute_sheets_needed(quantity, result.copies_per_sheet or 1)
-    )
+    result.engine_type = "flat_sheet"
+    result.copies_per_sheet = layout_imposition.copies_per_sheet or 0
+    result.sheets_needed = layout_imposition.good_sheets or 0
     sheet_area_sqm = Decimal("0")
     if paper.width_mm and paper.height_mm:
         sheet_area_sqm = (Decimal(str(paper.width_mm)) / Decimal("1000")) * (Decimal(str(paper.height_mm)) / Decimal("1000"))
@@ -564,11 +546,10 @@ def _compute_sheet_pricing(item, product, quantity, sides_count, result: Pricing
                 }
                 for line in result.finishing_lines
             ]
-    result.layout_result = serialize_result(layout) if layout else {}
-    result.finishing_plan = serialize_result(engine_summary.finishing) if engine_summary and engine_summary.finishing else {}
-    result.layout_notes = list(getattr(engine_summary, "notes", []) or [])
+    result.layout_result = layout_imposition.to_dict()
+    result.finishing_plan = {}
+    result.layout_notes = []
     result.explanations = list(pricing_breakdown.get("explanations", [])) if pricing_breakdown else []
-    result.explanations.extend(result.layout_notes)
     result.calculation_description = (
         f"Sheet job: {result.copies_per_sheet} up on {paper.sheet_size}, "
         f"{result.billable_sheets or result.sheets_needed} sheet(s), paper + printing + finishing."

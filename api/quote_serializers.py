@@ -520,6 +520,13 @@ class QuoteRequestCustomerDetailSerializer(serializers.ModelSerializer):
     messages = QuoteRequestMessageSerializer(many=True, read_only=True)
     latest_sent_quote = serializers.SerializerMethodField()
     whatsapp_summary = serializers.SerializerMethodField()
+    price_updated = serializers.BooleanField(read_only=True)
+    price_updated_old_total = serializers.DecimalField(
+        max_digits=12, decimal_places=2, read_only=True
+    )
+    price_updated_new_total = serializers.DecimalField(
+        max_digits=12, decimal_places=2, read_only=True
+    )
     raw_status = serializers.CharField(source="status", read_only=True)
     status = serializers.SerializerMethodField()
     status_label = serializers.SerializerMethodField()
@@ -546,6 +553,9 @@ class QuoteRequestCustomerDetailSerializer(serializers.ModelSerializer):
             "messages",
             "latest_sent_quote",
             "whatsapp_summary",
+            "price_updated",
+            "price_updated_old_total",
+            "price_updated_new_total",
             "created_at",
             "updated_at",
         ]

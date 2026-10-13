@@ -49,6 +49,8 @@ from quotes.models import QuoteRequest, Quote
 from quotes.partner_services import respond_to_assigned_quote_request
 from quotes.services_workflow import update_quote_response
 from services.production_matching import build_partner_production_matches
+from services.pricing.role_projection import ROLE_MANAGER
+from .canonical_jobs import build_job_projection, current_job_override_state, preview_job_override
 from services.pricing.breakdown_projection import production_breakdown_from_preview
 from services.pricing.finishing_normalization import is_empty_finishing, normalize_finishing_slug
 from services.pricing.spec_normalization import normalize_color_mode, normalize_print_sides
@@ -1638,9 +1640,86 @@ class PartnerJobListDetailView(BaseRoleDetailView):
                     "role": "partner",
                     "job": self._job_row(job, role=CANONICAL_PARTNER_ROLE),
                     "settlement": get_financial_split_for_job(job),
+                    "canonical": build_job_projection(job, ROLE_MANAGER),
                 }
             )
         return Response({"role": "partner", "results": [self._job_row(job, role=CANONICAL_PARTNER_ROLE) for job in self.get_queryset(request)]})
+
+
+class ManagerJobOverrideSerializer(serializers.Serializer):
+    field = serializers.CharField(max_length=40)
+    new_value = serializers.JSONField()
+    reason = serializers.CharField(required=False, allow_blank=True, max_length=500)
+
+    def validate_field(self, value):
+        from quotes.overrides import VALID_OVERRIDE_FIELDS
+
+        if value not in VALID_OVERRIDE_FIELDS:
+            raise serializers.ValidationError("Unknown override field.")
+        return value
+
+
+class ManagerJobOverrideView(BaseRoleDetailView):
+    """Manager adjusts spoilage/paper/markup/sheet count on a job (law 2.1-2.3).
+
+    ``persist=False`` previews the buyer-facing price impact without saving;
+    ``persist=True`` records the override and returns the updated projections.
+    """
+
+    dashboard_role = "partner"
+    allowed_roles = (CANONICAL_PARTNER_ROLE,)
+    persist = False
+
+    def get_queryset(self, request):
+        return (
+            ManagedJob.objects.filter(partner_managed_job_filter(request.user))
+            .select_related("source_quote", "source_quote_request", "assigned_shop")
+            .distinct()
+        )
+
+    def post(self, request, job_id):
+        job = get_object_or_404(self.get_queryset(request), pk=job_id)
+        serializer = ManagerJobOverrideSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        field = serializer.validated_data["field"]
+        new_value = serializer.validated_data["new_value"]
+        quote_request = getattr(job, "source_quote_request", None)
+        if quote_request is None:
+            return Response({"detail": "This job has no source quote to adjust."}, status=400)
+
+        if self.persist:
+            from quotes.overrides import QuoteLockedError, record_override
+
+            try:
+                record_override(
+                    quote_request=quote_request,
+                    field=field,
+                    new_value=new_value,
+                    user=request.user,
+                    reason=serializer.validated_data.get("reason") or "",
+                )
+            except QuoteLockedError as exc:
+                return Response({"detail": str(exc)}, status=400)
+            except ValidationError as exc:
+                detail = exc.messages if hasattr(exc, "messages") else str(exc)
+                return Response({"detail": detail}, status=400)
+            quote_request.refresh_from_db()
+            payload = current_job_override_state(job)
+            payload["recorded"] = True
+            payload["price_updated"] = bool(quote_request.price_updated)
+            return Response(payload)
+
+        payload = preview_job_override(job, field=field, new_value=serializer.validated_data["new_value"])
+        payload["persisted"] = False
+        return Response(payload)
+
+
+class ManagerJobOverridePreviewView(ManagerJobOverrideView):
+    persist = False
+
+
+class ManagerJobOverrideCreateView(ManagerJobOverrideView):
+    persist = True
 
 
 class OfflineQuoteClaimView(BaseRoleDetailView):

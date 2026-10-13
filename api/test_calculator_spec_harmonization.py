@@ -31,6 +31,7 @@ from pricing.choices import ChargeUnit, FinishingBillingBasis, FinishingSideMode
 from pricing.models import FinishingRate, PlatformFeePolicy, PrintingRate
 from api.public_matching_serializers import PublicCalculatorPayloadSerializer
 from api.workflow_serializers import CalculatorConfigPreviewSerializer
+from services.pricing.calculator_preview import build_public_calculator_preview
 from shops.models import Shop
 
 
@@ -282,6 +283,17 @@ class CalculatorSpecHarmonizationTestCase(TestCase):
         self.assertIsNotNone(payload["market_range"])
         self.assertIsNotNone(payload["market_range"]["min"])
 
+    def _canonical_preview(self, payload):
+        """The canonical calculator result that a manager/printer projection exposes.
+
+        Law 1.3 hides imposition from anonymous/buyer responses, so engine-level
+        imposition math is asserted here and the anonymous stripping is asserted
+        separately against the real HTTP response.
+        """
+        serializer = CalculatorConfigPreviewSerializer(data=payload)
+        serializer.is_valid(raise_exception=True)
+        return build_public_calculator_preview(serializer.validated_data)
+
     def test_legacy_paper_stock_draft_is_mapped_to_category_and_gsm(self):
         """Pre-refactor drafts carried a `paper_stock` key. The public calculator
         must map it onto the modern paper request vocabulary (category + gsm) at
@@ -305,66 +317,81 @@ class CalculatorSpecHarmonizationTestCase(TestCase):
         self.assertTrue(payload["can_calculate"], payload)
         self.assertNotIn("paper_stock", payload["missing_fields"], payload)
         self.assertGreaterEqual(payload["matches_count"], 1, payload)
+        # Law 1.3: an anonymous public response must not disclose imposition.
         for match in payload["matches"]:
+            self.assertIsNone(match.get("production_preview"), match)
+
+        canonical = self._canonical_preview(
+            {
+                "product_type": "business_card",
+                "quantity": 100,
+                "finished_size": "90x55mm",
+                "paper_stock": "300gsm",
+                "print_sides": "SIMPLEX",
+                "color_mode": "COLOR",
+            }
+        )
+        for match in canonical["matches"]:
             production = match.get("production_preview") or {}
             self.assertEqual(production.get("parent_sheet"), "SRA3", match)
             self.assertGreaterEqual(production.get("sheets_required") or 0, 1, match)
 
     def test_public_preview_returns_imposition_preview(self):
-        """The preview must return the full imposition back to the client — the
-        sheet layout the price is built from: pieces per sheet, layout
-        (cols x rows, orientation), bleed, press sheet, good sheets and the
-        spoilage split (fixed + variable) that produce the billable sheet count.
-        This locks in the 'How your sheet is laid out' disclosure so it can
-        never silently drop out of the public response again."""
-        response = self.client.post(
-            "/api/calculator/public-preview/",
-            {
-                "product_type": "business_card",
-                "quantity": 100,
-                "finished_size": "90x55mm",
-                "requested_paper_category": "matt",
-                "requested_gsm": 300,
-                "print_sides": "DUPLEX",
-                "color_mode": "COLOR",
-            },
-            format="json",
-        )
+        """Law 1.3 separation. The canonical result still carries the full
+        imposition the price is built from (pieces per sheet, layout, bleed,
+        press sheet, good sheets and the spoilage split); the anonymous public
+        response must NOT disclose any of it."""
+        public_payload = {
+            "product_type": "business_card",
+            "quantity": 100,
+            "finished_size": "90x55mm",
+            "requested_paper_category": "matt",
+            "requested_gsm": 300,
+            "print_sides": "DUPLEX",
+            "color_mode": "COLOR",
+        }
+        response = self.client.post("/api/calculator/public-preview/", public_payload, format="json")
         assert response.status_code == 200, response.json()
         payload = response.json()
-        production = payload.get("production_preview") or {}
-        self.assertGreaterEqual(production.get("pieces_per_sheet") or 0, 1, payload)
-        self.assertGreaterEqual(production.get("sheets_required") or 0, 1, payload)
-        self.assertGreaterEqual(production.get("good_sheets") or 0, 1, payload)
-        self.assertTrue(production.get("parent_sheet"), payload)
-        self.assertIn(production.get("cutting_required"), (True, False, None), payload)
-        self.assertEqual(production.get("good_sheets"), production.get("sheets_required"), payload)
+        self.assertIsNone(payload.get("production_preview"), payload)
+        blob = str(payload)
+        for forbidden in ("pieces_per_sheet", "good_sheets", "billable_sheets", "sheets_required", "press_sheet"):
+            self.assertNotIn(forbidden, blob, payload)
+
+        canonical = self._canonical_preview(public_payload)
+        production = canonical.get("production_preview") or {}
+        self.assertGreaterEqual(production.get("pieces_per_sheet") or 0, 1, canonical)
+        self.assertGreaterEqual(production.get("sheets_required") or 0, 1, canonical)
+        self.assertGreaterEqual(production.get("good_sheets") or 0, 1, canonical)
+        self.assertTrue(production.get("parent_sheet"), canonical)
+        self.assertIn(production.get("cutting_required"), (True, False, None), canonical)
+        self.assertEqual(production.get("good_sheets"), production.get("sheets_required"), canonical)
         self.assertEqual(
             production.get("billable_sheets"),
             min(
                 (production.get("good_sheets") or 0) + (production.get("waste_sheets_added") or 0),
                 production.get("max_billable_sheets") or (10**9),
             ),
-            payload,
+            canonical,
         )
-        self.assertGreaterEqual(production.get("billable_sheets") or 0, production.get("good_sheets") or 0, payload)
-        self.assertGreaterEqual(production.get("bleed_mm") or 0, 0, payload)
+        self.assertGreaterEqual(production.get("billable_sheets") or 0, production.get("good_sheets") or 0, canonical)
+        self.assertGreaterEqual(production.get("bleed_mm") or 0, 0, canonical)
         layout = production.get("layout") or {}
         self.assertEqual(
             (layout.get("cols") or 0) * (layout.get("rows") or 0),
             production.get("pieces_per_sheet"),
-            payload,
+            canonical,
         )
-        self.assertIn(layout.get("orientation"), ("normal", "rotated"), payload)
+        self.assertIn(layout.get("orientation"), ("normal", "rotated"), canonical)
         press_sheet = production.get("press_sheet") or {}
-        self.assertGreaterEqual(press_sheet.get("width_mm") or 0, 1, payload)
-        self.assertGreaterEqual(press_sheet.get("height_mm") or 0, 1, payload)
-        for match in payload.get("matches") or []:
+        self.assertGreaterEqual(press_sheet.get("width_mm") or 0, 1, canonical)
+        self.assertGreaterEqual(press_sheet.get("height_mm") or 0, 1, canonical)
+        for match in canonical.get("matches") or []:
             row = match.get("production_preview") or {}
             self.assertGreaterEqual(row.get("pieces_per_sheet") or 0, 1, match)
             self.assertGreaterEqual(row.get("good_sheets") or 0, 1, match)
             self.assertGreaterEqual(row.get("billable_sheets") or 0, row.get("good_sheets") or 0, match)
-        first_match = (payload.get("matches") or [{}])[0].get("production_preview") or {}
+        first_match = (canonical.get("matches") or [{}])[0].get("production_preview") or {}
         for key in ("good_sheets", "waste_sheets_added", "billable_sheets", "pieces_per_sheet", "sheets_required"):
             self.assertEqual(production.get(key), first_match.get(key), f"top-level {key} must match the first match")
 
@@ -376,21 +403,22 @@ class CalculatorSpecHarmonizationTestCase(TestCase):
 
         from decimal import Decimal as D
 
-        response = self.client.post(
-            "/api/calculator/public-preview/",
-            {
-                "product_type": "business_card",
-                "quantity": 100,
-                "finished_size": "90x55mm",
-                "requested_paper_category": "gloss",
-                "requested_gsm": 300,
-                "print_sides": "SIMPLEX",
-                "color_mode": "COLOR",
-            },
-            format="json",
-        )
-        assert response.status_code == 200, response.json()
-        production = response.json()["production_preview"]
+        request_payload = {
+            "product_type": "business_card",
+            "quantity": 100,
+            "finished_size": "90x55mm",
+            "requested_paper_category": "gloss",
+            "requested_gsm": 300,
+            "print_sides": "SIMPLEX",
+            "color_mode": "COLOR",
+        }
+        # Law 1.3: the anonymous response hides the spoilage math.
+        anonymous = self.client.post("/api/calculator/public-preview/", request_payload, format="json")
+        assert anonymous.status_code == 200, anonymous.json()
+        self.assertIsNone(anonymous.json().get("production_preview"), anonymous.json())
+
+        canonical = self._canonical_preview(request_payload)
+        production = canonical["production_preview"]
 
         good = production["good_sheets"]
         copies = production["pieces_per_sheet"]
@@ -405,19 +433,7 @@ class CalculatorSpecHarmonizationTestCase(TestCase):
         )
         self.assertGreaterEqual(production["waste_sheets_added"], production["fixed_waste_sheets"])
 
-        same_as_first_match = self.client.post(
-            "/api/calculator/public-preview/",
-            {
-                "product_type": "business_card",
-                "quantity": 100,
-                "finished_size": "90x55mm",
-                "requested_paper_category": "gloss",
-                "requested_gsm": 300,
-                "print_sides": "SIMPLEX",
-                "color_mode": "COLOR",
-            },
-            format="json",
-        ).json()
+        same_as_first_match = self._canonical_preview(request_payload)
         first = (same_as_first_match["matches"] or [{}])[0].get("production_preview") or {}
         for key in ("good_sheets", "fixed_waste_sheets", "variable_waste_sheets", "waste_sheets_added", "billable_sheets", "pieces_per_sheet"):
             self.assertEqual(production[key], first[key], key)
@@ -427,28 +443,29 @@ class CalculatorSpecHarmonizationTestCase(TestCase):
         max billable = theoretical (good) sheets + ceil(theoretical * rate)."""
         from math import ceil
 
-        response = self.client.post(
-            "/api/calculator/public-preview/",
-            {
-                "product_type": "business_card",
-                "quantity": 100,
-                "finished_size": "90x55mm",
-                "requested_paper_category": "gloss",
-                "requested_gsm": 300,
-                "print_sides": "SIMPLEX",
-                "color_mode": "COLOR",
-            },
-            format="json",
-        )
-        assert response.status_code == 200, response.json()
-        production = response.json()["production_preview"]
+        request_payload = {
+            "product_type": "business_card",
+            "quantity": 100,
+            "finished_size": "90x55mm",
+            "requested_paper_category": "gloss",
+            "requested_gsm": 300,
+            "print_sides": "SIMPLEX",
+            "color_mode": "COLOR",
+        }
+        # Law 1.3: the anonymous response hides the spoilage cap math.
+        anonymous = self.client.post("/api/calculator/public-preview/", request_payload, format="json")
+        assert anonymous.status_code == 200, anonymous.json()
+        self.assertIsNone(anonymous.json().get("production_preview"), anonymous.json())
+
+        canonical = self._canonical_preview(request_payload)
+        production = canonical["production_preview"]
         good = production["good_sheets"]
         self.assertEqual(production["max_billable_sheets"], good + ceil(good * 0.5))
         self.assertLessEqual(production["billable_sheets"], production["max_billable_sheets"], production)
         self.assertGreaterEqual(production["billable_sheets"], good, production)
         self.assertIn("production_sheets", production)
         self.assertIn("spoilage_capped", production)
-        for match in response.json().get("matches") or []:
+        for match in canonical.get("matches") or []:
             row = match.get("production_preview") or {}
             self.assertEqual(row.get("max_billable_sheets"), good + ceil(good * 0.5), match)
 
@@ -538,7 +555,20 @@ class CalculatorSpecHarmonizationTestCase(TestCase):
                         self.assertIsNotNone(payload["market_range"]["min"], size)
                         self.assertIsNotNone(payload["total"], size)
 
+                        # Law 1.3: anonymity hides imposition even though the size
+                        # still prices. The canonical result carries the SRA3 math.
                         for match in payload["matches"]:
+                            self.assertIsNone(match.get("production_preview"), match)
+                        canonical = self._canonical_preview(
+                            {
+                                "product_type": product_type,
+                                "finished_size": size,
+                                "requested_paper_category": "gloss",
+                                "requested_gsm": 300,
+                                **base,
+                            }
+                        )
+                        for match in canonical["matches"]:
                             production = match.get("production_preview") or {}
                             self.assertGreaterEqual(production.get("pieces_per_sheet", 1), 1, size)
                             self.assertGreaterEqual(production.get("sheets_required", 1), 1, size)

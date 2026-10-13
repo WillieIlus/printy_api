@@ -573,6 +573,20 @@ class IncomingRequestViewSet(viewsets.ReadOnlyModelViewSet):
         if not self.check_shop_owner():
             return Response({"detail": "Not your shop."}, status=status.HTTP_403_FORBIDDEN)
         qr = self.get_object()
+        already_sent = (
+            qr.status == QuoteStatus.QUOTED
+            or qr.quotes.exclude(status=QuoteOfferStatus.PENDING)
+            .exclude(sent_at=None)
+            .exists()
+        )
+        if already_sent:
+            return Response(
+                {
+                    "detail": "This quote was already sent. "
+                    "Editing a sent quote creates a new version."
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         if qr.status not in (
             QuoteStatus.SUBMITTED,
             QuoteStatus.VIEWED,

@@ -159,6 +159,41 @@ class QuoteRequest(TimeStampedModel):
         verbose_name=_("request snapshot"),
         help_text=_("Frozen request payload used when the customer submitted the request."),
     )
+    price_updated = models.BooleanField(
+        default=False,
+        verbose_name=_("price updated"),
+        help_text=_(
+            "True when a manager adjustment changed the buyer total/per-piece and the "
+            "buyer must acknowledge the change before payment can start (law 2.3)."
+        ),
+    )
+    price_updated_old_total = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        null=True,
+        blank=True,
+        verbose_name=_("price updated old total"),
+    )
+    price_updated_new_total = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        null=True,
+        blank=True,
+        verbose_name=_("price updated new total"),
+    )
+    price_acknowledged_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        verbose_name=_("price acknowledged at"),
+    )
+    price_acknowledged_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="acknowledged_quote_price_updates",
+        verbose_name=_("price acknowledged by"),
+    )
 
     class Meta:
         ordering = ["-created_at"]
@@ -1614,3 +1649,162 @@ class QuoteItemService(TimeStampedModel):
 
     def __str__(self):
         return f"Service for {self.quote_item}"
+
+
+class QuoteOverrideField(models.TextChoices):
+    """Fields a manager/production actor may override on a quote request."""
+
+    SPOILAGE = "spoilage", "Spoilage"
+    PAPER_SUBSTITUTION = "paper_substitution", "Paper substitution"
+    MARKUP = "markup", "Markup"
+    SHEET_COUNT = "sheet_count", "Sheet count"
+
+
+# Override fields that change the price the buyer sees. When one of these is
+# recorded on an unsent quote the buyer view is flagged price_updated (law 2.3).
+BUYER_PRICE_OVERRIDE_FIELDS = frozenset(
+    {QuoteOverrideField.MARKUP, QuoteOverrideField.PAPER_SUBSTITUTION}
+)
+
+
+class QuoteOverride(TimeStampedModel):
+    """Stored override record on the job (law 2.1).
+
+    Every manager adjustment (spoilage, paper substitution, markup, sheet count)
+    is recorded here with who, when, field, old value and new value. Role views
+    are recomputed from the canonical result plus these overrides; no view keeps
+    its own price or sheet copy (law 2.2).
+    """
+
+    objects = models.Manager()
+
+    quote_request = models.ForeignKey(
+        QuoteRequest,
+        on_delete=models.CASCADE,
+        related_name="price_overrides",
+        verbose_name=_("quote request"),
+        help_text=_("The job this override applies to."),
+    )
+    field = models.CharField(
+        max_length=40,
+        choices=QuoteOverrideField.choices,
+        verbose_name=_("field"),
+    )
+    old_value = models.JSONField(
+        null=True,
+        blank=True,
+        verbose_name=_("old value"),
+    )
+    new_value = models.JSONField(
+        null=True,
+        blank=True,
+        verbose_name=_("new value"),
+    )
+    reason = models.CharField(
+        max_length=255,
+        blank=True,
+        default="",
+        verbose_name=_("reason"),
+    )
+    effective_at = models.DateTimeField(
+        default=timezone.now,
+        verbose_name=_("effective at"),
+        help_text=_("When the override took effect (the \"when\" of law 2.1)."),
+    )
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="quote_overrides",
+        verbose_name=_("created by"),
+        help_text=_("Who made the override (the \"who\" of law 2.1)."),
+    )
+
+    class Meta:
+        ordering = ["-effective_at", "-id"]
+        verbose_name = _("quote override")
+        verbose_name_plural = _("quote overrides")
+        indexes = [
+            models.Index(fields=["quote_request", "field"], name="quote_override_req_field_idx"),
+        ]
+
+    def __str__(self):
+        return f"Override {self.field}={self.new_value!r} on request #{self.quote_request_id}"
+
+
+class QuoteVersion(TimeStampedModel):
+    """Immutable version snapshot of a quote (law 3.4).
+
+    A sent quote is locked. Editing a sent quote creates a new QuoteVersion
+    rather than silently mutating the one the buyer already saw; the buyer must
+    approve a new version before payment on the changed price.
+    """
+
+    objects = models.Manager()
+
+    quote_request = models.ForeignKey(
+        QuoteRequest,
+        on_delete=models.CASCADE,
+        related_name="versions",
+        verbose_name=_("quote request"),
+    )
+    quote = models.ForeignKey(
+        "Quote",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="versions",
+        verbose_name=_("quote"),
+    )
+    version_number = models.PositiveIntegerField(
+        default=1,
+        verbose_name=_("version number"),
+    )
+    total = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        null=True,
+        blank=True,
+        verbose_name=_("total"),
+    )
+    per_piece = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        null=True,
+        blank=True,
+        verbose_name=_("per piece"),
+    )
+    snapshot = models.JSONField(
+        null=True,
+        blank=True,
+        verbose_name=_("snapshot"),
+    )
+    reason = models.CharField(
+        max_length=255,
+        blank=True,
+        default="",
+        verbose_name=_("reason"),
+    )
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="quote_versions",
+        verbose_name=_("created by"),
+    )
+
+    class Meta:
+        ordering = ["-version_number", "-id"]
+        verbose_name = _("quote version")
+        verbose_name_plural = _("quote versions")
+        constraints = [
+            models.UniqueConstraint(
+                fields=["quote_request", "version_number"],
+                name="quote_version_unique_number_per_request",
+            )
+        ]
+
+    def __str__(self):
+        return f"Version {self.version_number} of request #{self.quote_request_id}"

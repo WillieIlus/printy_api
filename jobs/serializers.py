@@ -192,6 +192,7 @@ class JobAssignmentSerializer(serializers.ModelSerializer):
     payout_status_label = serializers.SerializerMethodField()
     artwork_available = serializers.SerializerMethodField()
     proof_status = serializers.SerializerMethodField()
+    canonical = serializers.SerializerMethodField()
 
     class Meta:
         model = JobAssignment
@@ -221,6 +222,7 @@ class JobAssignmentSerializer(serializers.ModelSerializer):
             "payout_status_label",
             "artwork_available",
             "proof_status",
+            "canonical",
             "workflow_projection",
             "production_order",
             "due_at",
@@ -350,6 +352,15 @@ class JobAssignmentSerializer(serializers.ModelSerializer):
     def get_proof_status(self, obj):
         latest_proof = obj.managed_job.job_files.filter(file_type="proof").order_by("-created_at", "-id").first()
         return getattr(latest_proof, "status", "")
+
+    def get_canonical(self, obj):
+        # Law 1.3: the printer sees the same canonical result projected to the
+        # printer allowlist — production detail and own payout, never the buyer
+        # total, per-piece price, manager margin, cost breakdown or fee tier.
+        from api.canonical_jobs import build_job_projection
+        from services.pricing.role_projection import ROLE_PRINTER
+
+        return build_job_projection(obj.managed_job, ROLE_PRINTER)
 
     def get_production_timeline_steps(self, obj):
         operational_snapshot = obj.operational_snapshot if isinstance(obj.operational_snapshot, dict) else {}

@@ -39,6 +39,13 @@ class QuoteRequestClientSerializer(serializers.Serializer):
             "created_at": instance.created_at,
             "updated_at": instance.updated_at,
             "current_quote_summary": None,
+            "price_updated": bool(getattr(instance, "price_updated", False)),
+            "price_updated_old_total": (
+                str(old_total) if (old_total := getattr(instance, "price_updated_old_total", None)) is not None else None
+            ),
+            "price_updated_new_total": (
+                str(new_total) if (new_total := getattr(instance, "price_updated_new_total", None)) is not None else None
+            ),
         }
 
 

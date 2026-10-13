@@ -7,6 +7,7 @@ from inventory.models import Machine, Paper
 from pricing.models import FinishingRate
 from api.size_utils import normalize_size_payload, validate_size_selection
 from api.visibility import (
+    BUYER_ANONYMOUS_FORBIDDEN_RESPONSE_KEYS,
     CLIENT_ACTOR,
     OPS_ACTOR,
     PARTNER_ACTOR,
@@ -19,6 +20,7 @@ from api.visibility import (
     project_request_snapshot_for_client,
     project_revised_pricing_snapshot_for_client,
     resolve_topology_mode_for_quote_request,
+    scrub_forbidden_response_keys,
     strip_forbidden_keys,
 )
 from quotes.choices import CalculatorDraftContext, CalculatorDraftIntent, CalculatorDraftStatus, QuoteStatus, QuoteOfferStatus
@@ -137,6 +139,58 @@ def _assigned_manager_payload(manager):
         payload["is_printy_fallback"] = True
         payload["support_email"] = "support@printy.ke"
     return payload
+
+
+# Law 1.3: the buyer result is exactly total, per-piece, spec summary, ready
+# date, delivery and status/who-holds. These helpers derive those fields from
+# the stored quote request using only buyer-safe inputs (never snapshots).
+def _buyer_spec_summary(quote_request):
+    rows = []
+    for item in quote_request.items.all():
+        product_name = (
+            item.product.name
+            if item.item_type == "PRODUCT" and item.product_id
+            else (item.title or "")
+        )
+        rows.append(
+            {
+                "title": item.title or "",
+                "product_name": product_name,
+                "spec_text": item.spec_text or "",
+                "quantity": item.quantity,
+                "sides": item.sides or "",
+                "color_mode": item.color_mode or "",
+            }
+        )
+    return rows
+
+
+def _buyer_per_piece(quote_request, total):
+    items = list(quote_request.items.all())
+    for item in items:
+        unit = getattr(item, "unit_price", None)
+        if unit:
+            return unit
+    quantity = sum((item.quantity or 0) for item in items)
+    if total and quantity > 0:
+        return (Decimal(str(total)) / Decimal(quantity)).quantize(Decimal("0.01"))
+    return None
+
+
+def _buyer_delivery(quote_request):
+    location = getattr(getattr(quote_request, "delivery_location", None), "name", "") or ""
+    return {
+        "preference": getattr(quote_request, "delivery_preference", "") or "",
+        "address": getattr(quote_request, "delivery_address", "") or "",
+        "location": location,
+    }
+
+
+def _buyer_holder(quote_request):
+    payload = _assigned_manager_payload(getattr(quote_request, "assigned_manager", None))
+    if not payload:
+        return ""
+    return payload.get("display_name", "")
 
 
 class FinishingSelectionSerializer(serializers.Serializer):
@@ -861,6 +915,13 @@ class CalculatorDraftReadSerializer(serializers.ModelSerializer):
             "updated_at",
         ]
 
+    def to_representation(self, instance):
+        # Law 1.3: this serializer is the buyer/guest draft read shape. The raw
+        # pricing_snapshot / request_details_snapshot can carry imposition, sheet
+        # and margin keys; scrub them with the single buyer allowlist.
+        data = super().to_representation(instance)
+        return scrub_forbidden_response_keys(data, BUYER_ANONYMOUS_FORBIDDEN_RESPONSE_KEYS)
+
     def get_shop_name(self, obj):
         return None
 
@@ -983,6 +1044,9 @@ class QuoteRequestReadSerializer(serializers.ModelSerializer):
     raw_status = serializers.CharField(source="status", read_only=True)
     status = serializers.SerializerMethodField()
     status_label = serializers.SerializerMethodField()
+    holder = serializers.SerializerMethodField()
+    spec_summary = serializers.SerializerMethodField()
+    delivery = serializers.SerializerMethodField()
 
     class Meta:
         model = QuoteRequest
@@ -1002,12 +1066,24 @@ class QuoteRequestReadSerializer(serializers.ModelSerializer):
             "source_draft",
             "source_draft_reference",
             "request_snapshot",
+            "holder",
+            "spec_summary",
+            "delivery",
             "latest_response",
             "responses_count",
             "attachments",
             "created_at",
             "updated_at",
         ]
+
+    def get_holder(self, obj):
+        return _buyer_holder(obj)
+
+    def get_spec_summary(self, obj):
+        return _buyer_spec_summary(obj)
+
+    def get_delivery(self, obj):
+        return _buyer_delivery(obj)
 
     def to_representation(self, instance):
         data = super().to_representation(instance)
@@ -1029,19 +1105,21 @@ class QuoteRequestReadSerializer(serializers.ModelSerializer):
             return None
             
         normalized_status = normalize_quote_response_status(latest.status)
+        client_total = _client_visible_quote_total(
+            latest.total,
+            latest.response_snapshot,
+            client_total=_quote_financial_split_client_total(latest),
+        )
         data = {
             "id": latest.id,
             "quote_reference": latest.quote_reference,
             "status": normalized_status,
             "raw_status": latest.status,
             "status_label": quote_response_status_label(normalized_status),
-            "total": _client_visible_quote_total(
-                latest.total,
-                latest.response_snapshot,
-                client_total=_quote_financial_split_client_total(latest),
-            ),
+            "total": client_total,
             "turnaround_days": latest.turnaround_days,
             "turnaround_hours": latest.turnaround_hours,
+            "per_piece": _buyer_per_piece(obj, client_total),
             "estimated_ready_at": latest.estimated_ready_at,
             "human_ready_text": latest.human_ready_text,
             "turnaround_label": latest.turnaround_label,
@@ -1457,6 +1535,15 @@ class ClientResponseListItemSerializer(serializers.ModelSerializer):
     latest_message = serializers.SerializerMethodField()
     unread_count = serializers.SerializerMethodField()
     payment = serializers.SerializerMethodField()
+    per_piece = serializers.SerializerMethodField()
+    spec_summary = serializers.SerializerMethodField()
+    delivery = serializers.SerializerMethodField()
+    ready_text = serializers.SerializerMethodField()
+    holder = serializers.SerializerMethodField()
+    price_updated = serializers.SerializerMethodField()
+    price_updated_old_total = serializers.SerializerMethodField()
+    price_updated_new_total = serializers.SerializerMethodField()
+    price_acknowledged_at = serializers.SerializerMethodField()
 
     class Meta:
         model = Quote
@@ -1471,9 +1558,52 @@ class ClientResponseListItemSerializer(serializers.ModelSerializer):
             "latest_message",
             "unread_count",
             "payment",
+            "per_piece",
+            "spec_summary",
+            "delivery",
+            "ready_text",
+            "holder",
+            "price_updated",
+            "price_updated_old_total",
+            "price_updated_new_total",
+            "price_acknowledged_at",
             "created_at",
             "updated_at",
         ]
+
+    def _request(self, obj):
+        return obj.quote_request
+
+    def get_per_piece(self, obj):
+        return _buyer_per_piece(obj.quote_request, obj.total)
+
+    def get_spec_summary(self, obj):
+        return _buyer_spec_summary(obj.quote_request)
+
+    def get_delivery(self, obj):
+        return _buyer_delivery(obj.quote_request)
+
+    def get_ready_text(self, obj):
+        return (
+            getattr(obj, "human_ready_text", "")
+            or getattr(obj, "turnaround_label", "")
+            or ""
+        )
+
+    def get_holder(self, obj):
+        return _buyer_holder(obj.quote_request)
+
+    def get_price_updated(self, obj):
+        return bool(getattr(obj.quote_request, "price_updated", False))
+
+    def get_price_updated_old_total(self, obj):
+        return getattr(obj.quote_request, "price_updated_old_total", None)
+
+    def get_price_updated_new_total(self, obj):
+        return getattr(obj.quote_request, "price_updated_new_total", None)
+
+    def get_price_acknowledged_at(self, obj):
+        return getattr(obj.quote_request, "price_acknowledged_at", None)
 
     def get_payment(self, obj):
         payment = obj.payments.order_by("-created_at", "-id").first()
@@ -1510,10 +1640,7 @@ class ClientQuoteItemDetailSerializer(serializers.ModelSerializer):
     """Nested item serializer for client-facing detail with production readout."""
     product_name = serializers.SerializerMethodField()
     finishings = serializers.SerializerMethodField()
-    sheets_needed = serializers.SerializerMethodField()
-    imposition_count = serializers.SerializerMethodField()
     finishing_summary = serializers.SerializerMethodField()
-    production_description = serializers.SerializerMethodField()
 
     class Meta:
         model = QuoteItem
@@ -1530,10 +1657,7 @@ class ClientQuoteItemDetailSerializer(serializers.ModelSerializer):
             "color_mode",
             "special_instructions",
             "finishings",
-            "sheets_needed",
-            "imposition_count",
             "finishing_summary",
-            "production_description",
         ]
 
     def get_product_name(self, obj):
@@ -1560,12 +1684,6 @@ class ClientQuoteItemDetailSerializer(serializers.ModelSerializer):
             )
         return finishings
 
-    def get_sheets_needed(self, obj):
-        return (obj.pricing_snapshot or {}).get("sheets_needed")
-
-    def get_imposition_count(self, obj):
-        return (obj.pricing_snapshot or {}).get("imposition_count")
-
     def get_finishing_summary(self, obj):
         names = []
         for finishing in obj.finishings.all().select_related("finishing_rate"):
@@ -1579,9 +1697,6 @@ class ClientQuoteItemDetailSerializer(serializers.ModelSerializer):
             if label:
                 names.append(label)
         return ", ".join(names) if names else "None"
-
-    def get_production_description(self, obj):
-        return (obj.pricing_snapshot or {}).get("production_summary") or obj.spec_text
 
 
 class ClientQuoteRequestDetailSerializer(serializers.ModelSerializer):

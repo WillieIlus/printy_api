@@ -18,7 +18,14 @@ from accounts.models import User, UserProfile
 from accounts.services.capabilities import has_capability
 from accounts.services.roles import CANONICAL_PARTNER_ROLE, get_actor_role, is_client, is_shop_owner, resolve_user_roles
 from accounts.services.system_accounts import ensure_printy_manager_user, get_printy_manager_user, is_system_account
-from .visibility import CLIENT_ACTOR, TOPOLOGY_MANAGED, project_identity, project_public_marketplace_response
+from .visibility import (
+    CLIENT_ACTOR,
+    TOPOLOGY_MANAGED,
+    project_identity,
+    projection_role_for_request,
+    project_public_marketplace_response,
+    project_public_pricing_response,
+)
 from notifications.models import Notification
 from notifications.services import notify_quote_event
 from jobs.managed_services import create_assignment_for_managed_job, create_managed_job_from_accepted_quote
@@ -793,7 +800,8 @@ class CalculatorPreviewView(APIView):
             requested_deadline=validated.get("requested_deadline"),
             requested_delivery_time=validated.get("requested_delivery_time"),
         )
-        return Response(pricing)
+        role = projection_role_for_request(request)
+        return Response(project_public_pricing_response(pricing, role=role))
 
 
 class CalculatorConfigView(APIView):
@@ -1067,7 +1075,8 @@ class BookletCalculatorPreviewView(APIView):
             requested_deadline=validated.get("requested_deadline"),
             requested_delivery_time=validated.get("requested_delivery_time"),
         )
-        return Response(pricing)
+        role = projection_role_for_request(request)
+        return Response(project_public_pricing_response(pricing, role=role))
 
 
 class LargeFormatCalculatorPreviewView(APIView):
@@ -1095,7 +1104,8 @@ class LargeFormatCalculatorPreviewView(APIView):
             requested_deadline=validated.get("requested_deadline"),
             requested_delivery_time=validated.get("requested_delivery_time"),
         )
-        return Response(pricing)
+        role = projection_role_for_request(request)
+        return Response(project_public_pricing_response(pricing, role=role))
 
 
 def _latest_guest_draft(*, session_key: str):
@@ -1897,6 +1907,24 @@ class ClientResponseListView(APIView):
             Prefetch("payments", queryset=Payment.objects.order_by("-created_at", "-id")),
         ).order_by("-updated_at", "-created_at")
         return Response(ClientResponseListItemSerializer(responses, many=True, context={"request": request}).data)
+
+
+class ClientResponseAcknowledgeView(APIView):
+    """Buyer acknowledges a manager price update so payment may start (law 2.3)."""
+
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, response_id):
+        quote = get_object_or_404(
+            Quote.objects.select_related("quote_request").filter(
+                Q(quote_request__created_by=request.user) | Q(quote_request__on_behalf_of=request.user)
+            ),
+            pk=response_id,
+        )
+        from quotes.overrides import acknowledge_price_update
+
+        acknowledge_price_update(quote_request=quote.quote_request, user=request.user)
+        return Response({"status": "acknowledged"})
 
 
 class ClientResponseAcceptView(APIView):
