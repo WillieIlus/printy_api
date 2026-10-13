@@ -3,6 +3,7 @@ import os
 
 import requests as http_requests
 from django.contrib.auth import get_user_model
+from django.core import signing
 from allauth.account.forms import (
     ChangePasswordForm,
     ResetPasswordForm,
@@ -104,6 +105,57 @@ class UserDetailView(generics.RetrieveUpdateAPIView):
         return self.request.user
 
 
+def classify_email_confirmation_key(key):
+    """Classify an email confirmation key without mutating any state.
+
+    Returns ``(status, email_address)`` where ``status`` is one of
+    ``"valid"``, ``"already_verified"``, ``"expired"`` or ``"invalid"``.
+
+    Mirrors allauth's own resolution (HMAC signer or the DB model) so the API
+    can tell a genuinely expired link apart from a tampered/unknown one, and so
+    a still-valid key for an already-verified address can be treated
+    idempotently instead of being reported as "expired".
+    """
+    from allauth.account import app_settings as allauth_app_settings
+    from allauth.account.models import EmailAddress, EmailConfirmation
+
+    if allauth_app_settings.EMAIL_CONFIRMATION_HMAC:
+        salt = allauth_app_settings.SALT
+        max_age = 60 * 60 * 24 * allauth_app_settings.EMAIL_CONFIRMATION_EXPIRE_DAYS
+        try:
+            pk = signing.loads(key, max_age=max_age, salt=salt)
+            expired = False
+        except signing.SignatureExpired:
+            try:
+                pk = signing.loads(key, salt=salt)
+            except signing.BadSignature:
+                return "invalid", None
+            expired = True
+        except signing.BadSignature:
+            return "invalid", None
+
+        try:
+            email_address = EmailAddress.objects.get(pk=pk)
+        except (EmailAddress.DoesNotExist, ValueError, TypeError):
+            return "invalid", None
+
+        if expired:
+            return "expired", email_address
+        if email_address.verified:
+            return "already_verified", email_address
+        return "valid", email_address
+
+    record = EmailConfirmation.objects.all_valid().filter(key=key.lower()).first()
+    if record is None:
+        stale = EmailConfirmation.objects.filter(key=key.lower()).first()
+        if stale is None:
+            return "invalid", None
+        return "expired", stale.email_address
+    if record.email_address.verified:
+        return "already_verified", record.email_address
+    return "valid", record.email_address
+
+
 class ConfirmEmailView(APIView):
     """Accept the key from the confirmation email and mark the address verified."""
 
@@ -113,7 +165,8 @@ class ConfirmEmailView(APIView):
         key = (request.data.get("key") or request.data.get("token") or "").strip()
         if not key:
             return Response(
-                {"detail": "key is required."}, status=status.HTTP_400_BAD_REQUEST
+                {"detail": "A confirmation key is required.", "code": "TOKEN_REQUIRED"},
+                status=status.HTTP_400_BAD_REQUEST,
             )
 
         from allauth.account.models import EmailConfirmationHMAC, EmailConfirmation
@@ -122,32 +175,57 @@ class ConfirmEmailView(APIView):
         if confirmation is None:
             confirmation = EmailConfirmation.from_key(key)
 
-        if confirmation is None:
-            logger.info("email_verification_confirm_invalid_key")
+        if confirmation is not None:
+            email_address = confirmation.confirm(request)
+            if email_address is not None:
+                logger.info(
+                    "email_verification_confirmed email=%s user_id=%s",
+                    _mask_email(email_address.email),
+                    email_address.user_id,
+                )
+                return Response(
+                    {
+                        "detail": "Email confirmed successfully.",
+                        "email": email_address.email,
+                        "verified": True,
+                        "already_verified": False,
+                    }
+                )
+
+        state, email_address = classify_email_confirmation_key(key)
+
+        if state == "already_verified" and email_address is not None:
+            logger.info(
+                "email_verification_already_confirmed email=%s user_id=%s",
+                _mask_email(email_address.email),
+                email_address.user_id,
+            )
             return Response(
-                {"detail": "Invalid or expired confirmation key."},
+                {
+                    "detail": "This email is already verified.",
+                    "email": email_address.email,
+                    "verified": True,
+                    "already_verified": True,
+                }
+            )
+
+        if state == "expired":
+            logger.info("email_verification_confirm_expired")
+            return Response(
+                {
+                    "detail": "This verification link has expired. Request a new one.",
+                    "code": "TOKEN_EXPIRED",
+                },
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        email_address = confirmation.confirm(request)
-        if not email_address:
-            logger.info("email_verification_confirm_failed")
-            return Response(
-                {"detail": "Invalid or expired confirmation key."},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
-        logger.info(
-            "email_verification_confirmed email=%s user_id=%s",
-            _mask_email(email_address.email),
-            email_address.user_id,
-        )
+        logger.info("email_verification_confirm_invalid")
         return Response(
             {
-                "detail": "Email confirmed successfully.",
-                "email": email_address.email,
-                "verified": True,
-            }
+                "detail": "This verification link is invalid.",
+                "code": "TOKEN_INVALID",
+            },
+            status=status.HTTP_400_BAD_REQUEST,
         )
 
 
