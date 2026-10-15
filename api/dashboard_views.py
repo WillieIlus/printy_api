@@ -49,7 +49,9 @@ from quotes.models import QuoteRequest, Quote
 from quotes.partner_services import respond_to_assigned_quote_request
 from quotes.services_workflow import update_quote_response
 from services.production_matching import build_partner_production_matches
-from services.pricing.role_projection import ROLE_MANAGER
+from jobs.timing import timing_fields
+from jobs.listing import job_flags, order_jobs, order_quotes, quote_flags
+from services.pricing.role_projection import ROLE_MANAGER, project_canonical, projection_role_for_actor
 from .canonical_jobs import build_job_projection, current_job_override_state, preview_job_override
 from services.pricing.breakdown_projection import production_breakdown_from_preview
 from services.pricing.finishing_normalization import is_empty_finishing, normalize_finishing_slug
@@ -888,6 +890,17 @@ class BaseRoleDetailView(BaseDashboardHomeView):
             "created_at": quote_request.created_at,
             "updated_at": quote_request.updated_at,
             **_quote_partner_pricing_payload(quote_request, latest_response),
+            # Law 7.5: section + attention/muted flags for the quote list.
+            **quote_flags(
+                request_status=serialized.get("status") or quote_request.status,
+                latest_response_status=getattr(latest_response, "status", ""),
+                viewer_role=(
+                    "partner"
+                    if request is not None
+                    and CANONICAL_PARTNER_ROLE in set(resolve_user_roles(request.user))
+                    else "client"
+                ),
+            ),
         }
         managed_job = quote_request.managed_jobs.order_by("-id").first()
         row["managed_job"] = {
@@ -926,6 +939,13 @@ class BaseRoleDetailView(BaseDashboardHomeView):
             "artwork_confirmation": get_artwork_confirmation_payload(job),
             "payment_confirmed": str(job.payment_status or "").lower() in {"confirmed", "release_ready", "released"},
             "pricing": _job_pricing_snapshot(job, role),
+            # Law Part 4: due date, current stage, owner, next action, time
+            # remaining and (per role) SLAs, timestamps and revisions. The role
+            # allowlist decides exactly which timeliness fields are exposed.
+            "timing": project_canonical(timing_fields(job), projection_role_for_actor(role)),
+            # Law 7.5: the server decides the section, whether the viewer must
+            # act now, and whether the row is a muted (finished/complete) one.
+            **job_flags(job=job, role=role),
         }
         if role == CANONICAL_CLIENT_ROLE:
             row.update(self._client_tracking_payload(job))
@@ -950,7 +970,8 @@ class ClientQuoteListView(BaseRoleDetailView):
             .distinct()
             .order_by("-updated_at", "-created_at")
         )
-        return Response({"role": "client", "results": [self._quote_row(item, request=request) for item in rows]})
+        payload = [self._quote_row(item, request=request) for item in rows]
+        return Response({"role": "client", "results": order_quotes(payload)})
 
 
 class ClientQuoteDetailView(BaseRoleDetailView):
@@ -972,7 +993,8 @@ class ClientJobListView(BaseRoleDetailView):
 
     def get(self, request):
         jobs = ManagedJob.objects.filter(Q(client=request.user) | Q(created_by=request.user)).select_related("assigned_shop").order_by("-updated_at", "-created_at").distinct()
-        return Response({"role": "client", "results": [self._job_row(job, role=CANONICAL_CLIENT_ROLE) for job in jobs]})
+        rows = [self._job_row(job, role=CANONICAL_CLIENT_ROLE) for job in jobs]
+        return Response({"role": "client", "results": order_jobs(rows)})
 
 
 class ClientJobDetailView(BaseRoleDetailView):
@@ -1052,7 +1074,8 @@ class PartnerQuoteListDetailView(ManagerCapablePartnerQuoteView):
             if managed_job:
                 payload["managed_job"] = self._job_row(managed_job, role=CANONICAL_PARTNER_ROLE)
             return Response({"role": "partner", "quote": payload})
-        return Response({"role": "partner", "results": [self._quote_row(item, request=request) for item in self.get_queryset(request)]})
+        rows = [self._quote_row(item, request=request) for item in self.get_queryset(request)]
+        return Response({"role": "partner", "results": order_quotes(rows)})
 
 
 def _partner_quote_send_key(*, production_cost_inputs, financial_split, gross_margin_type, gross_margin_value, note) -> str:
@@ -1643,7 +1666,7 @@ class PartnerJobListDetailView(BaseRoleDetailView):
                     "canonical": build_job_projection(job, ROLE_MANAGER),
                 }
             )
-        return Response({"role": "partner", "results": [self._job_row(job, role=CANONICAL_PARTNER_ROLE) for job in self.get_queryset(request)]})
+        return Response({"role": "partner", "results": order_jobs([self._job_row(job, role=CANONICAL_PARTNER_ROLE) for job in self.get_queryset(request)])})
 
 
 class ManagerJobOverrideSerializer(serializers.Serializer):
@@ -1918,7 +1941,7 @@ class ProductionJobListDetailView(BaseRoleDetailView):
                     "settlement": None,
                 }
             )
-        return Response({"role": "production", "results": [self._job_row(job, role=CANONICAL_PRODUCTION_ROLE) for job in self.get_queryset(request)]})
+        return Response({"role": "production", "results": order_jobs([self._job_row(job, role=CANONICAL_PRODUCTION_ROLE) for job in self.get_queryset(request)])})
 
 
 class ProductionPricingListView(BaseRoleDetailView):

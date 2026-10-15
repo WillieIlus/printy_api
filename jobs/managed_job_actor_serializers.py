@@ -1,10 +1,22 @@
 from rest_framework import serializers
 
 from api.visibility import SHOP_ACTOR, strip_forbidden_keys
+from jobs.timing import timing_fields
+from services.pricing.role_projection import (
+    ROLE_BUYER,
+    ROLE_MANAGER,
+    ROLE_PRINTER,
+    project_canonical,
+)
 
 
 def _money(value):
     return str(value) if value is not None else None
+
+
+def _timing(instance, role):
+    """Server-computed timeliness, projected to the role's allowlist (law 6.4)."""
+    return project_canonical(timing_fields(instance), role)
 
 
 def _current_event(instance):
@@ -35,6 +47,7 @@ class ManagedJobClientSerializer(serializers.Serializer):
             "expected_delivery": instance.requested_delivery_time or instance.ready_at,
             "current_status_event": _current_event(instance),
             "quote": QuoteClientSerializer(instance.source_quote).data if instance.source_quote_id else None,
+            "timing": _timing(instance, ROLE_BUYER),
         }
 
 
@@ -53,6 +66,7 @@ class ManagedJobBrokerSerializer(serializers.Serializer):
                 "name": getattr(shop, "name", "") if shop else "",
             },
             "status_timeline": _timeline(instance),
+            "timing": _timing(instance, ROLE_MANAGER),
         }
 
 
@@ -70,6 +84,7 @@ class ManagedJobShopSerializer(serializers.Serializer):
             "shop_payout": _money(shop_payout),
             "production_notes": getattr(assignment, "assignment_notes", ""),
             "status_timeline": _timeline(instance, own_only=True),
+            "timing": _timing(instance, ROLE_PRINTER),
         }
 
 

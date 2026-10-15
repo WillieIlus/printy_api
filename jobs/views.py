@@ -689,7 +689,10 @@ class ShopAssignmentListView(APIView):
         queryset = JobAssignment.objects.select_related("managed_job", "assigned_shop", "production_order").filter(reassigned_from__isnull=True)
         if actor == SHOP_ACTOR:
             queryset = queryset.filter(assigned_shop__owner=request.user)
-        return Response(JobAssignmentSerializer(queryset.order_by("-operational_priority_level", "-created_at"), many=True, context={"request": request}).data)
+        data = JobAssignmentSerializer(queryset.order_by("-operational_priority_level", "-created_at"), many=True, context={"request": request}).data
+        from jobs.listing import order_assignments
+
+        return Response(order_assignments(data))
 
 
 class JobAssignmentActionView(APIView):

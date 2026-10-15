@@ -89,8 +89,15 @@ def record_override(
     reason: str = "",
     old_total: Any = None,
     new_total: Any = None,
+    new_due_date=None,
+    date_cause: str = "manager",
 ) -> QuoteOverride:
-    """Store a manager adjustment on the job (law 2.1)."""
+    """Store a manager adjustment on the job (law 2.1).
+
+    When a manager change moves the due date, pass ``new_due_date`` and a
+    non-silent "Date updated" revision is recorded on the same override
+    (law 6.5).
+    """
     field = str(field)
     if field not in VALID_OVERRIDE_FIELDS:
         raise ValidationError(f"Unknown override field '{field}'.")
@@ -109,6 +116,17 @@ def record_override(
     )
     if field in BUYER_PRICE_OVERRIDE_FIELDS:
         _flag_buyer_price_updated(quote_request, override, old_total, new_total)
+    if new_due_date is not None:
+        from jobs.timing_services import record_date_revision
+
+        record_date_revision(
+            quote_request=quote_request,
+            new_date=new_due_date,
+            cause=date_cause,
+            reason=reason or f"Due date moved by {field} override",
+            user=user,
+            override=override,
+        )
     return override
 
 

@@ -5,6 +5,7 @@ import secrets
 import uuid
 
 from django.conf import settings
+from django.core.exceptions import ValidationError
 from django.db import models
 from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
@@ -216,6 +217,48 @@ class ManagedJob(TimeStampedModel):
     completed_at = models.DateTimeField(null=True, blank=True)
     disputed_at = models.DateTimeField(null=True, blank=True)
     cancelled_at = models.DateTimeField(null=True, blank=True)
+    # --- timeliness (law Part 4) -----------------------------------------
+    due_date = models.DateTimeField(
+        null=True,
+        blank=True,
+        verbose_name=_("due date"),
+        help_text=_("Due date computed from the SLA config at quote acceptance (law 6.2)."),
+    )
+    due_date_acknowledged_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        verbose_name=_("due date acknowledged at"),
+        help_text=_("When the buyer last acknowledged the current due date (law 6.5)."),
+    )
+    due_date_revision_count = models.PositiveIntegerField(
+        default=0,
+        verbose_name=_("due date revision count"),
+        help_text=_("How many times a manager change moved this job's due date (law 6.5)."),
+    )
+    is_late = models.BooleanField(
+        default=False,
+        verbose_name=_("is late"),
+        help_text=_("Flagged when the job passed its latest acknowledged due date (law 6.6)."),
+    )
+    lateness_minutes = models.PositiveIntegerField(
+        default=0,
+        verbose_name=_("lateness minutes"),
+        help_text=_("Minutes past the acknowledged due date, recorded not penalised (law 6.6)."),
+    )
+    current_stage = models.CharField(
+        max_length=32,
+        blank=True,
+        default="",
+        verbose_name=_("current stage"),
+        help_text=_("Canonical timeliness stage key (law 6.2/6.4)."),
+    )
+    stage_owner = models.CharField(
+        max_length=16,
+        blank=True,
+        default="",
+        verbose_name=_("stage owner"),
+        help_text=_("Who holds the ball at the current stage (law 6.4)."),
+    )
 
     class Meta:
         ordering = ["-created_at"]
@@ -593,3 +636,88 @@ class JobStatusEvent(TimeStampedModel):
 
     def __str__(self):
         return f"{self.event_type} on {self.managed_job.managed_reference or self.managed_job_id}"
+
+
+class JobEventQuerySet(models.QuerySet):
+    """QuerySet that refuses mutation so the job event log stays append-only."""
+
+    def update(self, *args, **kwargs):  # pragma: no cover - guard
+        raise ValidationError("Job events are append-only; update is forbidden (law 6.3).")
+
+    def delete(self, *args, **kwargs):  # pragma: no cover - guard
+        raise ValidationError("Job events are append-only; delete is forbidden (law 6.3).")
+
+
+class JobEvent(models.Model):
+    """Append-only job event log (law 6.3).
+
+    Every stage start, handoff, completion and delay is written here with job,
+    stage, event, actor, role, UTC timestamp and source. Events are never edited
+    or deleted: a correction is a new event that ``references`` the original.
+    """
+
+    STAGE_STARTED = "stage_started"
+    STAGE_COMPLETED = "stage_completed"
+    HANDOFF = "handoff"
+    DELAY = "delay"
+    DATE_REVISION = "date_revision"
+    CORRECTION = "correction"
+
+    SOURCE_SYSTEM = "system"
+    SOURCE_MANAGER = "manager"
+    SOURCE_PRINTER = "printer"
+    SOURCE_BUYER = "buyer"
+    SOURCE_EXTERNAL = "external"
+
+    objects = JobEventQuerySet.as_manager()
+
+    managed_job = models.ForeignKey(
+        ManagedJob,
+        on_delete=models.CASCADE,
+        related_name="job_events",
+        verbose_name=_("managed job"),
+    )
+    stage = models.CharField(max_length=32, blank=True, default="", verbose_name=_("stage"))
+    event = models.CharField(max_length=32, verbose_name=_("event"))
+    actor = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="job_events",
+        verbose_name=_("actor"),
+    )
+    actor_role = models.CharField(max_length=16, blank=True, default="", verbose_name=_("actor role"))
+    occurred_at = models.DateTimeField(default=timezone.now, verbose_name=_("occurred at (UTC)"))
+    source = models.CharField(max_length=32, blank=True, default=SOURCE_SYSTEM, verbose_name=_("source"))
+    references = models.ForeignKey(
+        "self",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="corrections",
+        verbose_name=_("references"),
+        help_text=_("The original event this correction references (law 6.3)."),
+    )
+    metadata = models.JSONField(default=dict, blank=True, verbose_name=_("metadata"))
+
+    class Meta:
+        ordering = ["occurred_at", "id"]
+        verbose_name = _("job event")
+        verbose_name_plural = _("job events")
+        indexes = [
+            models.Index(fields=["managed_job", "occurred_at"], name="job_event_job_occurred_idx"),
+            models.Index(fields=["managed_job", "stage"], name="job_event_job_stage_idx"),
+            models.Index(fields=["managed_job", "event"], name="job_event_job_event_idx"),
+        ]
+
+    def __str__(self):
+        return f"{self.event}@{self.stage or '-'} on {self.managed_job.managed_reference or self.managed_job_id}"
+
+    def save(self, *args, **kwargs):  # noqa: D401
+        if self.pk is not None and JobEvent.objects.filter(pk=self.pk).exists():
+            raise ValidationError("Job events are append-only; create a correcting event instead (law 6.3).")
+        return super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):  # noqa: D401
+        raise ValidationError("Job events cannot be deleted (append-only, law 6.3).")

@@ -977,6 +977,7 @@ class RecommendedPrintManagerSerializer(serializers.Serializer):
     avg_response_hours = serializers.FloatField(required=False, allow_null=True)
     completed_jobs = serializers.IntegerField()
     satisfaction_rating = serializers.FloatField(required=False, allow_null=True)
+    on_time_rate = serializers.FloatField(required=False, allow_null=True)
     distance_km = serializers.FloatField(required=False, allow_null=True)
     is_previous_manager = serializers.BooleanField(default=False)
     badge = serializers.CharField(required=False, allow_null=True, allow_blank=True)
@@ -1544,6 +1545,11 @@ class ClientResponseListItemSerializer(serializers.ModelSerializer):
     price_updated_old_total = serializers.SerializerMethodField()
     price_updated_new_total = serializers.SerializerMethodField()
     price_acknowledged_at = serializers.SerializerMethodField()
+    date_updated = serializers.SerializerMethodField()
+    date_updated_old = serializers.SerializerMethodField()
+    date_updated_new = serializers.SerializerMethodField()
+    date_acknowledged_at = serializers.SerializerMethodField()
+    due_date = serializers.SerializerMethodField()
 
     class Meta:
         model = Quote
@@ -1567,6 +1573,11 @@ class ClientResponseListItemSerializer(serializers.ModelSerializer):
             "price_updated_old_total",
             "price_updated_new_total",
             "price_acknowledged_at",
+            "date_updated",
+            "date_updated_old",
+            "date_updated_new",
+            "date_acknowledged_at",
+            "due_date",
             "created_at",
             "updated_at",
         ]
@@ -1604,6 +1615,21 @@ class ClientResponseListItemSerializer(serializers.ModelSerializer):
 
     def get_price_acknowledged_at(self, obj):
         return getattr(obj.quote_request, "price_acknowledged_at", None)
+
+    def get_date_updated(self, obj):
+        return bool(getattr(obj.quote_request, "date_updated", False))
+
+    def get_date_updated_old(self, obj):
+        return getattr(obj.quote_request, "date_updated_old", None)
+
+    def get_date_updated_new(self, obj):
+        return getattr(obj.quote_request, "date_updated_new", None)
+
+    def get_date_acknowledged_at(self, obj):
+        return getattr(obj.quote_request, "date_acknowledged_at", None)
+
+    def get_due_date(self, obj):
+        return getattr(obj.quote_request, "due_date", None)
 
     def get_payment(self, obj):
         payment = obj.payments.order_by("-created_at", "-id").first()

@@ -51,7 +51,70 @@ CANONICAL_FIELDS = (
     "fee_tier",
     "printer_payout",
     "printer_side_fee",
+    # --- timeliness (law Part 4, 6.x field matrix) ------------------------
+    "due_date",
+    "current_stage",
+    "stage_label",
+    "stage_owner",
+    "next_action",
+    "stage_sla_hours",
+    "time_remaining_minutes",
+    "is_late",
+    "lateness_minutes",
+    "stage_timestamps",
+    "revision_count",
+    "due_date_updated",
+    "due_date_updated_old",
+    "due_date_updated_new",
+    "due_date_acknowledged_at",
+    "on_time_rate",
 )
+
+# Timing fields exposed to the buyer: due date, current stage, owner, next
+# action and time remaining (law 6.4), plus the "Date updated" acknowledgement
+# state (law 6.5).
+_BUYER_TIMING_FIELDS = frozenset(
+    {
+        "due_date",
+        "current_stage",
+        "stage_label",
+        "stage_owner",
+        "next_action",
+        "stage_sla_hours",
+        "time_remaining_minutes",
+        "is_late",
+        "due_date_updated",
+        "due_date_updated_old",
+        "due_date_updated_new",
+        "due_date_acknowledged_at",
+    }
+)
+
+# The manager additionally sees per-stage SLAs, timestamps and revision history
+# (law 6.7).
+_MANAGER_TIMING_FIELDS = _BUYER_TIMING_FIELDS | frozenset(
+    {"lateness_minutes", "stage_timestamps", "revision_count"}
+)
+
+# The printer sees the schedule and per-stage timestamps, never financial or
+# reliability internals.
+_PRINTER_TIMING_FIELDS = frozenset(
+    {
+        "due_date",
+        "current_stage",
+        "stage_label",
+        "stage_owner",
+        "next_action",
+        "stage_sla_hours",
+        "time_remaining_minutes",
+        "is_late",
+        "stage_timestamps",
+    }
+)
+
+# The public calculator shows an on-time score only when the backend actually
+# returns one (law 6.7); it is never invented client-side.
+_ANONYMOUS_TIMING_FIELDS = frozenset({"on_time_rate"})
 
 # --- Law 1.3 field matrix -------------------------------------------------
 # BUYER: total price, per-piece price, spec summary, ready date, delivery cost,
@@ -72,10 +135,10 @@ _BUYER_FIELDS = frozenset(
         "job_status",
         "current_holder",
     }
-)
+) | _BUYER_TIMING_FIELDS
 
 # MANAGER: everything the buyer sees plus the full production + financial view.
-_MANAGER_FIELDS = _BUYER_FIELDS | frozenset(
+_MANAGER_FIELDS = _BUYER_FIELDS | _MANAGER_TIMING_FIELDS | frozenset(
     {
         "press_sheet",
         "layout",
@@ -115,7 +178,7 @@ _PRINTER_FIELDS = frozenset(
         "method",
         "printer_payout",
     }
-)
+) | _PRINTER_TIMING_FIELDS
 
 # ANONYMOUS: the buyer projection in its gated form (law 4.3): a price range or
 # the default-spec price, plus the spec summary. Never imposition, sheet
@@ -133,7 +196,7 @@ _ANONYMOUS_FIELDS = frozenset(
         "ready_date",
         "delivery",
     }
-)
+) | _ANONYMOUS_TIMING_FIELDS
 
 ROLE_ALLOWLISTS: dict[str, frozenset[str]] = {
     ROLE_BUYER: _BUYER_FIELDS,

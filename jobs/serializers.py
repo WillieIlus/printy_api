@@ -144,6 +144,12 @@ class ManagedJobPublicTrackingSerializer(serializers.ModelSerializer):
     job_status = serializers.SerializerMethodField()
     estimated_ready = serializers.SerializerMethodField()
     next_action = serializers.SerializerMethodField()
+    current_stage = serializers.SerializerMethodField()
+    stage_label = serializers.SerializerMethodField()
+    stage_owner = serializers.SerializerMethodField()
+    due_date = serializers.DateTimeField(read_only=True)
+    is_late = serializers.SerializerMethodField()
+    timeline = serializers.SerializerMethodField()
 
     class Meta:
         model = ManagedJob
@@ -152,6 +158,12 @@ class ManagedJobPublicTrackingSerializer(serializers.ModelSerializer):
             "job_status",
             "estimated_ready",
             "next_action",
+            "current_stage",
+            "stage_label",
+            "stage_owner",
+            "due_date",
+            "is_late",
+            "timeline",
         ]
 
     def get_tracking_reference(self, obj):
@@ -169,6 +181,30 @@ class ManagedJobPublicTrackingSerializer(serializers.ModelSerializer):
         if obj.payment_status == "pending":
             return "Sign in to review any private payment or artwork actions."
         return "Check back here for the next public status update."
+
+    def _timing(self, obj):
+        from jobs.timing import timing_fields
+
+        return timing_fields(obj)
+
+    def get_current_stage(self, obj):
+        return self._timing(obj).get("current_stage") or ""
+
+    def get_stage_label(self, obj):
+        return self._timing(obj).get("stage_label") or ""
+
+    def get_stage_owner(self, obj):
+        return self._timing(obj).get("stage_owner") or ""
+
+    def get_is_late(self, obj):
+        return bool(self._timing(obj).get("is_late"))
+
+    def get_timeline(self, obj):
+        # Law 7.6: the public track-job view shows the full stage timeline with
+        # owner, SLA, time taken/elapsed, remaining and overdue flags. No prices.
+        from jobs.timing import stage_timeline
+
+        return stage_timeline(obj, events=list(obj.job_events.all()))
 
 
 class JobAssignmentSerializer(serializers.ModelSerializer):
@@ -193,6 +229,12 @@ class JobAssignmentSerializer(serializers.ModelSerializer):
     artwork_available = serializers.SerializerMethodField()
     proof_status = serializers.SerializerMethodField()
     canonical = serializers.SerializerMethodField()
+    timing = serializers.SerializerMethodField()
+    section = serializers.SerializerMethodField()
+    section_label = serializers.SerializerMethodField()
+    needs_attention = serializers.SerializerMethodField()
+    muted = serializers.SerializerMethodField()
+    timeline = serializers.SerializerMethodField()
 
     class Meta:
         model = JobAssignment
@@ -223,6 +265,12 @@ class JobAssignmentSerializer(serializers.ModelSerializer):
             "artwork_available",
             "proof_status",
             "canonical",
+            "timing",
+            "section",
+            "section_label",
+            "needs_attention",
+            "muted",
+            "timeline",
             "workflow_projection",
             "production_order",
             "due_at",
@@ -361,6 +409,40 @@ class JobAssignmentSerializer(serializers.ModelSerializer):
         from services.pricing.role_projection import ROLE_PRINTER
 
         return build_job_projection(obj.managed_job, ROLE_PRINTER)
+
+    def get_timing(self, obj):
+        # Law 6.3/1.3: schedule + per-stage timestamps, projected to the printer
+        # allowlist. Never financial or reliability internals.
+        from jobs.timing import timing_fields
+        from services.pricing.role_projection import ROLE_PRINTER, project_canonical
+
+        return project_canonical(timing_fields(obj.managed_job), ROLE_PRINTER)
+
+    def _section_flags(self, obj):
+        from jobs.listing import assignment_flags
+
+        return assignment_flags(assignment=obj)
+
+    def get_section(self, obj):
+        return self._section_flags(obj)["section"]
+
+    def get_section_label(self, obj):
+        return self._section_flags(obj)["section_label"]
+
+    def get_needs_attention(self, obj):
+        return self._section_flags(obj)["needs_attention"]
+
+    def get_muted(self, obj):
+        return self._section_flags(obj)["muted"]
+
+    def get_timeline(self, obj):
+        # Law 7.6: the printer's dashboard shows the full stage timeline with
+        # owner, SLA, time taken/elapsed, remaining and overdue flags. No prices.
+        from jobs.timing import stage_timeline
+
+        events = getattr(obj.managed_job, "job_events", None)
+        event_list = list(events.all()) if events is not None else []
+        return stage_timeline(obj.managed_job, events=event_list)
 
     def get_production_timeline_steps(self, obj):
         operational_snapshot = obj.operational_snapshot if isinstance(obj.operational_snapshot, dict) else {}

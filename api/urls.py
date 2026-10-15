@@ -117,6 +117,7 @@ urlpatterns = [
     path("shop/requests/<int:pk>/", workflow_views.QuoteRequestDetailView.as_view(), name="shop-quote-request-detail"),
     path("client/responses/", workflow_views.ClientResponseListView.as_view(), name="client-response-list"),
     path("client/responses/<int:response_id>/acknowledge/", workflow_views.ClientResponseAcknowledgeView.as_view(), name="client-response-acknowledge"),
+    path("client/responses/<int:response_id>/acknowledge-date/", workflow_views.ClientResponseDateAcknowledgeView.as_view(), name="client-response-acknowledge-date"),
     path("client/responses/<int:response_id>/accept/", workflow_views.ClientResponseAcceptView.as_view(), name="client-response-accept"),
     path("quotes/offline-claim/", dashboard_views.OfflineQuoteClaimView.as_view(), name="offline-quote-claim"),
     path("quotes/<int:quote_id>/accept/", payment_views.QuoteAcceptView.as_view(), name="quote-accept-payment"),

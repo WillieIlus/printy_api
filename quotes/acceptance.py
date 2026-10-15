@@ -86,6 +86,11 @@ def accept_quote_for_payment(*, quote: Quote, accepted_by, payer_phone: str = ""
         updated_at=now,
     )
 
+    # Law 6.2: the due date is set here, from the SLA config, at acceptance.
+    from jobs.timing_services import set_due_date_at_acceptance
+
+    set_due_date_at_acceptance(quote=quote, actor=accepted_by)
+
     payment = create_payment_for_quote(quote=quote, payer=accepted_by, payer_phone=payer_phone)
     return quote, payment
 

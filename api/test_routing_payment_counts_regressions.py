@@ -12,6 +12,7 @@ from accounts.services.system_accounts import ensure_printy_manager_user
 from jobs.choices import ManagedJobPaymentStatus, ManagedJobStatus
 from jobs.assignment_services import accept_assignment, mark_assignment_in_production
 from jobs.models import JobAssignment, ManagedJob
+from jobs.timing import compute_due_date
 from notifications.models import Notification
 from payments.models import MpesaSTKRequest, Payment
 from payments.services import initiate_stk_push
@@ -317,6 +318,7 @@ class AdminPaymentConfirmationRegressionTestCase(TestCase):
             status=ManagedJobStatus.ASSIGNED,
             payment_status=ManagedJobPaymentStatus.CONFIRMED,
             assignment_status="assigned",
+            due_date=compute_due_date(timezone.now()),
         )
         assignment = JobAssignment.objects.create(
             managed_job=managed_job,

@@ -18,8 +18,13 @@ from jobs.choices import (
     ManagedJobExceptionStatus,
     ManagedJobStatus,
 )
-from jobs.models import JobAssignment
+from jobs.models import JobAssignment, JobEvent
 from jobs.payment_services import initialize_settlement_for_managed_job
+from jobs.timing_services import (
+    assert_due_date_for_production,
+    record_job_event,
+    sync_job_timing,
+)
 from notifications.models import Notification
 from notifications.services import notify_quote_event
 from production.models import ProductionOrder
@@ -146,6 +151,22 @@ def _transition_assignment(
         summary=summary,
         metadata={"status": status, "note": note, **(metadata or {})},
     )
+    # Law 6.3/6.4: every transition appends an immutable job event and refreshes
+    # the current stage/owner so "who has the ball" is always accurate.
+    sync_job_timing(managed_job)
+    stage_event = JobEvent.HANDOFF if status in {
+        JobAssignmentStatus.ACCEPTED,
+        JobAssignmentStatus.READY,
+    } else JobEvent.STAGE_STARTED
+    record_job_event(
+        managed_job=managed_job,
+        stage=managed_job.current_stage,
+        event=stage_event,
+        actor=actor,
+        actor_role=managed_job.stage_owner,
+        source=JobEvent.SOURCE_PRINTER,
+        metadata={"status": status, "note": note, "summary": summary, **(metadata or {})},
+    )
     return assignment
 
 
@@ -187,6 +208,8 @@ def reject_assignment(*, assignment: JobAssignment, actor=None, note: str = "") 
 @transaction.atomic
 def mark_assignment_in_production(*, assignment: JobAssignment, actor=None, note: str = "") -> JobAssignment:
     _ensure_current_status(assignment=assignment, allowed={JobAssignmentStatus.ACCEPTED}, action="start printing")
+    # Law 6.2: no job enters production without a due date.
+    assert_due_date_for_production(assignment.managed_job)
     assignment = _transition_assignment(
         assignment=assignment,
         actor=actor,

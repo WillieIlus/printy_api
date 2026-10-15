@@ -18,6 +18,7 @@ from accounts.models import User, UserProfile
 from accounts.services.capabilities import has_capability
 from accounts.services.roles import CANONICAL_PARTNER_ROLE, get_actor_role, is_client, is_shop_owner, resolve_user_roles
 from accounts.services.system_accounts import ensure_printy_manager_user, get_printy_manager_user, is_system_account
+from jobs.listing import order_quotes, quote_flags
 from .visibility import (
     CLIENT_ACTOR,
     TOPOLOGY_MANAGED,
@@ -30,6 +31,7 @@ from notifications.models import Notification
 from notifications.services import notify_quote_event
 from jobs.managed_services import create_assignment_for_managed_job, create_managed_job_from_accepted_quote
 from jobs.models import ManagedJob
+from jobs.timing import on_time_rate
 from payments.serializers import PaymentSerializer
 from payments.models import Payment
 from quotes.choices import CalculatorDraftContext, CalculatorDraftIntent, QuoteStatus, QuoteOfferStatus
@@ -466,6 +468,9 @@ def _build_recommended_manager_payloads(*, request, current_user, product_type: 
         avg_response_hours = _average_response_hours_for_manager(manager)
         completed_jobs = _manager_completed_jobs(manager)
         satisfaction_rating = _satisfaction_rating_for_manager(manager)
+        manager_on_time_rate = on_time_rate(
+            completed_jobs=ManagedJob.objects.filter(broker=manager, status="completed")
+        )
         distance_km = _distance_km_for_manager(manager, request=request)
         is_previous_manager = bool(previous_manager_id and manager.id == previous_manager_id)
         product_score = _product_match_score(manager, product_type=product_type)
@@ -486,6 +491,7 @@ def _build_recommended_manager_payloads(*, request, current_user, product_type: 
             "avg_response_hours": avg_response_hours,
             "completed_jobs": completed_jobs,
             "satisfaction_rating": satisfaction_rating,
+            "on_time_rate": manager_on_time_rate,
             "distance_km": distance_km,
             "is_previous_manager": is_previous_manager,
             "badge": None,
@@ -1648,24 +1654,30 @@ class BuyerQuotesListView(APIView):
             {
                 "item_type": "draft",
                 "draft": CalculatorDraftReadSerializer(draft, context={"request": request}).data,
+                "section": "unresponded",
+                "section_label": "Unresponded / sent",
+                "needs_attention": True,
+                "muted": False,
             }
             for draft in drafts
         ]
-        request_items = [
-            {
-                "item_type": "quote_request",
-                "quote_request": QuoteRequestReadSerializer(qr, context={"request": request}).data,
-            }
-            for qr in requests
-        ]
+        request_items = []
+        for qr in requests:
+            serialized = QuoteRequestReadSerializer(qr, context={"request": request}).data
+            latest_response = qr.quotes.exclude(status=QuoteOfferStatus.PENDING).order_by("-created_at", "-id").first()
+            request_items.append(
+                {
+                    "item_type": "quote_request",
+                    "quote_request": serialized,
+                    **quote_flags(
+                        request_status=serialized.get("status") or qr.status,
+                        latest_response_status=getattr(latest_response, "status", ""),
+                        viewer_role="client",
+                    ),
+                }
+            )
         items = draft_items + request_items
-
-        def _sort_key(item):
-            payload = item.get("draft") or item.get("quote_request") or {}
-            return payload.get("updated_at") or payload.get("created_at") or ""
-
-        items.sort(key=_sort_key, reverse=True)
-        return Response(items)
+        return Response(order_quotes(items))
 
 
 class QuoteRequestListView(APIView):
@@ -1906,7 +1918,19 @@ class ClientResponseListView(APIView):
             "messages",
             Prefetch("payments", queryset=Payment.objects.order_by("-created_at", "-id")),
         ).order_by("-updated_at", "-created_at")
-        return Response(ClientResponseListItemSerializer(responses, many=True, context={"request": request}).data)
+        data = ClientResponseListItemSerializer(responses, many=True, context={"request": request}).data
+        rows = []
+        for response, serialized in zip(responses, data):
+            serialized = dict(serialized)
+            serialized.update(
+                quote_flags(
+                    request_status=getattr(response.quote_request, "status", ""),
+                    latest_response_status=getattr(response, "status", ""),
+                    viewer_role="client",
+                )
+            )
+            rows.append(serialized)
+        return Response(order_quotes(rows))
 
 
 class ClientResponseAcknowledgeView(APIView):
@@ -1925,6 +1949,34 @@ class ClientResponseAcknowledgeView(APIView):
 
         acknowledge_price_update(quote_request=quote.quote_request, user=request.user)
         return Response({"status": "acknowledged"})
+
+
+class ClientResponseDateAcknowledgeView(APIView):
+    """Buyer acknowledges a manager due-date change so it takes effect (law 6.5).
+
+    Mirrors the price-update acknowledgement: the change is visible with old and
+    new dates and only becomes the effective date once the buyer acknowledges.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, response_id):
+        quote = get_object_or_404(
+            Quote.objects.select_related("quote_request").filter(
+                Q(quote_request__created_by=request.user) | Q(quote_request__on_behalf_of=request.user)
+            ),
+            pk=response_id,
+        )
+        from jobs.timing_services import acknowledge_date_update
+
+        revision = acknowledge_date_update(quote_request=quote.quote_request, user=request.user)
+        return Response(
+            {
+                "status": "acknowledged",
+                "due_date": quote.quote_request.due_date,
+                "revision_id": getattr(revision, "id", None),
+            }
+        )
 
 
 class ClientResponseAcceptView(APIView):

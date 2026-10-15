@@ -233,7 +233,12 @@ def create_managed_job_from_payment(*, payment: Payment) -> ManagedJob:
             },
             accepted_at=quote.accepted_at,
             payment_confirmed_at=payment.confirmed_at or timezone.now(),
+            # Law 6.2: inherit the acceptance due date computed from the SLA config.
+            due_date=quote_request.due_date,
         )
+        from jobs.timing_services import sync_job_timing
+
+        sync_job_timing(managed_job, due=quote_request.due_date)
         import_legacy_files_to_managed_job(
             managed_job=managed_job,
             quote_request=quote_request,

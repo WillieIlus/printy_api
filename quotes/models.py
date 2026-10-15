@@ -194,6 +194,44 @@ class QuoteRequest(TimeStampedModel):
         related_name="acknowledged_quote_price_updates",
         verbose_name=_("price acknowledged by"),
     )
+    # --- timeliness / due date (law Part 4, 6.2/6.5) ----------------------
+    due_date = models.DateTimeField(
+        null=True,
+        blank=True,
+        verbose_name=_("due date"),
+        help_text=_("Due date computed from the SLA config when the quote is accepted (law 6.2)."),
+    )
+    date_updated = models.BooleanField(
+        default=False,
+        verbose_name=_("date updated"),
+        help_text=_(
+            "True when a manager change moved the due date and the buyer must acknowledge "
+            "the new date, mirroring price_updated (law 6.5)."
+        ),
+    )
+    date_updated_old = models.DateTimeField(
+        null=True,
+        blank=True,
+        verbose_name=_("date updated old"),
+    )
+    date_updated_new = models.DateTimeField(
+        null=True,
+        blank=True,
+        verbose_name=_("date updated new"),
+    )
+    date_acknowledged_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        verbose_name=_("date acknowledged at"),
+    )
+    date_acknowledged_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="acknowledged_quote_date_updates",
+        verbose_name=_("date acknowledged by"),
+    )
 
     class Meta:
         ordering = ["-created_at"]
@@ -1808,3 +1846,82 @@ class QuoteVersion(TimeStampedModel):
 
     def __str__(self):
         return f"Version {self.version_number} of request #{self.quote_request_id}"
+
+
+class QuoteDateRevisionQuerySet(models.QuerySet):
+    """Append-only: rejects mutation of due-date revisions (law 6.3/6.5)."""
+
+    def update(self, *args, **kwargs):  # pragma: no cover - guard
+        raise ValidationError("Date revisions are append-only; update is forbidden (law 6.3).")
+
+    def delete(self, *args, **kwargs):  # pragma: no cover - guard
+        raise ValidationError("Date revisions cannot be deleted (append-only, law 6.3).")
+
+
+class QuoteDateRevision(models.Model):
+    """Append-only record of a due-date move (law 6.5).
+
+    Every revision records who, when, reason and cause (manager, printer, buyer
+    or external) so moving the date can never hide lateness.
+    """
+
+    CAUSE_MANAGER = "manager"
+    CAUSE_PRINTER = "printer"
+    CAUSE_BUYER = "buyer"
+    CAUSE_EXTERNAL = "external"
+    CAUSE_CHOICES = [
+        (CAUSE_MANAGER, _("Manager")),
+        (CAUSE_PRINTER, _("Printer")),
+        (CAUSE_BUYER, _("Buyer")),
+        (CAUSE_EXTERNAL, _("External")),
+    ]
+
+    objects = QuoteDateRevisionQuerySet.as_manager()
+
+    quote_request = models.ForeignKey(
+        QuoteRequest,
+        on_delete=models.CASCADE,
+        related_name="date_revisions",
+        verbose_name=_("quote request"),
+    )
+    old_date = models.DateTimeField(null=True, blank=True, verbose_name=_("old date"))
+    new_date = models.DateTimeField(null=True, blank=True, verbose_name=_("new date"))
+    cause = models.CharField(max_length=16, choices=CAUSE_CHOICES, default=CAUSE_MANAGER, verbose_name=_("cause"))
+    reason = models.CharField(max_length=255, blank=True, default="", verbose_name=_("reason"))
+    override = models.ForeignKey(
+        QuoteOverride,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="date_revisions",
+        verbose_name=_("override"),
+        help_text=_("The manager override that moved the date, when there is one."),
+    )
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="quote_date_revisions",
+        verbose_name=_("created by"),
+    )
+    created_at = models.DateTimeField(default=timezone.now, verbose_name=_("created at (UTC)"))
+
+    class Meta:
+        ordering = ["created_at", "id"]
+        verbose_name = _("quote date revision")
+        verbose_name_plural = _("quote date revisions")
+        indexes = [
+            models.Index(fields=["quote_request", "created_at"], name="quote_date_rev_req_created_idx"),
+        ]
+
+    def __str__(self):
+        return f"Date revision on request #{self.quote_request_id}: {self.old_date} -> {self.new_date}"
+
+    def save(self, *args, **kwargs):  # noqa: D401
+        if self.pk is not None and QuoteDateRevision.objects.filter(pk=self.pk).exists():
+            raise ValidationError("Date revisions are append-only; create a new revision (law 6.3).")
+        return super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):  # noqa: D401
+        raise ValidationError("Date revisions cannot be deleted (append-only, law 6.3).")
