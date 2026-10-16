@@ -1570,6 +1570,8 @@ class ManagerQuoteRequestPricingPreviewView(PartnerAssignedRequestShopOptionsVie
                 "location": row.get("shop_location"),
                 "eligible": row.get("price_status") == "priced",
                 "production_cost": row.get("production_cost"),
+                "printer_quoted_price": row.get("printer_quoted_price"),
+                "printer_quoted_price_per_piece": row.get("printer_quoted_price_per_piece"),
                 "ineligible_reason": "" if row.get("price_status") == "priced" else row.get("reason"),
             }
             preview = row.get("preview_snapshot")

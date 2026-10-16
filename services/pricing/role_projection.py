@@ -49,6 +49,7 @@ CANONICAL_FIELDS = (
     "cost_breakdown",
     "manager_margin",
     "fee_tier",
+    "printer_quoted_price",
     "printer_payout",
     "printer_side_fee",
     # --- timeliness (law Part 4, 6.x field matrix) ------------------------
@@ -150,6 +151,7 @@ _MANAGER_FIELDS = _BUYER_FIELDS | _MANAGER_TIMING_FIELDS | frozenset(
         "cost_breakdown",
         "manager_margin",
         "fee_tier",
+        "printer_quoted_price",
         "printer_payout",
         "printer_side_fee",
     }
@@ -176,6 +178,7 @@ _PRINTER_FIELDS = frozenset(
         "spoilage",
         "sheets_billed",
         "method",
+        "printer_quoted_price",
         "printer_payout",
     }
 ) | _PRINTER_TIMING_FIELDS
@@ -219,6 +222,7 @@ BUYER_FORBIDDEN_FIELDS = frozenset(
         "cost_breakdown",
         "manager_margin",
         "fee_tier",
+        "printer_quoted_price",
         "printer_payout",
         "printer_side_fee",
     }
@@ -394,6 +398,16 @@ def build_canonical_result(
             financials.get("fee_tier"),
             financials.get("platform_service_percent"),
             financials.get("printy_fee"),
+        ),
+        # Law 7.10a: what the printer charges on their own rate card, BEFORE any
+        # Printy printer-side fee is deducted and before any manager markup is
+        # added. Distinct from printer_payout (rate card minus the printer-side
+        # fee). For a raw engine payload with no persisted split this is the
+        # VAT-exclusive rate-card subtotal.
+        "printer_quoted_price": _first(
+            financials.get("printer_quoted_price"),
+            financials.get("production_cost"),
+            totals.get("subtotal"),
         ),
         "printer_payout": _first(
             financials.get("printer_payout"),

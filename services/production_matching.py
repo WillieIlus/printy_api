@@ -351,8 +351,8 @@ def _diagnostic_row(*, shop: Shop, payload: dict[str, Any], missing: list[str], 
         "location_area": getattr(shop, "service_area", "") or getattr(shop, "city", ""),
         "can_produce": False,
         "production_cost": None,
-        "estimated_production_cost": None,
-        "estimated_shop_payout": None,
+        "printer_quoted_price": None,
+        "printer_quoted_price_per_piece": None,
         "currency": getattr(shop, "currency", "KES") or "KES",
         "price_available": False,
         "price_status": "missing_pricing" if "pricing" in missing else "insufficient_data",
@@ -394,6 +394,10 @@ def _priced_row(*, shop: Shop, payload: dict[str, Any], paper: Paper, machine: M
         "sheet_size": paper.sheet_size,
         "good_sheets": imposition.get("good_sheets") or imposition.get("parent_sheets_required"),
     }
+    quantity = _int(payload.get("quantity"))
+    printer_quoted_price_per_piece = None
+    if subtotal and quantity:
+        printer_quoted_price_per_piece = _money(Decimal(str(subtotal)) / Decimal(quantity))
     return {
         "shop_id": shop.id,
         "shop_name": shop.name,
@@ -406,9 +410,13 @@ def _priced_row(*, shop: Shop, payload: dict[str, Any], paper: Paper, machine: M
         "location_summary": _location_summary(shop),
         "location_area": getattr(shop, "service_area", "") or getattr(shop, "city", ""),
         "can_produce": True,
+        # Law 7.10a: `production_cost` / `printer_quoted_price` are the shop's
+        # own rate-card price for the spec -- what the printer charges -- before
+        # any Printy printer-side fee and before any manager markup. It is NOT
+        # the printer payout and must never be relabelled as one.
         "production_cost": subtotal,
-        "estimated_production_cost": subtotal,
-        "estimated_shop_payout": subtotal,
+        "printer_quoted_price": subtotal,
+        "printer_quoted_price_per_piece": printer_quoted_price_per_piece,
         "currency": preview.get("currency") or getattr(shop, "currency", "KES") or "KES",
         "price_available": bool(subtotal),
         "price_status": "priced",
