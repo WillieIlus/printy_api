@@ -32,6 +32,7 @@ from api.services.admin_dashboard import build_admin_dashboard_payload
 from api.visibility import project_shop_identity
 from jobs.choices import JobAssignmentStatus, ManagedJobAssignmentStatus, ManagedJobPaymentStatus, ManagedJobStatus
 from jobs.artwork_confirmation import get_artwork_confirmation_payload
+from jobs.artwork_workflow import artwork_payment_block_reason, get_artwork_workflow_payload
 from jobs.models import JobAssignment, ManagedJob
 from jobs.visibility import partner_managed_job_filter
 from inventory.models import Paper
@@ -918,6 +919,12 @@ class BaseRoleDetailView(BaseDashboardHomeView):
 
     def _job_row(self, job: ManagedJob, *, role: str) -> dict[str, object]:
         artwork_state = managed_job_artwork_state(managed_job=job)
+        artwork_workflow = get_artwork_workflow_payload(job)
+        payment_block_reason = artwork_payment_block_reason(job)
+        if role == CANONICAL_PRODUCTION_ROLE:
+            # Law 1.3: the printer view carries no payment information.
+            artwork_workflow = {key: value for key, value in artwork_workflow.items() if key != "payment_block_reason"}
+            payment_block_reason = None
         assignment = job.assignments.filter(reassigned_from__isnull=True).order_by("-id").first()
         row = {
             "id": job.id,
@@ -937,6 +944,8 @@ class BaseRoleDetailView(BaseDashboardHomeView):
             "updated_at": job.updated_at,
             **artwork_state,
             "artwork_confirmation": get_artwork_confirmation_payload(job),
+            "artwork_workflow": artwork_workflow,
+            "payment_block_reason": payment_block_reason,
             "payment_confirmed": str(job.payment_status or "").lower() in {"confirmed", "release_ready", "released"},
             "pricing": _job_pricing_snapshot(job, role),
             # Law Part 4: due date, current stage, owner, next action, time

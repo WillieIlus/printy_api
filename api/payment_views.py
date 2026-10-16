@@ -12,6 +12,7 @@ from rest_framework.views import APIView
 
 from accounts.services.roles import ActorRole, get_actor_role
 from jobs.models import ManagedJob, ManagedJobPayout
+from jobs.artwork_workflow import artwork_payment_block_reason
 from jobs.services.dispatch import dispatch_job_to_shop
 from jobs.visibility import partner_can_access_managed_job
 from jobs.payout_services import release_managed_job_payouts
@@ -560,6 +561,12 @@ class ManagedJobMpesaSTKPushView(APIView):
             )
             if not _can_trigger_managed_job_payment(request.user, managed_job):
                 return Response({"detail": "Only the client who owns this job can initiate payment."}, status=status.HTTP_403_FORBIDDEN)
+            artwork_block = artwork_payment_block_reason(managed_job)
+            if artwork_block:
+                return Response(
+                    {"detail": artwork_block, "artwork_payment_block_reason": artwork_block},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
             phone = str(request.data.get("phone_number") or request.data.get("phone") or "").strip()
             if not phone:
                 return Response({"detail": "phone_number is required."}, status=status.HTTP_400_BAD_REQUEST)

@@ -1,6 +1,7 @@
 from rest_framework import serializers
 
 from api.visibility import SHOP_ACTOR, strip_forbidden_keys
+from jobs.artwork_workflow import get_artwork_workflow_payload
 from jobs.timing import timing_fields
 from services.pricing.role_projection import (
     ROLE_BUYER,
@@ -12,6 +13,21 @@ from services.pricing.role_projection import (
 
 def _money(value):
     return str(value) if value is not None else None
+
+
+def _printer_artwork_workflow(instance):
+    """Law 1.3: the printer sees only what they must act on, never payment."""
+    payload = get_artwork_workflow_payload(instance)
+    return {
+        "source": payload["source"],
+        "claim_state": payload["claim_state"],
+        "printer_acknowledged_at": payload["printer_acknowledged_at"],
+        "printer_acknowledged_by": payload["printer_acknowledged_by"],
+        "acknowledgement_required": (
+            payload["source"] == "manager_holds" and payload["claim_state"] == "accepted"
+        ),
+        "stage_owner": payload["stage_owner"],
+    }
 
 
 def _timing(instance, role):
@@ -48,6 +64,7 @@ class ManagedJobClientSerializer(serializers.Serializer):
             "current_status_event": _current_event(instance),
             "quote": QuoteClientSerializer(instance.source_quote).data if instance.source_quote_id else None,
             "timing": _timing(instance, ROLE_BUYER),
+            "artwork_workflow": get_artwork_workflow_payload(instance),
         }
 
 
@@ -67,6 +84,7 @@ class ManagedJobBrokerSerializer(serializers.Serializer):
             },
             "status_timeline": _timeline(instance),
             "timing": _timing(instance, ROLE_MANAGER),
+            "artwork_workflow": get_artwork_workflow_payload(instance),
         }
 
 
@@ -85,6 +103,7 @@ class ManagedJobShopSerializer(serializers.Serializer):
             "production_notes": getattr(assignment, "assignment_notes", ""),
             "status_timeline": _timeline(instance, own_only=True),
             "timing": _timing(instance, ROLE_PRINTER),
+            "artwork_workflow": _printer_artwork_workflow(instance),
         }
 
 

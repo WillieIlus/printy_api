@@ -14,6 +14,7 @@ from api.visibility import (
     resolve_actor,
 )
 from jobs.artwork_confirmation import get_artwork_confirmation_payload
+from jobs.artwork_workflow import get_artwork_workflow_payload
 from jobs.file_services import managed_job_has_artwork
 from jobs.models import JobAssignment, JobFile, ManagedJob, JobStatusEvent
 from jobs.workflow import project_workflow_state
@@ -49,6 +50,7 @@ class ManagedJobSerializer(serializers.ModelSerializer):
     urgency_label = serializers.SerializerMethodField()
     artwork_uploaded = serializers.SerializerMethodField()
     artwork_confirmation = serializers.SerializerMethodField()
+    artwork_workflow = serializers.SerializerMethodField()
 
     class Meta:
         model = ManagedJob
@@ -74,6 +76,7 @@ class ManagedJobSerializer(serializers.ModelSerializer):
             "artwork_required",
             "artwork_uploaded",
             "artwork_confirmation",
+            "artwork_workflow",
             "urgency_type",
             "urgency_label",
             "urgency_fee",
@@ -137,6 +140,9 @@ class ManagedJobSerializer(serializers.ModelSerializer):
 
     def get_artwork_confirmation(self, obj):
         return get_artwork_confirmation_payload(obj)
+
+    def get_artwork_workflow(self, obj):
+        return get_artwork_workflow_payload(obj)
 
 
 class ManagedJobPublicTrackingSerializer(serializers.ModelSerializer):

@@ -8,6 +8,7 @@ from django.utils import timezone
 
 from jobs.audit_services import EVENT_ASSIGNMENT_CREATED, record_job_status_event
 from jobs.artwork_confirmation import require_artwork_confirmation_dispatch_ready
+from jobs.artwork_workflow import artwork_blocks_dispatch
 from jobs.choices import ManagedJobAssignmentStatus, ManagedJobPaymentStatus, ManagedJobStatus
 from jobs.models import JobAssignment, ManagedJob
 from notifications.models import Notification
@@ -46,6 +47,9 @@ def dispatch_job_to_shop(*, managed_job: ManagedJob, dispatched_by, shop=None, n
     if managed_job.payment_status != ManagedJobPaymentStatus.CONFIRMED and managed_job.status != ManagedJobStatus.PAYMENT_CONFIRMED:
         raise ValidationError("Client payment must be confirmed before dispatch.")
     require_artwork_confirmation_dispatch_ready(managed_job)
+    artwork_production_reason = artwork_blocks_dispatch(managed_job)
+    if artwork_production_reason:
+        raise ValidationError(artwork_production_reason)
     if managed_job.dispatched_at is not None:
         existing = managed_job.assignments.filter(reassigned_from__isnull=True).first()
         if existing is not None:
@@ -140,6 +144,14 @@ def ensure_job_assignment_for_paid_job(
     if managed_job.dispatched_at is not None:
         logger.warning(
             "Paid managed job has dispatched_at but no active assignment managed_job_id=%s",
+            managed_job.id,
+        )
+        return None
+
+    artwork_production_reason = artwork_blocks_dispatch(managed_job)
+    if artwork_production_reason:
+        logger.info(
+            "Auto-dispatch skipped pending artwork printer acknowledgement managed_job_id=%s",
             managed_job.id,
         )
         return None

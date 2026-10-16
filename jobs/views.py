@@ -1,7 +1,9 @@
 """JobShare API views."""
+import uuid as _uuid
+
 from django.conf import settings
 from django.core.exceptions import ValidationError
-from django.http import FileResponse
+from django.http import FileResponse, Http404
 from django.shortcuts import get_object_or_404
 from django.db.models import Q
 from django.utils.translation import gettext as _
@@ -19,6 +21,15 @@ from jobs.artwork_confirmation import (
     get_artwork_confirmation_payload,
     request_client_artwork_confirmation,
     respond_to_client_artwork_confirmation,
+)
+from jobs.artwork_workflow import (
+    claim_artwork_with_manager,
+    get_artwork_workflow_payload,
+    manager_accept_artwork_claim,
+    manager_decline_artwork_claim,
+    manager_mark_holds_artwork,
+    printer_acknowledge_artwork,
+    record_artwork_uploaded,
 )
 from jobs.assignment_services import (
     accept_assignment,
@@ -238,15 +249,108 @@ class PublicJobView(APIView):
 
 
 class PublicManagedJobTrackingView(APIView):
+    """Law 7.7 public track-job lookup.
+
+    An unguessable capability link (the tracking token) reveals status and
+    dates. Looking a job up by its (guessable) job number instead requires the
+    email or phone number recorded on the job, so a signed-out stranger cannot
+    enumerate jobs. The serialized payload never carries prices or margins.
+    """
+
     permission_classes = [AllowAny]
 
     def get(self, request, token):
-        managed_job = get_object_or_404(
-            ManagedJob.objects.select_related("broker", "broker__profile", "source_quote"),
-            Q(tracking_token=token) | Q(managed_reference__iexact=token),
-        )
+        token = str(token or "").strip()
+        managed_job = None
+        if token and _looks_like_uuid(token):
+            managed_job = self._by_token(token)
+        reference_lookup = managed_job is None
+        if managed_job is None:
+            managed_job = self._by_reference(token)
+        if managed_job is None:
+            raise Http404
+        if reference_lookup and not self._viewer_is_entitled(request, managed_job):
+            if not self._contact_matches(request, managed_job):
+                return Response(
+                    {"detail": _("Enter the email address or phone number on the job to track it.")},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
         serializer = ManagedJobPublicTrackingSerializer(managed_job, context={"request": request})
         return Response(serializer.data)
+
+    @staticmethod
+    def _queryset():
+        return ManagedJob.objects.select_related(
+            "broker",
+            "broker__profile",
+            "client",
+            "source_quote",
+            "source_quote_request",
+        )
+
+    def _by_token(self, token):
+        return self._queryset().filter(tracking_token=token).first()
+
+    def _by_reference(self, token):
+        if not token:
+            return None
+        return self._queryset().filter(managed_reference__iexact=token).first()
+
+    def _viewer_is_entitled(self, request, managed_job):
+        user = getattr(request, "user", None)
+        if user is None or not getattr(user, "is_authenticated", False):
+            return False
+        actor = resolve_actor(user)
+        return _can_access_managed_job(user=user, managed_job=managed_job, actor=actor)
+
+    def _contact_matches(self, request, managed_job) -> bool:
+        provided = {
+            str(request.query_params.get("email") or "").strip().lower(),
+            str(request.query_params.get("phone") or "").strip(),
+        }
+        provided.discard("")
+        if not provided:
+            return False
+        candidates: set[str] = set()
+        quote_request = getattr(managed_job, "source_quote_request", None)
+        if quote_request is not None:
+            if quote_request.customer_email:
+                candidates.add(str(quote_request.customer_email).strip().lower())
+            if quote_request.customer_phone:
+                candidates.add(str(quote_request.customer_phone).strip())
+        client = getattr(managed_job, "client", None)
+        if client is not None:
+            if getattr(client, "email", None):
+                candidates.add(str(client.email).strip().lower())
+            profile = getattr(client, "profile", None)
+            if profile is not None and getattr(profile, "phone", None):
+                candidates.add(str(profile.phone).strip())
+        candidates.discard("")
+        if provided & candidates:
+            return True
+
+        def _digits(value: str) -> str:
+            return "".join(character for character in value if character.isdigit())
+
+        # Compare the significant (last 9) digits so "+254733444555" matches
+        # the local "0733444555" the buyer is likely to type.
+        def _significant(value: str) -> str:
+            digits = _digits(value)
+            return digits[-9:] if len(digits) >= 9 else ""
+
+        provided_digits = {_significant(item) for item in provided}
+        provided_digits.discard("")
+        candidate_digits = {_significant(item) for item in candidates}
+        candidate_digits.discard("")
+        return bool(provided_digits & candidate_digits)
+
+
+def _looks_like_uuid(value: str) -> bool:
+    try:
+        _uuid.UUID(str(value))
+        return True
+    except (ValueError, TypeError, AttributeError):
+        return False
 
 
 def _can_access_managed_job(*, user, managed_job: ManagedJob, actor: str) -> bool:
@@ -332,6 +436,7 @@ class ManagedJobArtworkUploadView(APIView):
             )
         except ValueError as exc:
             return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+        record_artwork_uploaded(managed_job=managed_job, actor=request.user)
         return Response(JobFileSerializer(job_file, context={"request": request}).data, status=status.HTTP_201_CREATED)
 
 
@@ -617,6 +722,57 @@ class ManagedJobArtworkConfirmationResponseView(APIView):
         except ValidationError as exc:
             return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         return Response({"artwork_confirmation": get_artwork_confirmation_payload(managed_job)})
+
+
+class ManagedJobArtworkWorkflowView(APIView):
+    """Law 7.2 artwork workflow: buyer claim, manager accept/hold/decline, printer ack."""
+
+    permission_classes = [IsAuthenticated]
+
+    ACTION_CLAIM = "claim"
+    ACTION_MANAGER_ACCEPT = "manager_accept"
+    ACTION_MANAGER_HOLDS = "manager_holds"
+    ACTION_MANAGER_DECLINE = "manager_decline"
+    ACTION_PRINTER_ACKNOWLEDGE = "printer_acknowledge"
+
+    def post(self, request, pk):
+        managed_job = get_object_or_404(
+            ManagedJob.objects.select_related("assigned_shop", "client", "broker", "created_by"),
+            pk=pk,
+        )
+        actor = resolve_actor(request.user)
+        if not _can_access_managed_job(user=request.user, managed_job=managed_job, actor=actor):
+            return Response({"detail": _("Not authorized.")}, status=status.HTTP_403_FORBIDDEN)
+        effective_actor = _effective_managed_job_actor(user=request.user, managed_job=managed_job, actor=actor)
+        action_name = str(request.data.get("action") or "").lower()
+        note = str(request.data.get("note") or "")
+        reason = str(request.data.get("reason") or "")
+        try:
+            if action_name == self.ACTION_CLAIM:
+                if effective_actor not in {OPS_ACTOR, CLIENT_ACTOR}:
+                    return Response({"detail": _("Only the buyer can claim the artwork is with the manager.")}, status=status.HTTP_403_FORBIDDEN)
+                managed_job = claim_artwork_with_manager(managed_job=managed_job, actor=request.user, note=note)
+            elif action_name == self.ACTION_MANAGER_ACCEPT:
+                if effective_actor not in {OPS_ACTOR, PARTNER_ACTOR}:
+                    return Response({"detail": _("Only the manager can accept the artwork claim.")}, status=status.HTTP_403_FORBIDDEN)
+                managed_job = manager_accept_artwork_claim(managed_job=managed_job, actor=request.user, note=note)
+            elif action_name == self.ACTION_MANAGER_HOLDS:
+                if effective_actor not in {OPS_ACTOR, PARTNER_ACTOR}:
+                    return Response({"detail": _("Only the manager can mark that they hold the artwork.")}, status=status.HTTP_403_FORBIDDEN)
+                managed_job = manager_mark_holds_artwork(managed_job=managed_job, actor=request.user, note=note)
+            elif action_name == self.ACTION_MANAGER_DECLINE:
+                if effective_actor not in {OPS_ACTOR, PARTNER_ACTOR}:
+                    return Response({"detail": _("Only the manager can decline the artwork claim.")}, status=status.HTTP_403_FORBIDDEN)
+                managed_job = manager_decline_artwork_claim(managed_job=managed_job, actor=request.user, reason=reason or note)
+            elif action_name == self.ACTION_PRINTER_ACKNOWLEDGE:
+                if effective_actor not in {OPS_ACTOR, SHOP_ACTOR}:
+                    return Response({"detail": _("Only the printer can acknowledge the artwork.")}, status=status.HTTP_403_FORBIDDEN)
+                managed_job = printer_acknowledge_artwork(managed_job=managed_job, actor=request.user, note=note)
+            else:
+                return Response({"detail": _("Unsupported artwork workflow action.")}, status=status.HTTP_400_BAD_REQUEST)
+        except ValidationError as exc:
+            return Response({"detail": "; ".join(exc.messages)}, status=status.HTTP_400_BAD_REQUEST)
+        return Response({"artwork_workflow": get_artwork_workflow_payload(managed_job)})
 
 
 class JobFileActionView(APIView):
