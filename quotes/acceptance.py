@@ -8,7 +8,8 @@ from accounts.services.roles import is_broker
 from payments.services import create_payment_for_quote
 from pricing.services.platform_fee_policy import ensure_quote_financial_split
 from quotes.choices import QuoteOfferStatus, QuoteStatus
-from quotes.models import Quote
+from quotes.models import Quote, QuoteVersionOutcome
+from quotes.snapshots import mark_quote_outcome
 
 
 def _can_accept(quote: Quote, user) -> bool:
@@ -86,7 +87,28 @@ def accept_quote_for_payment(*, quote: Quote, accepted_by, payer_phone: str = ""
         updated_at=now,
     )
 
-    # Law 6.2: the due date is set here, from the SLA config, at acceptance.
+    # Law 3.4/4: the accepted version and terms are preserved, and every other
+    # offered version is closed as lost so the outcome is never lost.
+    mark_quote_outcome(
+        quote_request=quote_request,
+        outcome=QuoteVersionOutcome.ACCEPTED,
+        quote=quote,
+        create_if_missing=True,
+        user=accepted_by,
+        reason="quote accepted",
+    )
+    for other in (
+        Quote.objects.filter(quote_request=quote_request)
+        .exclude(pk=quote.pk)
+        .exclude(status=QuoteOfferStatus.PENDING)
+    ):
+        mark_quote_outcome(
+            quote_request=quote_request,
+            outcome=QuoteVersionOutcome.LOST,
+            quote=other,
+            user=accepted_by,
+            reason="superseded by accepted quote",
+        )
     from jobs.timing_services import set_due_date_at_acceptance
 
     set_due_date_at_acceptance(quote=quote, actor=accepted_by)

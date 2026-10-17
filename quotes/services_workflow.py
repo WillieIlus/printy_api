@@ -963,6 +963,16 @@ def create_quote_response(*, quote_request: QuoteRequest, shop, user, status: st
     quote_request.status = _request_status_for_response_status(status)
     quote_request.save(update_fields=["status", "updated_at"])
 
+    if status != QuoteOfferStatus.PENDING:
+        from quotes.snapshots import record_quote_version
+
+        record_quote_version(
+            quote_request=quote_request,
+            quote=response,
+            user=user,
+            reason="quote sent",
+        )
+
     share_link = None
     if status != QuoteOfferStatus.PENDING:
         sender_name = project_identity(
@@ -1052,6 +1062,15 @@ def update_quote_response(
     quote_request = response.quote_request
     quote_request.status = _request_status_for_response_status(status)
     quote_request.save(update_fields=["status", "updated_at"])
+    if status != QuoteOfferStatus.PENDING:
+        from quotes.snapshots import record_quote_version
+
+        record_quote_version(
+            quote_request=quote_request,
+            quote=response,
+            user=getattr(response, "created_by", None),
+            reason="quote revised",
+        )
 
     share_link = None
     if status != QuoteOfferStatus.PENDING:

@@ -862,7 +862,17 @@ def compute_and_store_pricing(item) -> PricingResult:
     result = compute_quote_item_pricing(item)
     item.unit_price = Decimal(result.unit_price)
     item.line_total = Decimal(result.line_total)
-    item.pricing_snapshot = result.to_dict()
+    snapshot = result.to_dict()
+    # Pin the pricing-rule version (and the spec fingerprint when the item
+    # belongs to a request) so a stored breakdown can always be traced back to
+    # the rules that produced it, even after rates change (law 3.4/10.2).
+    from quotes.snapshots import compute_pricing_rule_version, compute_spec_fingerprint
+
+    snapshot["pricing_rule_version"] = compute_pricing_rule_version()
+    quote_request = getattr(item, "quote_request", None)
+    if quote_request is not None and getattr(item, "quote_request_id", None):
+        snapshot["spec_fingerprint"] = compute_spec_fingerprint(quote_request)
+    item.pricing_snapshot = snapshot
     item.needs_review = False
     item.save(update_fields=["unit_price", "line_total", "pricing_snapshot", "needs_review", "updated_at"])
     return result

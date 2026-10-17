@@ -543,6 +543,17 @@ class IncomingRequestViewSet(viewsets.ReadOnlyModelViewSet):
             return Response({"detail": "This request cannot be rejected in its current state."}, status=status.HTTP_400_BAD_REQUEST)
         qr.status = QuoteStatus.REJECTED
         qr.save(update_fields=["status", "updated_at"])
+        from quotes.models import QuoteVersionOutcome
+        from quotes.snapshots import mark_quote_outcome
+
+        mark_quote_outcome(
+            quote_request=qr,
+            outcome=QuoteVersionOutcome.LOST,
+            quote=qr.get_latest_response(),
+            create_if_missing=True,
+            user=request.user,
+            reason="request rejected by shop",
+        )
         _create_request_message(
             quote_request=qr,
             sender=request.user,
@@ -636,6 +647,14 @@ class IncomingRequestViewSet(viewsets.ReadOnlyModelViewSet):
                 qr.items.update(quote=quote)
                 qr.status = QuoteStatus.QUOTED
                 qr.save(update_fields=["status", "updated_at"])
+                from quotes.snapshots import record_quote_version
+
+                record_quote_version(
+                    quote_request=qr,
+                    quote=quote,
+                    user=request.user,
+                    reason="quote sent",
+                )
                 _create_request_message(
                     quote_request=qr,
                     sender=request.user,
@@ -759,6 +778,14 @@ class QuoteViewSet(viewsets.ModelViewSet):
 
         quote.whatsapp_message = get_quote_summary_text(quote)
         quote.save(update_fields=["status", "whatsapp_message", "updated_at"])
+        from quotes.snapshots import record_quote_version
+
+        record_quote_version(
+            quote_request=quote.quote_request,
+            quote=quote,
+            user=request.user,
+            reason="quote revised",
+        )
         _create_request_message(
             quote_request=quote.quote_request,
             sender=request.user,

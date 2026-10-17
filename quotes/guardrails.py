@@ -10,7 +10,8 @@ from django.utils import timezone
 from pricing.services.platform_fee_policy import MIN_MARKUP_MULTIPLE, get_active_platform_fee_policy
 from quotes.choices import QuoteStatus, QuoteOfferStatus
 from quotes.messaging import create_quote_message
-from quotes.models import QuoteRequestMessage
+from quotes.models import QuoteRequestMessage, QuoteVersionOutcome
+from quotes.snapshots import mark_quote_outcome
 
 
 DEFAULT_QUOTE_EXPIRY_HOURS = 48
@@ -135,6 +136,13 @@ def expire_quote(*, quote, now=None, notify_manager: bool = True) -> bool:
     if getattr(quote, "client_quote_status", "") == "sent":
         quote.client_quote_status = "expired"
     quote.save(update_fields=["status", "client_quote_status", "updated_at"])
+    mark_quote_outcome(
+        quote_request=quote.quote_request,
+        outcome=QuoteVersionOutcome.EXPIRED,
+        quote=quote,
+        create_if_missing=True,
+        reason="quote expired",
+    )
 
     quote_request = quote.quote_request
     if quote_request.status not in {QuoteStatus.ACCEPTED, QuoteStatus.CANCELLED, QuoteStatus.CLOSED, QuoteStatus.REJECTED}:

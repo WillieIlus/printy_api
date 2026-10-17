@@ -2131,6 +2131,17 @@ class ClientResponseRejectView(APIView):
         quote.save(
             update_fields=["status", "rejected_at", "rejection_reason", "rejection_message", "updated_at"]
         )
+        from quotes.models import QuoteVersionOutcome
+        from quotes.snapshots import mark_quote_outcome
+
+        mark_quote_outcome(
+            quote_request=quote.quote_request,
+            outcome=QuoteVersionOutcome.LOST,
+            quote=quote,
+            create_if_missing=True,
+            user=request.user,
+            reason="quote rejected by client",
+        )
         create_quote_message(
             quote_request=quote.quote_request,
             quote=quote,

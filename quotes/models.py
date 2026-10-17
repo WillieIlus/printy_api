@@ -1771,13 +1771,44 @@ class QuoteOverride(TimeStampedModel):
         return f"Override {self.field}={self.new_value!r} on request #{self.quote_request_id}"
 
 
+class QuoteVersionOutcome(models.TextChoices):
+    """Lifecycle outcome of a stored quote version (law 3.4 / 4 / 10.2).
+
+    A version is opened when it is offered and later closed with exactly one
+    terminal outcome so historical outcomes (accepted, rejected, expired or
+    superseded) are never lost when pricing rules change later.
+    """
+
+    OPEN = "open", _("Open")
+    ACCEPTED = "accepted", _("Accepted")
+    LOST = "lost", _("Rejected / lost")
+    EXPIRED = "expired", _("Expired")
+    SUPERSEDED = "superseded", _("Superseded")
+
+
 class QuoteVersion(TimeStampedModel):
     """Immutable version snapshot of a quote (law 3.4).
 
     A sent quote is locked. Editing a sent quote creates a new QuoteVersion
     rather than silently mutating the one the buyer already saw; the buyer must
     approve a new version before payment on the changed price.
+
+    The captured ``snapshot`` and its identifying fields are write-once; only
+    the ``outcome`` may move from ``open`` to its terminal value.
     """
+
+    IMMUTABLE_FIELDS = (
+        "quote_request_id",
+        "quote_id",
+        "version_number",
+        "total",
+        "per_piece",
+        "snapshot",
+        "spec_fingerprint",
+        "pricing_rule_version",
+        "reason",
+        "created_by_id",
+    )
 
     objects = models.Manager()
 
@@ -1824,6 +1855,27 @@ class QuoteVersion(TimeStampedModel):
         default="",
         verbose_name=_("reason"),
     )
+    outcome = models.CharField(
+        max_length=20,
+        choices=QuoteVersionOutcome.choices,
+        default=QuoteVersionOutcome.OPEN,
+        verbose_name=_("outcome"),
+        help_text=_("Terminal outcome once this version is accepted, lost or expired (law 3.4/4)."),
+    )
+    spec_fingerprint = models.CharField(
+        max_length=64,
+        blank=True,
+        default="",
+        verbose_name=_("specification fingerprint"),
+        help_text=_("Hash of the quoted product/spec/quantity set at offer time (law 10.2)."),
+    )
+    pricing_rule_version = models.CharField(
+        max_length=160,
+        blank=True,
+        default="",
+        verbose_name=_("pricing rule version"),
+        help_text=_("Identifying version of the pricing engine and fee policy in force (law 1.1/10.2)."),
+    )
     created_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.SET_NULL,
@@ -1843,6 +1895,17 @@ class QuoteVersion(TimeStampedModel):
                 name="quote_version_unique_number_per_request",
             )
         ]
+
+    def save(self, *args, **kwargs):
+        if self.pk is not None:
+            previous = type(self).objects.filter(pk=self.pk).values(*self.IMMUTABLE_FIELDS).first()
+            if previous is not None:
+                for field in self.IMMUTABLE_FIELDS:
+                    if getattr(self, field) != previous[field]:
+                        raise ValidationError(
+                            "Quote version snapshots are immutable; only outcome may change (law 3.4)."
+                        )
+        return super().save(*args, **kwargs)
 
     def __str__(self):
         return f"Version {self.version_number} of request #{self.quote_request_id}"

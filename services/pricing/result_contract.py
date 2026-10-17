@@ -5,6 +5,12 @@ from decimal import Decimal
 from common.money import money
 from typing import Any
 
+# Version of the calculation-result contract. Bump this whenever the shape or
+# meaning of the persisted pricing snapshot changes so historical snapshots
+# remain interpretable (law 3.4 / 10.2 - stored results are the single source
+# of truth and must not be silently reinterpreted).
+CONTRACT_VERSION = 1
+
 
 def _money(value: Any) -> str | None:
     if value is None:
@@ -43,7 +49,7 @@ def build_calculation_result(
     reason: str = "",
 ) -> dict[str, Any]:
     return {
-        "version": 1,
+        "version": CONTRACT_VERSION,
         "quote_type": quote_type,
         "pricing_mode": pricing_mode,
         "billing_type": billing_type,
