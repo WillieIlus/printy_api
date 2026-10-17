@@ -41,6 +41,7 @@ from jobs.views import (
     ShopAssignmentListView,
 )
 from jobs.analytics_views import ProductionAnalyticsView
+from jobs.completion_actuals_views import JobCompletionActualsView
 from notifications.views import NotificationViewSet
 
 # Public router (no auth required for read)
@@ -136,6 +137,7 @@ urlpatterns = [
     path("dashboard/counts/", dashboard_views.DashboardCountsView.as_view(), name="dashboard-counts"),
     path("dashboard/admin/", dashboard_views.AdminDashboardHomeView.as_view(), name="dashboard-admin-home"),
     path("dashboard/internal/production-analytics/", ProductionAnalyticsView.as_view(), name="dashboard-internal-production-analytics"),
+    path("dashboard/internal/jobs/<int:job_id>/completion-actuals/", JobCompletionActualsView.as_view(), name="dashboard-internal-job-completion-actuals"),
     path(
         "dashboard/admin/brokers/<int:user_id>/active/",
         account_admin_views.BrokerProfileActiveToggleView.as_view(),

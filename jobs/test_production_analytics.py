@@ -228,3 +228,71 @@ class ProductionAnalyticsTests(TestCase):
         metric = response.data["metrics"]["estimate_vs_actual"]
         self.assertEqual(metric["sample_size"], 2)
         self.assertEqual(metric["value"]["total_actual"], "1700.00")
+
+    # --- capture endpoint ----------------------------------------------
+    def test_capture_endpoint_keeps_unknown_as_null(self):
+        job = self._make_job(broker=self.manager)
+        self.api.force_authenticate(user=self.manager)
+        url = reverse(
+            "dashboard-internal-job-completion-actuals", kwargs={"job_id": job.id}
+        )
+        response = self.api.post(
+            url,
+            {"actual_production_cost": "820.00", "spoilage_sheets": 4},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 201)
+        metadata = response.data["metadata"]
+        self.assertEqual(metadata["actual_production_cost"], "820.00")
+        self.assertEqual(metadata["spoilage_sheets"], 4)
+        self.assertIsNone(metadata["material_cost"])
+        self.assertIsNone(metadata["material_quantity"])
+        self.assertEqual(metadata["estimate"]["production_cost"], "700.00")
+
+    def test_capture_endpoint_accepts_zero_as_real(self):
+        job = self._make_job(broker=self.manager)
+        self.api.force_authenticate(user=self.manager)
+        url = reverse(
+            "dashboard-internal-job-completion-actuals", kwargs={"job_id": job.id}
+        )
+        response = self.api.post(url, {"actual_production_cost": "0.00"}, format="json")
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.data["metadata"]["actual_production_cost"], "0.00")
+
+    def test_capture_endpoint_refuses_no_real_figures(self):
+        job = self._make_job(broker=self.manager)
+        self.api.force_authenticate(user=self.manager)
+        url = reverse(
+            "dashboard-internal-job-completion-actuals", kwargs={"job_id": job.id}
+        )
+        self.assertEqual(self.api.post(url, {}, format="json").status_code, 400)
+
+    def test_capture_endpoint_scopes_and_denies(self):
+        own = self._make_job(broker=self.manager)
+        other = self._make_job(broker=self.other_manager)
+        self.api.force_authenticate(user=self.manager)
+        own_url = reverse(
+            "dashboard-internal-job-completion-actuals", kwargs={"job_id": own.id}
+        )
+        other_url = reverse(
+            "dashboard-internal-job-completion-actuals", kwargs={"job_id": other.id}
+        )
+        self.assertEqual(
+            self.api.post(own_url, {"billable_sheets": 100}, format="json").status_code,
+            201,
+        )
+        self.assertEqual(
+            self.api.post(
+                other_url, {"billable_sheets": 100}, format="json"
+            ).status_code,
+            404,
+        )
+        for user in (self.client_user, self.owner):
+            self.api.force_authenticate(user=user)
+            self.assertEqual(
+                self.api.post(
+                    own_url, {"billable_sheets": 1}, format="json"
+                ).status_code,
+                403,
+            )
+
