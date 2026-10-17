@@ -2,6 +2,7 @@ from django.urls import path
 from rest_framework_simplejwt.views import TokenBlacklistView, TokenRefreshView
 
 from .views import (
+    ClientInviteClaimView,
     ClientRegisterView,
     ConfirmEmailView,
     CustomTokenObtainPairView,
@@ -34,4 +35,5 @@ path("resend-confirmation/", ResendEmailConfirmationView.as_view(), name="resend
     path("password-reset/confirm/", PasswordResetConfirmView.as_view(), name="password_reset_confirm"),
     path("password-change/", PasswordChangeView.as_view(), name="password_change"),
     path("social/google/", GoogleSocialLoginView.as_view(), name="social_google_login"),
+    path("client-invites/claim/", ClientInviteClaimView.as_view(), name="client_invite_claim"),
 ]

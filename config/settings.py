@@ -360,6 +360,10 @@ def check_email_delivery_config(app_configs=None, **kwargs):
 
 FRONTEND_URL = os.environ.get("FRONTEND_URL", "http://localhost:3000").rstrip("/")
 
+# Lifetime of a manager-created, phone-first client invite (law-neutral helper
+# for manager-assisted onboarding; the claim link is single-use).
+CLIENT_INVITE_TTL_HOURS = int(os.environ.get("CLIENT_INVITE_TTL_HOURS", "72"))
+
 DIRECT_SHOP_STANDARD_MARKUP_RATE = Decimal(_get_env("DIRECT_SHOP_STANDARD_MARKUP_RATE", default="0.20"))
 
 EMAIL_CONFIRMATION_URL = f"{FRONTEND_URL}/auth/confirm-email"

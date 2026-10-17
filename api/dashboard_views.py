@@ -113,9 +113,14 @@ def _partner_client_payload(
     display_name = name or getattr(client_user, "name", "") or getattr(client_user, "email", "") or phone or "Client"
     client_email = email or getattr(client_user, "email", "") or ""
     client_phone = phone or getattr(client_user, "username", "") or ""
-    return {
+    if not client_phone and client_user is not None:
+        profile = getattr(client_user, "profile", None)
+        client_phone = getattr(profile, "phone", "") or ""
+    payload = {
         "id": getattr(client_user, "id", None),
         "client_id": getattr(client_user, "id", None),
+    status: str = "",
+    invite=None,
         "name": display_name,
         "phone": client_phone,
         "email": client_email,
@@ -130,6 +135,16 @@ def _normalize_phone(value: str) -> str:
 
 def _fallback_partner_client_email(*, partner_id: int, phone: str) -> str:
     digits = "".join(character for character in phone if character.isdigit()) or f"partner{partner_id}"
+    if status:
+        payload["status"] = status
+    if invite is not None:
+        from accounts.services.client_invites import build_invite_claim_url
+
+        payload["invite_id"] = invite.id
+        payload["claim_token"] = invite.token
+        payload["claim_url"] = build_invite_claim_url(invite)
+        payload["expires_at"] = invite.expires_at.isoformat() if invite.expires_at else None
+    return payload
     return f"partner-client-{partner_id}-{digits}@printy.local"
 
 
@@ -196,15 +211,23 @@ def _resolve_or_create_partner_client(
 ):
     User = get_user_model()
     name = str(client_name or "").strip()
-    phone = _normalize_phone(client_phone)
+    phone = str(client_phone or "").strip()
     email = str(client_email or "").strip().lower()
     company = str(client_company or "").strip()
 
     resolved_user = client_user
+    """Resolve a client for a manager, or create a phone-first invite.
+
+    Resolution order: explicit client account, then email, then a verified
+    phone. When nothing matches and a phone was captured, a single-use client
+    invite is stored so the client can claim their own account. An account that
+    already owns the phone is linked (clients) or refused (manager/printer) —
+    an existing account is never duplicated, claimed or modified here.
+    """
+    from accounts.services.client_invites import create_client_invite
+
     if resolved_user is None and email:
         resolved_user = User.objects.filter(email__iexact=email).first()
-    if resolved_user is None and phone:
-        resolved_user = User.objects.filter(username=phone).first()
 
     if resolved_user is not None:
         if getattr(resolved_user, "role", "") != User.Role.CLIENT:
@@ -224,6 +247,38 @@ def _resolve_or_create_partner_client(
         name=name,
         phone=phone,
         email=email,
+            status="linked",
+        )
+
+    if phone:
+        invite, linked = create_client_invite(
+            created_by=partner_user,
+            name=name,
+            phone=phone,
+            email=email,
+            company=company,
+        )
+        if linked is not None:
+            return _partner_client_payload(
+                client_user=linked,
+                name=name,
+                phone=phone,
+                email=email,
+                company=company,
+                is_new=False,
+                is_offline=False,
+                status="linked",
+            )
+        return _partner_client_payload(
+            client_user=None,
+            name=name,
+            phone=phone,
+            email=email,
+            company=company,
+            is_new=True,
+            is_offline=True,
+            status="invite_pending",
+            invite=invite,
         company=company,
         is_new=True,
         is_offline=True,
@@ -234,6 +289,7 @@ def _partner_client_row(record) -> dict[str, object]:
     return {
         "id": record.id,
         "client_id": record.client_user_id,
+        status="offline_no_phone",
         "name": record.name or getattr(client_user, "name", "") or getattr(client_user, "email", "") or "Client",
         "phone": record.phone or getattr(client_user, "username", "") or "",
         "email": record.email or getattr(client_user, "email", "") or "",
@@ -1406,7 +1462,16 @@ class PartnerQuoteAttachClientView(BaseRoleDetailView):
         quote_request.customer_email = payload["email"] or quote_request.customer_email
         quote_request.customer_phone = payload["phone"] or quote_request.customer_phone
         quote_request.request_snapshot = request_snapshot
-        quote_request.save(update_fields=["customer_name", "customer_email", "customer_phone", "request_snapshot", "updated_at"])
+        quote_request.save(
+            update_fields=[
+                "customer_name",
+                "customer_email",
+                "customer_phone",
+                "on_behalf_of",
+                "request_snapshot",
+                "updated_at",
+            ]
+        )
         return Response(
             {
                 "quote_request_id": quote_request.id,
@@ -1431,6 +1496,10 @@ class PartnerAssignedRequestQuoteCreateView(ManagerCapablePartnerQuoteView):
     def post(self, request, pk):
         quote_request = get_object_or_404(self.get_queryset(request), pk=pk)
         if quote_request.assigned_manager_id != request.user.id:
+        if payload.get("client_id") and quote_request.on_behalf_of_id is None:
+            # Associating a client with a draft quote is a link, not consent or
+            # acceptance: the quote keeps its current status.
+            quote_request.on_behalf_of_id = payload["client_id"]
             raise PermissionDenied("You cannot respond to this quote request.")
         serializer = PartnerAssignedQuoteCreateSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -1441,6 +1510,9 @@ class PartnerAssignedRequestQuoteCreateView(ManagerCapablePartnerQuoteView):
                 shop=serializer.validated_data["shop"],
                 pricing_snapshot=serializer.validated_data["pricing_snapshot"],
                 partner_markup=serializer.validated_data["partner_markup"],
+                "status": payload.get("status", ""),
+                "claim_url": payload.get("claim_url"),
+                "claim_token": payload.get("claim_token"),
                 note=str(request.data.get("note") or "").strip(),
             )
         except ValueError as exc:
@@ -1826,7 +1898,8 @@ class PartnerClientListView(BaseRoleDetailView):
 
     def get(self, request):
         search = str(request.query_params.get("search") or request.query_params.get("q") or "").strip().lower()
-        rows = self._client_rows_from_quote_history(request)
+        rows = self._pending_invite_rows(request)
+        rows.extend(self._client_rows_from_quote_history(request))
         User = get_user_model()
         user_queryset = User.objects.filter(role=User.Role.CLIENT)
         if search:
@@ -1856,6 +1929,37 @@ class PartnerClientListView(BaseRoleDetailView):
                 client_name=serializer.validated_data.get("name", ""),
                 client_email=serializer.validated_data.get("email", ""),
                 client_phone=serializer.validated_data.get("phone", ""),
+    def _pending_invite_rows(self, request):
+        from accounts.models import ClientInvite
+
+        rows: list[dict[str, object]] = []
+        invites = (
+            ClientInvite.objects.filter(
+                created_by=request.user,
+                status=ClientInvite.Status.PENDING,
+            )
+            .order_by("-created_at")
+            .distinct()
+        )
+        for invite in invites[:50]:
+            if invite.is_expired:
+                continue
+            client_user = invite.client_user
+            rows.append(
+                _partner_client_payload(
+                    client_user=client_user,
+                    name=invite.name,
+                    phone=invite.phone,
+                    email=invite.email or "",
+                    company=invite.company,
+                    is_new=True,
+                    is_offline=client_user is None,
+                    status="invite_pending" if client_user is None else "linked",
+                    invite=invite if client_user is None else None,
+                )
+            )
+        return rows
+
                 client_company=serializer.validated_data.get("company", ""),
             )
         except ValueError as exc:

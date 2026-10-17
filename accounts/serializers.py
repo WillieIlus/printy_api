@@ -1,6 +1,7 @@
 import logging
 
 from rest_framework import serializers
+from rest_framework.validators import UniqueValidator
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 from rest_framework_simplejwt.settings import api_settings
 
@@ -49,6 +50,7 @@ class UserSerializer(serializers.ModelSerializer):
     """User profile plus persisted dashboard fields."""
 
     is_email_verified = serializers.SerializerMethodField()
+    is_phone_verified = serializers.SerializerMethodField()
     capabilities = serializers.SerializerMethodField()
     shop_name = serializers.SerializerMethodField()
     dashboard_role = serializers.SerializerMethodField()
@@ -63,6 +65,7 @@ class UserSerializer(serializers.ModelSerializer):
     can_access_production_dashboard = serializers.SerializerMethodField()
     bio = serializers.CharField(required=False, allow_blank=True, allow_null=True)
     avatar = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+    email = serializers.EmailField(required=False, allow_blank=True, allow_null=True)
     phone = serializers.CharField(required=False, allow_blank=True, allow_null=True)
     address = serializers.CharField(required=False, allow_blank=True, allow_null=True)
     city = serializers.CharField(required=False, allow_blank=True, allow_null=True)
@@ -95,6 +98,7 @@ class UserSerializer(serializers.ModelSerializer):
             "can_access_production_dashboard",
             "preferred_language",
             "is_email_verified",
+            "is_phone_verified",
             "is_active",
             "is_staff",
             "is_superuser",
@@ -109,17 +113,41 @@ class UserSerializer(serializers.ModelSerializer):
             "country",
             "postal_code",
         ]
-        read_only_fields = ["id", "email", "is_active", "is_staff", "is_superuser", "date_joined", "last_login"]
+        read_only_fields = ["id", "is_active", "is_staff", "is_superuser", "date_joined", "last_login"]
 
     def get_is_email_verified(self, instance):
         from allauth.account.models import EmailAddress
 
+        if not instance.email:
+            return False
         return EmailAddress.objects.filter(
             user=instance,
             email__iexact=instance.email,
             primary=True,
             verified=True,
         ).exists()
+
+    def get_is_phone_verified(self, instance):
+        profile = get_or_create_profile(instance)
+        return bool(profile.phone and profile.phone_verified_at)
+
+    def validate_email(self, value):
+        """Email is optional and can only be added while the account has none.
+
+        An account created phone-first (manager-assisted onboarding) starts
+        without an email. It may set one later; an account that already has an
+        email can never have it changed through this endpoint.
+        """
+        value = (value or "").strip().lower()
+        if not value:
+            return None
+        if self.instance is not None and self.instance.email:
+            if value != self.instance.email.lower():
+                raise serializers.ValidationError(
+                    "Email cannot be changed once set. Contact support for help."
+                )
+            return self.instance.email
+        return value
 
     def get_capabilities(self, instance):
         return get_account_capabilities(instance)
@@ -187,6 +215,11 @@ class UserSerializer(serializers.ModelSerializer):
         return normalized
 
     def update(self, instance, validated_data):
+        new_email = validated_data.pop("email", serializers.empty)
+        if new_email is not serializers.empty and new_email and not instance.email:
+            instance.email = new_email
+            instance.save(update_fields=["email", "updated_at"])
+            self._provision_email_address(instance, new_email)
         next_role = validated_data.pop("role", None)
         profile_data = {
             field: validated_data.pop(field)
@@ -216,11 +249,42 @@ class UserSerializer(serializers.ModelSerializer):
 
         return instance
 
+    def _provision_email_address(self, instance, email: str) -> None:
+        """Attach an email to a phone-first account and request verification."""
+        from allauth.account.models import EmailAddress
+        from django.conf import settings as django_settings
+
+        email_verification = getattr(django_settings, "ACCOUNT_EMAIL_VERIFICATION", "none")
+        verified = email_verification == "none"
+        email_address, _ = EmailAddress.objects.update_or_create(
+            user=instance,
+            email=email,
+            defaults={"primary": True, "verified": verified},
+        )
+        if not verified:
+            request = self.context.get("request")
+            try:
+                email_address.send_confirmation(request)
+            except Exception:
+                logger.exception(
+                    "add_email_activation_failed user_id=%s",
+                    instance.pk,
+                )
+
 
 class UserCreateSerializer(serializers.ModelSerializer):
     """Serializer for user registration."""
 
     password = serializers.CharField(write_only=True, min_length=8)
+    email = serializers.EmailField(
+        required=True,
+        validators=[
+            UniqueValidator(
+                queryset=User.objects.all(),
+                message="A user with that email already exists.",
+            )
+        ],
+    )
     session_key = serializers.CharField(write_only=True, required=False, allow_blank=True, max_length=64)
     guest_session_key = serializers.CharField(write_only=True, required=False, allow_blank=True, max_length=64)
     guest_draft_id = serializers.IntegerField(write_only=True, required=False, allow_null=True)
@@ -324,9 +388,9 @@ class UserCreateSerializer(serializers.ModelSerializer):
                     user.pk,
                 )
         if phone:
-            profile, _ = UserProfile.objects.get_or_create(user=user)
-            profile.phone = phone
-            profile.save(update_fields=["phone", "updated_at"])
+            from accounts.services.phone import set_profile_phone
+
+            set_profile_phone(user, phone, verified=False)
         self.claimed_guest_draft = None
         if normalized_role == User.Role.CLIENT and session_key:
             from quotes.models import CalculatorDraft, CalculatorDraftContext, CalculatorDraftIntent
@@ -349,7 +413,7 @@ class UserCreateSerializer(serializers.ModelSerializer):
 
 
 class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
-    """Token serializer that accepts email for login (email-based auth)."""
+    """Token serializer that accepts email or a verified phone number."""
 
     @classmethod
     def get_token(cls, user):
@@ -363,25 +427,47 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.fields.pop("username", None)
-        self.fields["email"] = serializers.EmailField(write_only=True, required=True)
+        self.fields["email"] = serializers.EmailField(write_only=True, required=False, allow_blank=True)
+        self.fields["phone"] = serializers.CharField(write_only=True, required=False, allow_blank=True)
+
+    def _authenticate_by_phone(self, phone: str, password: str):
+        from accounts.services.phone import normalize_phone
+
+        normalized = normalize_phone(phone)
+        if not normalized:
+            raise serializers.ValidationError({"phone": "Enter a valid phone number."})
+        profile = (
+            UserProfile.objects.select_related("user")
+            .filter(phone_normalized=normalized, phone_verified_at__isnull=False)
+            .first()
+        )
+        if profile is None or not profile.user.check_password(password):
+            return None
+        return profile.user
 
     def validate(self, attrs):
-        email = attrs.get("email", "").strip()
+        email = (attrs.get("email") or "").strip()
+        phone = (attrs.get("phone") or "").strip()
         password = attrs.get("password")
 
-        if not email:
-            raise serializers.ValidationError({"email": "Email is required."})
+        if not email and not phone:
+            raise serializers.ValidationError(
+                {"detail": "Provide an email or a verified phone number."}
+            )
 
         from django.contrib.auth import authenticate
 
         request = self.context.get("request")
-        self.user = authenticate(
-            request=request, username=email, password=password
-        )
-        if self.user is None:
-            self.user = User.objects.filter(email=email).first()
-            if self.user and not self.user.check_password(password):
-                self.user = None
+        if email:
+            self.user = authenticate(
+                request=request, username=email, password=password
+            )
+            if self.user is None:
+                self.user = User.objects.filter(email=email).first()
+                if self.user and not self.user.check_password(password):
+                    self.user = None
+        else:
+            self.user = self._authenticate_by_phone(phone, password)
 
         if not api_settings.USER_AUTHENTICATION_RULE(self.user):
             raise serializers.ValidationError(

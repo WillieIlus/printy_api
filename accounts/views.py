@@ -96,6 +96,63 @@ class CustomTokenObtainPairView(TokenObtainPairView):
     permission_classes = [AllowAny]
 
 
+class ClientInviteClaimView(APIView):
+    """Claim a manager-created, phone-first client invite.
+
+    The client (who may have no email) sets their own password here. The
+    manager who created the invite never sets or receives the password, so this
+    never links or takes over an existing account.
+    """
+
+    permission_classes = [AllowAny]
+    authentication_classes = []
+
+    def post(self, request):
+        from accounts.serializers import UserSerializer
+        from accounts.services.client_invites import claim_client_invite
+
+        token = str(request.data.get("token") or request.data.get("claim_token") or "").strip()
+        password = str(request.data.get("password") or "")
+        name = str(request.data.get("name") or "").strip()
+
+        if not token:
+            return Response(
+                {"detail": "A claim token is required.", "code": "TOKEN_REQUIRED"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            invite, user = claim_client_invite(token=token, password=password, name=name)
+        except ValueError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+        logger.info(
+            "client_invite_claimed invite_id=%s user_id=%s phone=%s",
+            invite.pk,
+            user.pk,
+            _mask_phone(invite.phone_normalized),
+        )
+
+        refresh = RefreshToken.for_user(user)
+        return Response(
+            {
+                "detail": "Welcome to Printy. Your account is ready.",
+                "access": str(refresh.access_token),
+                "refresh": str(refresh),
+                "user": UserSerializer(user, context={"request": request}).data,
+                "client_invite_id": invite.id,
+            },
+            status=status.HTTP_201_CREATED,
+        )
+
+
+def _mask_phone(phone: str) -> str:
+    digits = str(phone or "")
+    if len(digits) < 4:
+        return "***"
+    return f"{digits[:5]}***{digits[-2:]}"
+
+
 class UserDetailView(generics.RetrieveUpdateAPIView):
     """Current user profile."""
 
