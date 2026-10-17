@@ -21,8 +21,16 @@ COMPLETION_STAGE = "completion"
 _ACTUAL_INPUT_FIELDS = (
     "actual_production_cost",
     "actual_client_total",
+    "material_cost",
+    "material_quantity",
+    "finishing_cost",
+    "delivery_cost",
+    "quantity_produced",
+    "quantity_delivered",
     "billable_sheets",
     "spoilage_sheets",
+    "reprints",
+    "turnaround_hours",
     "delivered_at",
     "notes",
 )
@@ -39,6 +47,15 @@ def _money(value: Any) -> str | None:
         return str(Decimal(str(value)).quantize(Decimal("0.01")))
     except (InvalidOperation, ValueError, TypeError):
         raise ValidationError(f"{value!r} is not a valid money amount.")
+
+
+def _decimal_or_none(value: Any, field: str) -> str | None:
+    if value is None or value == "":
+        return None
+    try:
+        return str(Decimal(str(value)))
+    except (InvalidOperation, ValueError, TypeError):
+        raise ValidationError(f"{field} must be a number.")
 
 
 def _int_or_none(value: Any, field: str) -> int | None:
@@ -78,18 +95,40 @@ def record_completion_actuals(
     recorded_by=None,
     actual_production_cost: Any = None,
     actual_client_total: Any = None,
+    material_cost: Any = None,
+    material_quantity: Any = None,
+    material_unit: str = "",
+    finishing_cost: Any = None,
+    delivery_cost: Any = None,
+    quantity_produced: Any = None,
+    quantity_delivered: Any = None,
     billable_sheets: Any = None,
     spoilage_sheets: Any = None,
+    reprints: Any = None,
+    turnaround_hours: Any = None,
     stage_durations: dict | None = None,
     delivered_at=None,
     notes: str = "",
 ) -> JobEvent:
-    """Append a completion-actuals event. Never fabricates; requires real data."""
+    """Append a completion-actuals event. Never fabricates; requires real data.
+
+    Every figure is optional and stays ``null`` when unknown. A caller that
+    supplies nothing real gets a ``ValidationError`` rather than a row of
+    misleading zeros.
+    """
     values = {
         "actual_production_cost": actual_production_cost,
         "actual_client_total": actual_client_total,
+        "material_cost": material_cost,
+        "material_quantity": material_quantity,
+        "finishing_cost": finishing_cost,
+        "delivery_cost": delivery_cost,
+        "quantity_produced": quantity_produced,
+        "quantity_delivered": quantity_delivered,
         "billable_sheets": billable_sheets,
         "spoilage_sheets": spoilage_sheets,
+        "reprints": reprints,
+        "turnaround_hours": turnaround_hours,
         "delivered_at": delivered_at,
         "notes": notes,
     }
@@ -107,11 +146,21 @@ def record_completion_actuals(
     metadata = {
         "actual_production_cost": actual_production,
         "actual_client_total": actual_client,
+        "material_cost": _money(material_cost),
+        "material_quantity": _decimal_or_none(material_quantity, "material_quantity"),
+        "material_unit": (material_unit or "").strip() or None,
+        "finishing_cost": _money(finishing_cost),
+        "delivery_cost": _money(delivery_cost),
+        "quantity_produced": _int_or_none(quantity_produced, "quantity_produced"),
+        "quantity_delivered": _int_or_none(quantity_delivered, "quantity_delivered"),
         "billable_sheets": _int_or_none(billable_sheets, "billable_sheets"),
         "spoilage_sheets": _int_or_none(spoilage_sheets, "spoilage_sheets"),
+        "reprints": _int_or_none(reprints, "reprints"),
+        "turnaround_hours": _int_or_none(turnaround_hours, "turnaround_hours"),
         "stage_durations": _as_dict(stage_durations),
         "delivered_at": delivered_at.isoformat() if hasattr(delivered_at, "isoformat") else delivered_at,
         "notes": notes or "",
+        "production_shop_id": managed_job.assigned_shop_id,
         "estimate": estimate,
         "variance": {
             "production_cost": _variance(actual_production, estimate["production_cost"]),

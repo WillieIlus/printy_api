@@ -515,6 +515,9 @@ MPESA_TRANSACTION_DESC_DEFAULT = _get_env(
     default="Printy Order",
 )
 QUOTE_EXPIRY_HOURS = int(_get_env("QUOTE_EXPIRY_HOURS", default="48"))
+# Minimum completed/decided records before an internal production metric is
+# exposed as a value (law: never present weak samples as reliable).
+PRODUCTION_ANALYTICS_MIN_SAMPLE = int(_get_env("PRODUCTION_ANALYTICS_MIN_SAMPLE", default="5"))
 PARTNER_MARKUP_WARNING = Decimal(str(_get_env("PARTNER_MARKUP_WARNING", default="1.00")))
 PRINTY_MANAGER_USER_ID = _get_env_int("PRINTY_MANAGER_USER_ID")
 

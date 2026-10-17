@@ -40,6 +40,7 @@ from jobs.views import (
     PublicJobView,
     ShopAssignmentListView,
 )
+from jobs.analytics_views import ProductionAnalyticsView
 from notifications.views import NotificationViewSet
 
 # Public router (no auth required for read)
@@ -134,6 +135,7 @@ urlpatterns = [
     path("dashboard/shop-home/", workflow_views.ShopHomeDashboardView.as_view(), name="dashboard-shop-home"),
     path("dashboard/counts/", dashboard_views.DashboardCountsView.as_view(), name="dashboard-counts"),
     path("dashboard/admin/", dashboard_views.AdminDashboardHomeView.as_view(), name="dashboard-admin-home"),
+    path("dashboard/internal/production-analytics/", ProductionAnalyticsView.as_view(), name="dashboard-internal-production-analytics"),
     path(
         "dashboard/admin/brokers/<int:user_id>/active/",
         account_admin_views.BrokerProfileActiveToggleView.as_view(),
