@@ -15,6 +15,7 @@ from jobs.views import (
     JobFileApproveView,
     JobFileDownloadView,
     JobFilePrintReadyView,
+    JobTrackView,
     JobFileRejectView,
     JobFileRevisionView,
     JobAssignmentAcceptView,
@@ -239,6 +240,8 @@ urlpatterns = [
     path("", include(seller_router.urls)),
     path("public/managed-jobs/track/<str:token>/", PublicManagedJobTrackingView.as_view(), name="public-managed-job-track"),
     path("managed-jobs/public/<str:token>/", PublicManagedJobTrackingView.as_view(), name="managed-job-public-track"),
+    # Law 7.7 / 10.1: the one track page, resolved by job code (QR-... or MJ-...).
+    path("track/<str:code>/", JobTrackView.as_view(), name="job-track"),
     path("public/job/<str:token>/", PublicJobView.as_view(), name="public-job"),
     path("share/<str:token>/", views.QuoteSharePublicView.as_view(), name="quote-share-public"),
     # Profile (User as Profile)

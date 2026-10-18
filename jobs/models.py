@@ -721,3 +721,54 @@ class JobEvent(models.Model):
 
     def delete(self, *args, **kwargs):  # noqa: D401
         raise ValidationError("Job events cannot be deleted (append-only, law 6.3).")
+
+
+class ViewerItemReadState(models.Model):
+    """Per-viewer read marker for a quote request or a job (law 7.11).
+
+    Read state is per viewer: the same quote/job can be unread for one user and
+    read for another. It is deliberately kept out of the item's own status,
+    section and attention/muted flags -- marking an item read must never change
+    those (law 7.11).
+    """
+
+    ITEM_QUOTE_REQUEST = "quote_request"
+    ITEM_JOB = "job"
+    ITEM_TYPE_CHOICES = [
+        (ITEM_QUOTE_REQUEST, _("Quote request")),
+        (ITEM_JOB, _("Job")),
+    ]
+
+    viewer = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="viewer_item_read_states",
+        verbose_name=_("viewer"),
+    )
+    item_type = models.CharField(
+        max_length=32,
+        choices=ITEM_TYPE_CHOICES,
+        verbose_name=_("item type"),
+        help_text=_("quote_request or job."),
+    )
+    item_id = models.PositiveIntegerField(verbose_name=_("item id"))
+    read_at = models.DateTimeField(null=True, blank=True, verbose_name=_("read at"))
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name=_("created at"))
+    updated_at = models.DateTimeField(auto_now=True, verbose_name=_("updated at"))
+
+    class Meta:
+        verbose_name = _("viewer item read state")
+        verbose_name_plural = _("viewer item read states")
+        constraints = [
+            models.UniqueConstraint(
+                fields=["viewer", "item_type", "item_id"],
+                name="viewer_read_view_type_item_uniq",
+            )
+        ]
+        indexes = [
+            models.Index(fields=["viewer", "item_type"], name="viewer_read_view_type_idx"),
+        ]
+
+    def __str__(self):
+        return f"{self.item_type}:{self.item_id} read={'yes' if self.read_at else 'no'} by {self.viewer_id}"
+

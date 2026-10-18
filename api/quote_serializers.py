@@ -412,17 +412,11 @@ class QuoteRequestCustomerCreateSerializer(serializers.ModelSerializer):
             "notes",
             "delivery_preference",
             "delivery_address",
-            "delivery_location",
         ]
 
     def validate_shop(self, value):
         if not value or not value.is_active:
             raise serializers.ValidationError("Shop must be active.")
-        return value
-
-    def validate_delivery_location(self, value):
-        if value and not self.initial_data.get("delivery_preference") == QuoteRequest.DELIVERY:
-            return value  # Location optional when pickup
         return value
 
     def create(self, validated_data):
@@ -443,7 +437,6 @@ class QuoteRequestCustomerUpdateSerializer(serializers.ModelSerializer):
             "notes",
             "delivery_preference",
             "delivery_address",
-            "delivery_location",
         ]
 
     def validate(self, attrs):

@@ -1,5 +1,7 @@
 from rest_framework import serializers
 
+from payments.states import payment_state_for_status, payment_state_label
+
 
 def _money(value):
     return str(value) if value is not None else None
@@ -7,9 +9,13 @@ def _money(value):
 
 class PaymentClientSerializer(serializers.Serializer):
     def to_representation(self, instance):
+        state = payment_state_for_status(instance.status)
         return {
             "id": instance.id,
             "status": instance.status,
+            "state": state,
+            "state_label": payment_state_label(state),
+            "is_paid": instance.status == instance.STATUS_PAID,
             "amount": _money(instance.amount),
             "currency": instance.currency,
             "provider": instance.provider,

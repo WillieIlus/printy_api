@@ -7,12 +7,55 @@ visible only to verified printing managers and shop staff.
 """
 from rest_framework.permissions import BasePermission, SAFE_METHODS
 
-from accounts.services.roles import has_role
+from accounts.services.roles import (
+    CANONICAL_CLIENT_ROLE,
+    ActiveRoleNotHeld,
+    get_request_active_role_raw,
+    has_role,
+    validate_active_role,
+)
 from shops.models import Shop
 
 
 def _is_staff(user):
     return bool(user and getattr(user, "is_authenticated", False) and (user.is_staff or user.is_superuser))
+
+
+class IsBuyerActor(BasePermission):
+    """Buyer-only gate (law 9.2 + law 9.3).
+
+    Only an authenticated account whose validated active role is ``client``
+    (buyer) may proceed. The active role is validated against the roles the
+    account actually holds, so a multi-role account acting as a manager or
+    printer is refused with a clear 403.
+
+    Subclass :class:`IsBuyerActorOrGuest` for guest endpoints that stay open to
+    anonymous visitors while still refusing signed-in non-buyers.
+    """
+
+    message = "Only buyer accounts can perform this action."
+    allow_anonymous = False
+
+    def has_permission(self, request, view):
+        user = getattr(request, "user", None)
+        if not user or not getattr(user, "is_authenticated", False):
+            return bool(self.allow_anonymous)
+        requested_role = get_request_active_role_raw(request)
+        try:
+            active_role = validate_active_role(user, requested_role)
+        except ActiveRoleNotHeld as exc:
+            self.message = str(exc)
+            return False
+        if active_role != CANONICAL_CLIENT_ROLE:
+            self.message = "Only buyer accounts can perform this action."
+            return False
+        return True
+
+
+class IsBuyerActorOrGuest(IsBuyerActor):
+    """Buyer-only for signed-in accounts, but anonymous visitors are allowed."""
+
+    allow_anonymous = True
 
 
 class IsSuperUser(BasePermission):

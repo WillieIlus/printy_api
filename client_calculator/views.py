@@ -18,6 +18,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from api.throttling import GuestQuoteRequestThrottle
+from api.permissions import IsBuyerActorOrGuest
 from api.visibility import project_public_marketplace_response
 from quotes.choices import (
     CalculatorDraftContext,
@@ -141,7 +142,7 @@ class ClientCalculatorDraftView(APIView):
     draft after authentication using calculator/drafts/claim/.
     """
 
-    permission_classes = [AllowAny]
+    permission_classes = [IsBuyerActorOrGuest]
     throttle_classes = [GuestQuoteRequestThrottle]
 
     @transaction.atomic

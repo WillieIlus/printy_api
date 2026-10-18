@@ -116,6 +116,7 @@ INSTALLED_APPS = [
     "catalog",
     "quotes",
     "notifications",
+    "clients",
     "api",
     "jobs",
     "production",
@@ -162,6 +163,14 @@ REST_FRAMEWORK = {
         "user": "1000/hour",
         "mpesa_stk_push": "10/min",
         "contact_submit": "20/hour",
+        # Law 7.7: signed-out tracking lookups are limited per client IP and
+        # per looked-up code so the endpoint cannot be used to enumerate codes.
+        "track_lookup_ip": "60/min",
+        "track_lookup_code": "30/min",
+        # Law 10.4/10.6: the public client-link surface is rate-limited.
+        "client_link_view": "60/hour",
+        "client_otp_request": "5/hour",
+        "client_otp_verify": "20/hour",
     },
 }
 
@@ -363,6 +372,18 @@ FRONTEND_URL = os.environ.get("FRONTEND_URL", "http://localhost:3000").rstrip("/
 # Lifetime of a manager-created, phone-first client invite (law-neutral helper
 # for manager-assisted onboarding; the claim link is single-use).
 CLIENT_INVITE_TTL_HOURS = int(os.environ.get("CLIENT_INVITE_TTL_HOURS", "72"))
+
+# Law 10.6: how long a signed single-job client link stays valid.
+LINK_EXPIRY_DAYS = int(os.environ.get("LINK_EXPIRY_DAYS", "30"))
+
+# Law 10.4: one-time-code policy. Codes are stored hashed, expire, are limited
+# in attempts, and resends are throttled.
+OTP_LENGTH = int(os.environ.get("OTP_LENGTH", "6"))
+OTP_TTL_MINUTES = int(os.environ.get("OTP_TTL_MINUTES", "10"))
+OTP_MAX_ATTEMPTS = int(os.environ.get("OTP_MAX_ATTEMPTS", "5"))
+OTP_RESEND_COOLDOWN_SECONDS = int(os.environ.get("OTP_RESEND_COOLDOWN_SECONDS", "60"))
+# Test seam only — never enable in production: echoes the OTP in the API reply.
+CLIENT_OTP_ECHO = os.environ.get("CLIENT_OTP_ECHO", "false").lower() in ("1", "true", "yes")
 
 DIRECT_SHOP_STANDARD_MARKUP_RATE = Decimal(_get_env("DIRECT_SHOP_STANDARD_MARKUP_RATE", default="0.20"))
 

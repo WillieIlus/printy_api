@@ -179,6 +179,19 @@ class MpesaPayment(models.Model):
         return self.status == MpesaPaymentStatus.PAID
 
     @property
+    def state(self) -> str:
+        """Canonical state for buyers/managers (law 10.7). Derived, not stored."""
+        from payments.states import mpesa_state_for_status
+
+        return mpesa_state_for_status(self.status)
+
+    @property
+    def state_label(self) -> str:
+        from payments.states import payment_state_label
+
+        return payment_state_label(self.state)
+
+    @property
     def is_amount_matched(self) -> bool:
         if self.paid_amount is None:
             return False

@@ -30,3 +30,35 @@ class GuestQuoteRequestThrottle(SimpleRateThrottle):
             "scope": self.scope,
             "ident": ident,
         }
+
+
+class TrackLookupIPThrottle(SimpleRateThrottle):
+    """Law 7.7: rate-limit signed-out tracking lookups per client IP."""
+
+    scope = "track_lookup_ip"
+
+    def get_cache_key(self, request, view):
+        ident = f"ip:{self.get_ident(request)}"
+        return self.cache_format % {
+            "scope": self.scope,
+            "ident": ident,
+        }
+
+
+class TrackLookupCodeThrottle(SimpleRateThrottle):
+    """Law 7.7: rate-limit signed-out tracking lookups per looked-up code."""
+
+    scope = "track_lookup_code"
+
+    def get_cache_key(self, request, view):
+        code = ""
+        kwargs = getattr(view, "kwargs", None) or {}
+        if isinstance(kwargs, dict):
+            code = str(kwargs.get("code") or "")
+        if not code:
+            code = str(request.query_params.get("code") or "")
+        ident = f"code:{code.strip().lower()}"
+        return self.cache_format % {
+            "scope": self.scope,
+            "ident": ident,
+        }

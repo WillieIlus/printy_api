@@ -74,6 +74,10 @@ class MpesaPaymentReadSerializer(serializers.ModelSerializer):
     def to_representation(self, instance: MpesaPayment) -> dict:
         data = super().to_representation(instance)
         # The frontend card must distinguish "money moved" from "we asked for money".
+        # `state` is the canonical (law 10.7) vocabulary; `status` stays for
+        # backwards compatibility. Only a verified `paid` maps to PAID.
+        data["state"] = instance.state
+        data["state_label"] = instance.state_label
         data["is_paid"] = instance.is_paid
         data["is_terminal"] = instance.is_terminal
         data["amount_matched"] = instance.is_amount_matched

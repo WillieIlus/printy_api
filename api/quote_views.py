@@ -14,7 +14,7 @@ from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.views import APIView
 
-from .permissions import IsQuoteRequestBuyer, IsQuoteRequestSeller, IsQuoteOwner
+from .permissions import IsBuyerActor, IsQuoteRequestBuyer, IsQuoteRequestSeller, IsQuoteOwner
 from rest_framework.response import Response
 
 from api.services.actor_serializer import select_actor_serializer
@@ -133,7 +133,7 @@ class CustomerQuoteRequestViewSet(viewsets.ModelViewSet):
     POST /quote-requests/{id}/cancel/ — cancel request
     """
 
-    permission_classes = [IsAuthenticated, IsQuoteRequestBuyer]
+    permission_classes = [IsAuthenticated, IsBuyerActor, IsQuoteRequestBuyer]
 
     def get_queryset(self):
         user = self.request.user
@@ -161,10 +161,16 @@ class CustomerQuoteRequestViewSet(viewsets.ModelViewSet):
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         self.perform_create(serializer)
-        return Response(
-            QuoteRequestCustomerDetailSerializer(serializer.instance).data,
-            status=status.HTTP_201_CREATED,
+        read_serializer_class = select_actor_serializer(
+            "quote_request",
+            request.user,
+            default=QuoteRequestCustomerDetailSerializer,
         )
+        read_serializer = read_serializer_class(
+            serializer.instance,
+            context=self.get_serializer_context(),
+        )
+        return Response(read_serializer.data, status=status.HTTP_201_CREATED)
 
     def update(self, request, *args, **kwargs):
         qr = self.get_object()

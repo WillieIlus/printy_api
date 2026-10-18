@@ -31,6 +31,16 @@ from jobs.artwork_workflow import (
     printer_acknowledge_artwork,
     record_artwork_uploaded,
 )
+from api.throttling import TrackLookupCodeThrottle, TrackLookupIPThrottle
+from jobs.job_codes import job_code, job_from_quote_ref, job_tracking_url
+from jobs.timing import stage_timeline, timing_fields
+from services.pricing.role_projection import (
+    ROLE_MANAGER,
+    ROLE_PRINTER,
+    assert_projection_is_clean,
+    project_canonical,
+    projection_role_for_actor,
+)
 from jobs.assignment_services import (
     accept_assignment,
     mark_assignment_finishing,
@@ -55,6 +65,7 @@ from jobs.file_services import (
 from jobs.choices import JobFileStatus, JobFileType
 from jobs.delivery_services import confirm_managed_job_completed, mark_managed_job_delivered
 from jobs.models import JobAssignment, JobFile, ManagedJob
+from payments.states import canonical_job_payment_state
 from jobs.payment_services import (
     initialize_settlement_for_managed_job,
 )
@@ -343,6 +354,164 @@ class PublicManagedJobTrackingView(APIView):
         candidate_digits = {_significant(item) for item in candidates}
         candidate_digits.discard("")
         return bool(provided_digits & candidate_digits)
+
+
+def _significant_phone(value: str) -> str:
+    digits = "".join(character for character in str(value or "") if character.isdigit())
+    return digits[-9:] if len(digits) >= 9 else ""
+
+
+def _phone_matches(provided: str, candidates) -> bool:
+    provided_significant = _significant_phone(provided)
+    if not provided_significant:
+        return False
+    return any(_significant_phone(candidate) == provided_significant for candidate in candidates)
+
+
+class JobTrackView(APIView):
+    """Law 7.7 / 10.1: the single track page, resolved by job code.
+
+    The code is the job's immutable identity: the quote reference (``QR-...``)
+    it was accepted from (law 10.1), falling back to the managed reference. The
+    quote reference and the job code both resolve here to the same item.
+
+    - An authenticated viewer entitled to the job (buyer, manager, printer or
+      admin) gets the law 7.6 stage timeline projected to their role allowlist.
+    - A signed-out (or non-entitled) lookup must supply the phone number on the
+      job and then receives status and dates only.
+    - An unknown code and a missing/wrong phone return the SAME generic error,
+      so the endpoint cannot be used to probe which codes exist.
+    """
+
+    permission_classes = [AllowAny]
+    throttle_classes = [TrackLookupIPThrottle, TrackLookupCodeThrottle]
+
+    _GENERIC_ERROR = _("No job found for that tracking code.")
+
+    def get(self, request, code):
+        managed_job = self._resolve(code)
+        if managed_job is None:
+            return self._generic_error()
+        actor = resolve_actor(getattr(request, "user", None))
+        user = getattr(request, "user", None)
+        entitled = bool(
+            user is not None
+            and getattr(user, "is_authenticated", False)
+            and _can_access_managed_job(user=user, managed_job=managed_job, actor=actor)
+        )
+        if entitled:
+            return Response(self._role_payload(managed_job, actor))
+        if self._phone_matches_request(request, managed_job):
+            return Response(self._signed_out_payload(managed_job))
+        return self._generic_error()
+
+    def _generic_error(self):
+        return Response({"detail": self._GENERIC_ERROR}, status=status.HTTP_404_NOT_FOUND)
+
+    @staticmethod
+    def _queryset():
+        return ManagedJob.objects.select_related(
+            "broker",
+            "broker__profile",
+            "client",
+            "client__profile",
+            "source_quote",
+            "source_quote_request",
+            "assigned_shop",
+        )
+
+    def _resolve(self, code):
+        code = str(code or "").strip()
+        if not code:
+            return None
+        # The managed reference (MJ-...) and the quote reference (QR-...) are
+        # both accepted and resolve to the same job (law 10.1).
+        by_managed = self._queryset().filter(managed_reference__iexact=code).order_by("-id").first()
+        if by_managed is not None:
+            return by_managed
+        by_reference = (
+            self._queryset()
+            .filter(source_quote_request__request_reference__iexact=code)
+            .order_by("-id")
+            .first()
+        )
+        if by_reference is not None:
+            return by_reference
+        # A quote request with no stored reference falls back to QR-<id>.
+        normalized = code.upper()
+        if normalized.startswith("QR-") and normalized[3:].isdigit():
+            return (
+                self._queryset()
+                .filter(source_quote_request_id=int(normalized[3:]))
+                .order_by("-id")
+                .first()
+            )
+        return None
+
+    def _phone_matches_request(self, request, managed_job) -> bool:
+        provided = str(request.query_params.get("phone") or "").strip()
+        if not provided:
+            return False
+        candidates: list[str] = []
+        quote_request = getattr(managed_job, "source_quote_request", None)
+        if quote_request is not None and quote_request.customer_phone:
+            candidates.append(str(quote_request.customer_phone))
+        client = getattr(managed_job, "client", None)
+        profile = getattr(client, "profile", None) if client is not None else None
+        if profile is not None and getattr(profile, "phone", None):
+            candidates.append(str(profile.phone))
+        return _phone_matches(provided, candidates)
+
+    def _role_payload(self, managed_job, actor) -> dict[str, object]:
+        role = projection_role_for_actor(actor)
+        timing = project_canonical(timing_fields(managed_job), role)
+        assert_projection_is_clean(timing, role)
+        events = getattr(managed_job, "job_events", None)
+        event_list = list(events.all()) if events is not None else []
+        payload: dict[str, object] = {
+            "code": job_code(managed_job),
+            "from_quote_ref": job_from_quote_ref(managed_job),
+            "tracking_url": job_tracking_url(managed_job),
+            "job_status": getattr(managed_job, "get_status_display", lambda: managed_job.status)(),
+            "raw_status": managed_job.status,
+            "payment_status": managed_job.payment_status,
+            # Law 10.7: canonical state; "awaiting_confirmation" after an STK
+            # push, "paid" only after a verified confirmation.
+            "payment_state": canonical_job_payment_state(managed_job),
+            # Law 7.6: the stage timeline (owner, SLA, time taken/remaining,
+            # overdue) carries no money for any role.
+            "timeline": stage_timeline(managed_job, events=event_list),
+            "timing": timing,
+        }
+        if role in {ROLE_MANAGER, ROLE_PRINTER}:
+            payload["assigned_shop_name"] = (
+                getattr(managed_job.assigned_shop, "name", "") if managed_job.assigned_shop_id else ""
+            )
+        if role == ROLE_MANAGER:
+            client = getattr(managed_job, "client", None)
+            payload["client_name"] = (
+                getattr(client, "name", "") or getattr(client, "email", "") or "Client"
+            )
+        return payload
+
+    def _signed_out_payload(self, managed_job) -> dict[str, object]:
+        # Law 7.7: signed-out lookups see status and dates only. No timeline, no
+        # owners, no shop identity and no money.
+        return {
+            "code": job_code(managed_job),
+            "job_status": getattr(managed_job, "get_status_display", lambda: managed_job.status)(),
+            "raw_status": managed_job.status,
+            "dates": {
+                "created_at": managed_job.created_at,
+                "accepted_at": managed_job.accepted_at,
+                "payment_confirmed_at": managed_job.payment_confirmed_at,
+                "dispatched_at": getattr(managed_job, "dispatched_at", None),
+                "ready_at": managed_job.ready_at,
+                "delivered_at": managed_job.delivered_at,
+                "completed_at": managed_job.completed_at,
+                "due_date": getattr(managed_job, "due_date", None),
+            },
+        }
 
 
 def _looks_like_uuid(value: str) -> bool:

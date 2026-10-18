@@ -26,6 +26,15 @@ ACTIVE_ROLE_HEADER = "X-Printy-Active-Role"
 ACTIVE_ROLE_META_KEY = "HTTP_X_PRINTY_ACTIVE_ROLE"
 
 
+class ActiveRoleNotHeld(Exception):
+    """Raised when a request names an active role the account does not hold.
+
+    Law 9.3: if an account can hold more than one role, the active role it
+    sends (``X-Printy-Active-Role``) must be one it really holds; the server
+    rejects roles it doesn't hold.
+    """
+
+
 class ActorRole:
     CLIENT = "client"
     BROKER = "broker"
@@ -184,6 +193,50 @@ def get_request_active_role(request) -> str | None:
     if not raw_role:
         raw_role = getattr(request, "META", {}).get(ACTIVE_ROLE_META_KEY)
     return normalize_role_value(raw_role)
+
+
+def get_request_active_role_raw(request) -> str | None:
+    """Return the raw ``X-Printy-Active-Role`` header value, or ``None``.
+
+    Unlike :func:`get_request_active_role`, an unrecognized value is returned
+    unchanged so callers can distinguish "no active role sent" (``None``) from
+    "an invalid active role was sent" (a non-empty string).
+    """
+    if not request:
+        return None
+    raw_role = None
+    headers = getattr(request, "headers", None)
+    if headers is not None:
+        raw_role = headers.get(ACTIVE_ROLE_HEADER)
+    if not raw_role:
+        raw_role = getattr(request, "META", {}).get(ACTIVE_ROLE_META_KEY)
+    if raw_role is None:
+        return None
+    raw_role = str(raw_role).strip()
+    return raw_role or None
+
+
+def validate_active_role(user: User, requested_role: str | None) -> str:
+    """Validate the active role an account claims to be acting as (law 9.3).
+
+    Returns the canonical active role. Raises :class:`ActiveRoleNotHeld` when
+    the value is unrecognized or names a role the account does not hold.
+    ``None``/blank means no active role was sent, so the primary role applies.
+    """
+    roles = resolve_user_roles(user)
+    primary_role = roles[0] if roles else CANONICAL_CLIENT_ROLE
+    if requested_role in (None, ""):
+        return primary_role
+    normalized_role = normalize_role_value(requested_role)
+    if normalized_role is None:
+        raise ActiveRoleNotHeld(
+            f"'{requested_role}' is not a recognized account role."
+        )
+    if normalized_role not in roles:
+        raise ActiveRoleNotHeld(
+            f"This account does not hold the '{normalized_role}' role."
+        )
+    return normalized_role
 
 
 def get_actor_role(user: User, active_role: str | None = None) -> str | None:

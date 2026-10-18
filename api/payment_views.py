@@ -88,6 +88,8 @@ def _serialize_payment(payment: Payment, request) -> dict:
             "amount": str(payment.amount) if payment.amount is not None else None,
             "expected_amount": str(payment.expected_amount) if payment.expected_amount is not None else None,
             "status": payment.status,
+            "state": payment.state,
+            "state_label": payment.state_label,
             "is_paid": payment.status == Payment.STATUS_PAID,
             "is_terminal": payment.status
             in {Payment.STATUS_PAID, Payment.STATUS_FAILED, Payment.STATUS_CANCELLED, Payment.STATUS_EXPIRED},
@@ -657,6 +659,8 @@ class ManagedJobMpesaQueryView(APIView):
                 {
                     "stk_status": stk_request.status,
                     "payment_status": payment.status,
+                    "state": payment.state,
+                    "state_label": payment.state_label,
                     "mpesa_receipt_number": payment.mpesa_receipt_number,
                     "checkout_request_id": stk_request.checkout_request_id,
                 },

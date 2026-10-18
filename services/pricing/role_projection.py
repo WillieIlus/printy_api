@@ -17,6 +17,8 @@ from __future__ import annotations
 
 from typing import Any, Mapping
 
+from services.pricing.breakdown_projection import line_items_from_preview
+
 ROLE_BUYER = "buyer"
 ROLE_MANAGER = "manager"
 ROLE_PRINTER = "printer"
@@ -47,6 +49,7 @@ CANONICAL_FIELDS = (
     "sheets_billed",
     "method",
     "cost_breakdown",
+    "cost_lines",
     "manager_margin",
     "fee_tier",
     "printer_quoted_price",
@@ -149,6 +152,7 @@ _MANAGER_FIELDS = _BUYER_FIELDS | _MANAGER_TIMING_FIELDS | frozenset(
         "sheets_billed",
         "method",
         "cost_breakdown",
+        "cost_lines",
         "manager_margin",
         "fee_tier",
         "printer_quoted_price",
@@ -220,6 +224,7 @@ BUYER_FORBIDDEN_FIELDS = frozenset(
         "sheets_billed",
         "method",
         "cost_breakdown",
+        "cost_lines",
         "manager_margin",
         "fee_tier",
         "printer_quoted_price",
@@ -322,6 +327,21 @@ def _build_cost_breakdown(payload: Mapping[str, Any]) -> dict[str, Any] | None:
     return {key: value for key, value in cost.items() if value is not None} or None
 
 
+def _build_cost_lines(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Law 7.4a: itemized engine cost lines (label, quantity, unit rate, amount).
+
+    Built from the one engine's cost components so the manager's printer option
+    shows sheets (size/gsm/sides/finish), lamination, cutting and any other
+    finishing, and the lines sum to the printer's quoted price.
+    """
+    preview = dict(payload)
+    breakdown = payload.get("breakdown")
+    if isinstance(breakdown, Mapping) and "breakdown" not in preview:
+        preview["breakdown"] = breakdown
+    lines = line_items_from_preview(preview)
+    return lines or None
+
+
 def _build_method(payload: Mapping[str, Any]) -> Any:
     breakdown = payload.get("breakdown") or {}
     if not isinstance(breakdown, Mapping):
@@ -389,6 +409,8 @@ def build_canonical_result(
         "sheets_billed": payload.get("billable_sheets"),
         "method": _build_method(payload),
         "cost_breakdown": _build_cost_breakdown(payload),
+        # Law 7.4a: itemized cost lines, exposed to the manager projection only.
+        "cost_lines": _build_cost_lines(payload),
         "manager_margin": _first(
             financials.get("manager_margin"),
             financials.get("markup_amount"),

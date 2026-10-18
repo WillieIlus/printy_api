@@ -16,6 +16,7 @@ from api.visibility import (
 from jobs.artwork_confirmation import get_artwork_confirmation_payload
 from jobs.artwork_workflow import get_artwork_workflow_payload
 from jobs.file_services import managed_job_has_artwork
+from jobs.job_codes import job_code, job_from_quote_ref, job_tracking_url
 from jobs.models import JobAssignment, JobFile, ManagedJob, JobStatusEvent
 from jobs.workflow import project_workflow_state
 
@@ -41,6 +42,9 @@ def _money(value) -> str | None:
 
 class ManagedJobSerializer(serializers.ModelSerializer):
     job_reference = serializers.CharField(source="managed_reference", read_only=True)
+    code = serializers.SerializerMethodField()
+    from_quote_ref = serializers.SerializerMethodField()
+    tracking_url = serializers.SerializerMethodField()
     quote_request_reference = serializers.SerializerMethodField()
     quote_reference = serializers.SerializerMethodField()
     tracking_reference = serializers.SerializerMethodField()
@@ -58,6 +62,9 @@ class ManagedJobSerializer(serializers.ModelSerializer):
             "id",
             "managed_reference",
             "job_reference",
+            "code",
+            "from_quote_ref",
+            "tracking_url",
             "quote_request_reference",
             "quote_reference",
             "tracking_reference",
@@ -125,6 +132,17 @@ class ManagedJobSerializer(serializers.ModelSerializer):
     def get_tracking_reference(self, obj):
         return obj.managed_reference or str(obj.tracking_token)
 
+    def get_code(self, obj):
+        # Law 10.1: the immutable code is the source quote reference.
+        return job_code(obj)
+
+    def get_from_quote_ref(self, obj):
+        return job_from_quote_ref(obj)
+
+    def get_tracking_url(self, obj):
+        # Law 7.7/10.1: a code-only tracking link (no secret token).
+        return job_tracking_url(obj)
+
     def get_file_count(self, obj):
         return obj.job_files.count()
 
@@ -147,6 +165,7 @@ class ManagedJobSerializer(serializers.ModelSerializer):
 
 class ManagedJobPublicTrackingSerializer(serializers.ModelSerializer):
     tracking_reference = serializers.SerializerMethodField()
+    code = serializers.SerializerMethodField()
     job_status = serializers.SerializerMethodField()
     estimated_ready = serializers.SerializerMethodField()
     next_action = serializers.SerializerMethodField()
@@ -161,6 +180,7 @@ class ManagedJobPublicTrackingSerializer(serializers.ModelSerializer):
         model = ManagedJob
         fields = [
             "tracking_reference",
+            "code",
             "job_status",
             "estimated_ready",
             "next_action",
@@ -174,6 +194,10 @@ class ManagedJobPublicTrackingSerializer(serializers.ModelSerializer):
 
     def get_tracking_reference(self, obj):
         return obj.managed_reference or str(obj.tracking_token)
+
+    def get_code(self, obj):
+        # Law 10.1: the one code, the source quote reference.
+        return job_code(obj)
 
     def get_job_status(self, obj):
         return getattr(obj, "get_status_display", lambda: obj.status)()

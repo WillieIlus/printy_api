@@ -507,14 +507,21 @@ def initiate_stk_push(*, payment: Payment, phone_number: str) -> MpesaSTKRequest
         stk_request.checkout_request_id = checkout_request_id
         stk_request.merchant_request_id = merchant_request_id
         stk_request.response_code = "0"
-        stk_request.response_description = "Success. Request accepted for processing"
+        stk_request.response_description = "SIMULATED STUB (MPESA_FORCE_STUB): no Daraja call was made"
         stk_request.customer_message = "Success. Request accepted for processing"
         stk_request.status = MpesaSTKRequest.STATUS_SENT
+        # The id prefix (TEST-CR-) and the explicit marker below label every
+        # stub row, so an operator can always tell a simulated push from a real
+        # one. A successful push here still means "awaiting confirmation": the
+        # payment is only marked paid by a verified callback.
         stk_request.raw_response = {
             "CheckoutRequestID": checkout_request_id,
             "MerchantRequestID": merchant_request_id,
             "ResponseCode": "0",
             "ResponseDescription": stk_request.response_description,
+            "Simulated": True,
+            "SimulationSource": "payments.services.initiate_stk_push",
+            "SimulationReason": "MPESA_FORCE_STUB stub mode",
         }
         stk_request.save(
             update_fields=[

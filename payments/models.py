@@ -81,6 +81,19 @@ class Payment(TimeStampedModel):
     def __str__(self):
         return f"Payment #{self.id or 'new'} {self.amount} {self.currency}"
 
+    @property
+    def state(self) -> str:
+        """Canonical state for buyers/managers (law 10.7). Derived, not stored."""
+        from payments.states import payment_state_for
+
+        return payment_state_for(self)
+
+    @property
+    def state_label(self) -> str:
+        from payments.states import payment_state_label
+
+        return payment_state_label(self.state)
+
 
 class MpesaSTKRequest(TimeStampedModel):
     """Disabled canonical placeholder for future STK lifecycle tracking."""

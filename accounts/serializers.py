@@ -392,7 +392,7 @@ class UserCreateSerializer(serializers.ModelSerializer):
 
             set_profile_phone(user, phone, verified=False)
         self.claimed_guest_draft = None
-        if normalized_role == User.Role.CLIENT and session_key:
+        if session_key:
             from quotes.models import CalculatorDraft, CalculatorDraftContext, CalculatorDraftIntent
 
             drafts = CalculatorDraft.objects.filter(
@@ -401,14 +401,20 @@ class UserCreateSerializer(serializers.ModelSerializer):
             ).order_by("-updated_at", "-created_at")
             if guest_draft_id:
                 drafts = drafts.filter(pk=guest_draft_id)
-            draft = drafts.first()
-            if draft is not None:
-                draft.user = user
-                draft.guest_session_key = ""
-                draft.calculator_context = CalculatorDraftContext.CLIENT_DASHBOARD
-                draft.intent = CalculatorDraftIntent.SAVE_DRAFT
-                draft.save(update_fields=["user", "guest_session_key", "calculator_context", "intent", "updated_at"])
-                self.claimed_guest_draft = draft
+            if normalized_role == User.Role.CLIENT:
+                draft = drafts.first()
+                if draft is not None:
+                    draft.user = user
+                    draft.guest_session_key = ""
+                    draft.calculator_context = CalculatorDraftContext.CLIENT_DASHBOARD
+                    draft.intent = CalculatorDraftIntent.SAVE_DRAFT
+                    draft.save(update_fields=["user", "guest_session_key", "calculator_context", "intent", "updated_at"])
+                    self.claimed_guest_draft = draft
+            else:
+                # Law 9.4: guest drafts and the guest manager selections they
+                # carry are claimed only into buyer accounts. A manager or
+                # printer sign-up ignores and clears them.
+                drafts.delete()
         return user
 
 

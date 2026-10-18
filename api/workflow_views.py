@@ -14,11 +14,19 @@ from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from .permissions import IsBuyerActor, IsBuyerActorOrGuest
+
 from accounts.models import User, UserProfile
 from accounts.services.capabilities import has_capability
 from accounts.services.roles import CANONICAL_PARTNER_ROLE, get_actor_role, is_client, is_shop_owner, resolve_user_roles
 from accounts.services.system_accounts import ensure_printy_manager_user, get_printy_manager_user, is_system_account
 from jobs.listing import order_quotes, quote_flags
+from jobs.read_state import (
+    QUOTE_REQUEST as READ_STATE_QUOTE_REQUEST,
+    mark_read,
+    read_fields,
+    read_map,
+)
 from .visibility import (
     CLIENT_ACTOR,
     TOPOLOGY_MANAGED,
@@ -1136,7 +1144,7 @@ def _claim_guest_draft_to_user(*, session_key: str, user):
 
 
 class GuestCalculatorDraftUpsertView(APIView):
-    permission_classes = [AllowAny]
+    permission_classes = [IsBuyerActorOrGuest]
 
     def post(self, request):
         serializer = GuestCalculatorDraftSerializer(data=request.data)
@@ -1172,7 +1180,7 @@ class GuestCalculatorDraftUpsertView(APIView):
 
 
 class GuestCalculatorDraftClaimView(APIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, IsBuyerActor]
 
     def post(self, request):
         if not is_client(request.user):
@@ -1233,7 +1241,7 @@ class GuestArtworkUploadPreviewView(APIView):
 
 
 class CalculatorDraftListCreateView(generics.ListCreateAPIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, IsBuyerActor]
     serializer_class = CalculatorDraftReadSerializer
 
     def get_queryset(self):
@@ -1306,7 +1314,7 @@ class CalculatorDraftDetailView(generics.RetrieveAPIView):
 
 
 class CalculatorDraftSendView(APIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, IsBuyerActor]
 
     def post(self, request, pk):
         actor = get_actor_role(request.user)
@@ -1347,7 +1355,7 @@ class CalculatorDraftSendView(APIView):
 
 
 class DirectShopDraftSubmitView(APIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, IsBuyerActor]
 
     def post(self, request, pk):
         if not is_client(request.user):
@@ -1423,7 +1431,7 @@ class PublicRecommendedPrintManagerListView(APIView):
 
 
 class IntakeSubmitView(APIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, IsBuyerActor]
 
     def post(self, request):
         if not is_client(request.user):
@@ -1662,7 +1670,13 @@ class BuyerQuotesListView(APIView):
             for draft in drafts
         ]
         request_items = []
-        for qr in requests:
+        request_rows = list(requests)
+        read_states = read_map(
+            viewer=request.user,
+            item_type=READ_STATE_QUOTE_REQUEST,
+            item_ids=[qr.id for qr in request_rows],
+        )
+        for qr in request_rows:
             serialized = QuoteRequestReadSerializer(qr, context={"request": request}).data
             latest_response = qr.quotes.exclude(status=QuoteOfferStatus.PENDING).order_by("-created_at", "-id").first()
             request_items.append(
@@ -1674,6 +1688,7 @@ class BuyerQuotesListView(APIView):
                         latest_response_status=getattr(latest_response, "status", ""),
                         viewer_role="client",
                     ),
+                    **read_fields(read_states.get(qr.id)),
                 }
             )
         items = draft_items + request_items
@@ -1903,6 +1918,12 @@ class ClientQuoteRequestDetailView(generics.RetrieveAPIView):
             "attachments", "quotes__shop", "quotes__messages__sender"
         )
 
+    def retrieve(self, request, *args, **kwargs):
+        instance = self.get_object()
+        serializer = self.get_serializer(instance)
+        read_at = mark_read(viewer=request.user, item_type=READ_STATE_QUOTE_REQUEST, item_id=instance.id)
+        return Response({**serializer.data, **read_fields(read_at)})
+
 
 class ClientResponseListView(APIView):
     permission_classes = [IsAuthenticated]
@@ -1920,6 +1941,11 @@ class ClientResponseListView(APIView):
         ).order_by("-updated_at", "-created_at")
         data = ClientResponseListItemSerializer(responses, many=True, context={"request": request}).data
         rows = []
+        read_states = read_map(
+            viewer=request.user,
+            item_type=READ_STATE_QUOTE_REQUEST,
+            item_ids=[response.quote_request_id for response in responses],
+        )
         for response, serialized in zip(responses, data):
             serialized = dict(serialized)
             serialized.update(
@@ -1929,6 +1955,7 @@ class ClientResponseListView(APIView):
                     viewer_role="client",
                 )
             )
+            serialized.update(read_fields(read_states.get(response.quote_request_id)))
             rows.append(serialized)
         return Response(order_quotes(rows))
 

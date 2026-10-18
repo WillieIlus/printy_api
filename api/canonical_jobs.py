@@ -154,6 +154,10 @@ def build_job_engine_payload(job: Any) -> dict[str, Any]:
             "paper": paper,
             "imposition": imposition,
             "printing": printing,
+            # Law 7.4a: keep finishing components so the manager's cost lines
+            # cover lamination, cutting and any other finishing, not just the
+            # sheet and print components.
+            "finishings": breakdown.get("finishings") or [],
         },
         "quantity": quantity,
         "currency": currency,

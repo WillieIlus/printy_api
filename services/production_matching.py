@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from typing import Any
@@ -13,7 +14,10 @@ from django.utils.text import slugify
 from inventory.models import Machine, Paper
 from pricing.models import FinishingRate, PrintingRate
 from pricing.services.platform_fee_policy import calculate_financial_split
-from services.pricing.breakdown_projection import production_breakdown_from_preview
+from services.pricing.breakdown_projection import (
+    line_items_from_preview,
+    production_breakdown_from_preview,
+)
 from services.pricing.engine import calculate_sheet_pricing
 from services.pricing.finishing_normalization import (
     is_empty_finishing,
@@ -22,6 +26,8 @@ from services.pricing.finishing_normalization import (
 )
 from shops.models import Shop
 
+
+logger = logging.getLogger(__name__)
 
 MAX_MANAGER_MATCHES = 25
 SHEET_PRODUCT_TYPES = {
@@ -41,6 +47,24 @@ PRODUCT_REQUIRED_FINISHINGS = {
 
 def _as_dict(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
+
+
+def _option_shop_name(shop: Shop) -> str:
+    """Law 7.4a: a printer option must always carry the shop's own name.
+
+    A blank name is a data error, not something to hide behind an em dash: it
+    is logged (with the shop id) so it can be corrected, and the option falls
+    back to a stable, non-empty label so the row is still identifiable.
+    """
+    name = (getattr(shop, "name", "") or "").strip()
+    if not name:
+        logger.error(
+            "production_matching: shop %s has a blank name; printer option "
+            "would be unnamed (law 7.4a data error).",
+            getattr(shop, "pk", None),
+        )
+        return "Unnamed print partner"
+    return name
 
 
 def _shop_contact(shop: Shop) -> tuple[str, str]:
@@ -338,10 +362,12 @@ def _location_summary(shop: Shop) -> str:
 def _diagnostic_row(*, shop: Shop, payload: dict[str, Any], missing: list[str], available: list[str] | None = None, reason: str = "") -> dict[str, Any]:
     missing = sorted(set(missing), key=missing.index)
     shop_contact, shop_contact_label = _shop_contact(shop)
+    shop_name = _option_shop_name(shop)
     return {
         "shop_id": shop.id,
-        "shop_name": shop.name,
-        "shop_display_name": shop.name,
+        "name": shop_name,
+        "shop_name": shop_name,
+        "shop_display_name": shop_name,
         "shop_slug": shop.slug or "",
         "shop_contact": shop_contact,
         "shop_contact_label": shop_contact_label,
@@ -398,10 +424,13 @@ def _priced_row(*, shop: Shop, payload: dict[str, Any], paper: Paper, machine: M
     printer_quoted_price_per_piece = None
     if subtotal and quantity:
         printer_quoted_price_per_piece = _money(Decimal(str(subtotal)) / Decimal(quantity))
+    shop_name = _option_shop_name(shop)
+    cost_lines = line_items_from_preview(preview)
     return {
         "shop_id": shop.id,
-        "shop_name": shop.name,
-        "shop_display_name": shop.name,
+        "name": shop_name,
+        "shop_name": shop_name,
+        "shop_display_name": shop_name,
         "shop_slug": shop.slug or "",
         "shop_contact": shop_contact,
         "shop_contact_label": shop_contact_label,
@@ -440,6 +469,9 @@ def _priced_row(*, shop: Shop, payload: dict[str, Any], paper: Paper, machine: M
         "product_type": _normal(payload.get("product_type")),
         "preview_snapshot": preview,
         "production_breakdown": production_breakdown_from_preview(preview),
+        # Law 7.4a: itemized cost lines from the one engine's cost components
+        # (sheets, printing, lamination/cutting/finishing). Manager-only.
+        "cost_lines": cost_lines,
         "selection": selection,
     }
 
@@ -504,12 +536,15 @@ def _pricing_snapshot(rows: list[dict[str, Any]], *, currency: str) -> dict[str,
                 "id": row["shop_id"],
                 "slug": row.get("shop_slug") or "",
                 "shop_id": row["shop_id"],
-                "shop_display_name": row.get("shop_display_name") or row.get("shop_name"),
+                "name": row.get("name") or row.get("shop_name") or row.get("shop_display_name"),
+                "shop_name": row.get("shop_name") or row.get("name") or row.get("shop_display_name"),
+                "shop_display_name": row.get("shop_display_name") or row.get("shop_name") or row.get("name"),
                 "can_produce": row.get("can_produce"),
                 "price_available": row.get("price_available"),
                 "price_status": row.get("price_status"),
                 "production_cost": row.get("production_cost"),
                 "preview": row.get("preview_snapshot"),
+                "cost_lines": row.get("cost_lines"),
                 "selection": row.get("selection"),
             }
         )

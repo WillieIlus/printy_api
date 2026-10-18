@@ -51,7 +51,15 @@ from quotes.partner_services import respond_to_assigned_quote_request
 from quotes.services_workflow import update_quote_response
 from services.production_matching import build_partner_production_matches
 from jobs.timing import timing_fields
+from jobs.job_codes import job_code, job_from_quote_ref, job_tracking_url, tracking_url
 from jobs.listing import job_flags, order_jobs, order_quotes, quote_flags
+from jobs.read_state import (
+    JOB as READ_STATE_JOB,
+    QUOTE_REQUEST as READ_STATE_QUOTE_REQUEST,
+    mark_read,
+    read_fields,
+    read_map,
+)
 from services.pricing.role_projection import ROLE_MANAGER, project_canonical, projection_role_for_actor
 from .canonical_jobs import build_job_projection, current_job_override_state, preview_job_override
 from services.pricing.breakdown_projection import production_breakdown_from_preview
@@ -109,6 +117,8 @@ def _partner_client_payload(
     company: str = "",
     is_new: bool = False,
     is_offline: bool = False,
+    status: str = "",
+    invite=None,
 ) -> dict[str, object]:
     display_name = name or getattr(client_user, "name", "") or getattr(client_user, "email", "") or phone or "Client"
     client_email = email or getattr(client_user, "email", "") or ""
@@ -119,8 +129,6 @@ def _partner_client_payload(
     payload = {
         "id": getattr(client_user, "id", None),
         "client_id": getattr(client_user, "id", None),
-    status: str = "",
-    invite=None,
         "name": display_name,
         "phone": client_phone,
         "email": client_email,
@@ -128,13 +136,6 @@ def _partner_client_payload(
         "is_new": is_new,
         "is_offline": is_offline,
     }
-
-def _normalize_phone(value: str) -> str:
-    return str(value or "").strip()
-
-
-def _fallback_partner_client_email(*, partner_id: int, phone: str) -> str:
-    digits = "".join(character for character in phone if character.isdigit()) or f"partner{partner_id}"
     if status:
         payload["status"] = status
     if invite is not None:
@@ -145,6 +146,13 @@ def _fallback_partner_client_email(*, partner_id: int, phone: str) -> str:
         payload["claim_url"] = build_invite_claim_url(invite)
         payload["expires_at"] = invite.expires_at.isoformat() if invite.expires_at else None
     return payload
+
+def _normalize_phone(value: str) -> str:
+    return str(value or "").strip()
+
+
+def _fallback_partner_client_email(*, partner_id: int, phone: str) -> str:
+    digits = "".join(character for character in phone if character.isdigit()) or f"partner{partner_id}"
     return f"partner-client-{partner_id}-{digits}@printy.local"
 
 
@@ -209,13 +217,6 @@ def _resolve_or_create_partner_client(
     client_phone: str = "",
     client_company: str = "",
 ):
-    User = get_user_model()
-    name = str(client_name or "").strip()
-    phone = str(client_phone or "").strip()
-    email = str(client_email or "").strip().lower()
-    company = str(client_company or "").strip()
-
-    resolved_user = client_user
     """Resolve a client for a manager, or create a phone-first invite.
 
     Resolution order: explicit client account, then email, then a verified
@@ -226,6 +227,13 @@ def _resolve_or_create_partner_client(
     """
     from accounts.services.client_invites import create_client_invite
 
+    User = get_user_model()
+    name = str(client_name or "").strip()
+    phone = str(client_phone or "").strip()
+    email = str(client_email or "").strip().lower()
+    company = str(client_company or "").strip()
+
+    resolved_user = client_user
     if resolved_user is None and email:
         resolved_user = User.objects.filter(email__iexact=email).first()
 
@@ -240,13 +248,6 @@ def _resolve_or_create_partner_client(
             company=company,
             is_new=False,
             is_offline=False,
-        )
-
-    return _partner_client_payload(
-        client_user=None,
-        name=name,
-        phone=phone,
-        email=email,
             status="linked",
         )
 
@@ -279,9 +280,17 @@ def _resolve_or_create_partner_client(
             is_offline=True,
             status="invite_pending",
             invite=invite,
+        )
+
+    return _partner_client_payload(
+        client_user=None,
+        name=name,
+        phone=phone,
+        email=email,
         company=company,
         is_new=True,
         is_offline=True,
+        status="offline_no_phone",
     )
 
 def _partner_client_row(record) -> dict[str, object]:
@@ -289,7 +298,6 @@ def _partner_client_row(record) -> dict[str, object]:
     return {
         "id": record.id,
         "client_id": record.client_user_id,
-        status="offline_no_phone",
         "name": record.name or getattr(client_user, "name", "") or getattr(client_user, "email", "") or "Client",
         "phone": record.phone or getattr(client_user, "username", "") or "",
         "email": record.email or getattr(client_user, "email", "") or "",
@@ -913,7 +921,7 @@ class BaseRoleDetailView(BaseDashboardHomeView):
             "public_token": None,
         }
 
-    def _quote_row(self, quote_request: QuoteRequest, *, request=None) -> dict[str, object]:
+    def _quote_row(self, quote_request: QuoteRequest, *, request=None, viewer_read_at=None) -> dict[str, object]:
         serialized = QuoteRequestReadSerializer(quote_request, context={"request": request}).data
         latest_response = quote_request.quotes.exclude(status=Quote.PENDING).select_related("financial_split").order_by("-created_at", "-id").first()
         latest_response_payload = serialized.get("latest_response")
@@ -931,6 +939,8 @@ class BaseRoleDetailView(BaseDashboardHomeView):
         row = {
             "id": quote_request.id,
             "reference": _quote_request_reference(quote_request),
+            "code": _quote_request_reference(quote_request),
+            "tracking_url": tracking_url(_quote_request_reference(quote_request)),
             "quote_request_reference": _quote_request_reference(quote_request),
             "quote_reference": _quote_reference(latest_response),
             "product": _quote_product_label(quote_request, latest_response),
@@ -958,11 +968,17 @@ class BaseRoleDetailView(BaseDashboardHomeView):
                     else "client"
                 ),
             ),
+            # Law 7.11: per-viewer read state. Never part of status/section/
+            # needs_attention/muted.
+            **read_fields(viewer_read_at),
         }
         managed_job = quote_request.managed_jobs.order_by("-id").first()
         row["managed_job"] = {
             "id": managed_job.id,
             "job_reference": managed_job.managed_reference,
+            "code": job_code(managed_job),
+            "from_quote_ref": job_from_quote_ref(managed_job),
+            "tracking_url": job_tracking_url(managed_job),
             "quote_request_reference": _quote_request_reference(quote_request),
             "quote_reference": _quote_reference(getattr(managed_job, "source_quote", None)),
             "status": managed_job.status,
@@ -973,7 +989,7 @@ class BaseRoleDetailView(BaseDashboardHomeView):
         } if managed_job else None
         return row
 
-    def _job_row(self, job: ManagedJob, *, role: str) -> dict[str, object]:
+    def _job_row(self, job: ManagedJob, *, role: str, viewer_read_at=None) -> dict[str, object]:
         artwork_state = managed_job_artwork_state(managed_job=job)
         artwork_workflow = get_artwork_workflow_payload(job)
         payment_block_reason = artwork_payment_block_reason(job)
@@ -986,6 +1002,9 @@ class BaseRoleDetailView(BaseDashboardHomeView):
             "id": job.id,
             "reference": job.managed_reference,
             "job_reference": job.managed_reference,
+            "code": job_code(job),
+            "from_quote_ref": job_from_quote_ref(job),
+            "tracking_url": job_tracking_url(job),
             "quote_request_id": job.source_quote_request_id,
             "quote_id": job.source_quote_id,
             "quote_request_reference": _quote_request_reference(getattr(job, "source_quote_request", None)),
@@ -1011,6 +1030,8 @@ class BaseRoleDetailView(BaseDashboardHomeView):
             # Law 7.5: the server decides the section, whether the viewer must
             # act now, and whether the row is a muted (finished/complete) one.
             **job_flags(job=job, role=role),
+            # Law 7.11: per-viewer read state, independent of the flags above.
+            **read_fields(viewer_read_at),
         }
         if role == CANONICAL_CLIENT_ROLE:
             row.update(self._client_tracking_payload(job))
@@ -1036,6 +1057,9 @@ class ClientQuoteListView(BaseRoleDetailView):
             .order_by("-updated_at", "-created_at")
         )
         payload = [self._quote_row(item, request=request) for item in rows]
+        read_states = read_map(viewer=request.user, item_type=READ_STATE_QUOTE_REQUEST, item_ids=[row["id"] for row in payload])
+        for row in payload:
+            row.update(read_fields(read_states.get(row["id"])))
         return Response({"role": "client", "results": order_quotes(payload)})
 
 
@@ -1049,7 +1073,8 @@ class ClientQuoteDetailView(BaseRoleDetailView):
             Q(created_by=request.user) | Q(on_behalf_of=request.user),
             pk=pk,
         )
-        return Response({"role": "client", "quote": ClientQuoteRequestDetailSerializer(quote_request, context={"request": request}).data})
+        read_at = mark_read(viewer=request.user, item_type=READ_STATE_QUOTE_REQUEST, item_id=quote_request.id)
+        return Response({"role": "client", "quote": ClientQuoteRequestDetailSerializer(quote_request, context={"request": request}).data, **read_fields(read_at)})
 
 
 class ClientJobListView(BaseRoleDetailView):
@@ -1059,6 +1084,9 @@ class ClientJobListView(BaseRoleDetailView):
     def get(self, request):
         jobs = ManagedJob.objects.filter(Q(client=request.user) | Q(created_by=request.user)).select_related("assigned_shop").order_by("-updated_at", "-created_at").distinct()
         rows = [self._job_row(job, role=CANONICAL_CLIENT_ROLE) for job in jobs]
+        read_states = read_map(viewer=request.user, item_type=READ_STATE_JOB, item_ids=[row["id"] for row in rows])
+        for row in rows:
+            row.update(read_fields(read_states.get(row["id"])))
         return Response({"role": "client", "results": order_jobs(rows)})
 
 
@@ -1072,11 +1100,13 @@ class ClientJobDetailView(BaseRoleDetailView):
             Q(client=request.user) | Q(created_by=request.user),
             pk=pk,
         )
+        read_at = mark_read(viewer=request.user, item_type=READ_STATE_JOB, item_id=job.id)
         return Response(
             {
                 "role": "client",
-                "job": self._job_row(job, role=CANONICAL_CLIENT_ROLE),
+                "job": self._job_row(job, role=CANONICAL_CLIENT_ROLE, viewer_read_at=read_at),
                 "settlement": None,
+                **read_fields(read_at),
             }
         )
 
@@ -1130,6 +1160,7 @@ class PartnerQuoteListDetailView(ManagerCapablePartnerQuoteView):
             quote_request = get_object_or_404(self.get_queryset(request), pk=pk)
             latest_response = quote_request.quotes.exclude(status=Quote.PENDING).select_related("shop").order_by("-created_at", "-id").first()
             payload = self._quote_row(quote_request, request=request)
+            payload.update(read_fields(mark_read(viewer=request.user, item_type=READ_STATE_QUOTE_REQUEST, item_id=quote_request.id)))
             payload["client_name"] = quote_request.customer_name or getattr(quote_request.on_behalf_of, "name", "") or "Client"
             payload["client_email"] = quote_request.customer_email or getattr(quote_request.on_behalf_of, "email", "")
             payload["client_phone"] = quote_request.customer_phone
@@ -1137,9 +1168,13 @@ class PartnerQuoteListDetailView(ManagerCapablePartnerQuoteView):
             payload["latest_response"] = QuoteResponseReadSerializer(latest_response, context={"request": request}).data if latest_response else None
             managed_job = quote_request.managed_jobs.select_related("assigned_shop").order_by("-id").first()
             if managed_job:
-                payload["managed_job"] = self._job_row(managed_job, role=CANONICAL_PARTNER_ROLE)
+                job_read_at = mark_read(viewer=request.user, item_type=READ_STATE_JOB, item_id=managed_job.id)
+                payload["managed_job"] = self._job_row(managed_job, role=CANONICAL_PARTNER_ROLE, viewer_read_at=job_read_at)
             return Response({"role": "partner", "quote": payload})
         rows = [self._quote_row(item, request=request) for item in self.get_queryset(request)]
+        read_states = read_map(viewer=request.user, item_type=READ_STATE_QUOTE_REQUEST, item_ids=[row["id"] for row in rows])
+        for row in rows:
+            row.update(read_fields(read_states.get(row["id"])))
         return Response({"role": "partner", "results": order_quotes(rows)})
 
 
@@ -1461,6 +1496,10 @@ class PartnerQuoteAttachClientView(BaseRoleDetailView):
         quote_request.customer_name = payload["name"] or quote_request.customer_name
         quote_request.customer_email = payload["email"] or quote_request.customer_email
         quote_request.customer_phone = payload["phone"] or quote_request.customer_phone
+        if payload.get("client_id") and quote_request.on_behalf_of_id is None:
+            # Associating a client with a draft quote is a link, not consent or
+            # acceptance: the quote keeps its current status.
+            quote_request.on_behalf_of_id = payload["client_id"]
         quote_request.request_snapshot = request_snapshot
         quote_request.save(
             update_fields=[
@@ -1480,6 +1519,9 @@ class PartnerQuoteAttachClientView(BaseRoleDetailView):
                 "client_email": payload["email"],
                 "client_phone": payload["phone"],
                 "client_company": payload["company"],
+                "status": payload.get("status", ""),
+                "claim_url": payload.get("claim_url"),
+                "claim_token": payload.get("claim_token"),
             }
         )
 
@@ -1496,10 +1538,6 @@ class PartnerAssignedRequestQuoteCreateView(ManagerCapablePartnerQuoteView):
     def post(self, request, pk):
         quote_request = get_object_or_404(self.get_queryset(request), pk=pk)
         if quote_request.assigned_manager_id != request.user.id:
-        if payload.get("client_id") and quote_request.on_behalf_of_id is None:
-            # Associating a client with a draft quote is a link, not consent or
-            # acceptance: the quote keeps its current status.
-            quote_request.on_behalf_of_id = payload["client_id"]
             raise PermissionDenied("You cannot respond to this quote request.")
         serializer = PartnerAssignedQuoteCreateSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -1510,9 +1548,6 @@ class PartnerAssignedRequestQuoteCreateView(ManagerCapablePartnerQuoteView):
                 shop=serializer.validated_data["shop"],
                 pricing_snapshot=serializer.validated_data["pricing_snapshot"],
                 partner_markup=serializer.validated_data["partner_markup"],
-                "status": payload.get("status", ""),
-                "claim_url": payload.get("claim_url"),
-                "claim_token": payload.get("claim_token"),
                 note=str(request.data.get("note") or "").strip(),
             )
         except ValueError as exc:
@@ -1638,7 +1673,7 @@ class ManagerQuoteRequestPricingPreviewView(PartnerAssignedRequestShopOptionsVie
             item = {
                 "id": row.get("shop_id"),
                 "shop_id": row.get("shop_id"),
-                "name": row.get("shop_name"),
+                "name": row.get("name") or row.get("shop_name") or row.get("shop_display_name"),
                 "location": row.get("shop_location"),
                 "eligible": row.get("price_status") == "priced",
                 "production_cost": row.get("production_cost"),
@@ -1649,6 +1684,8 @@ class ManagerQuoteRequestPricingPreviewView(PartnerAssignedRequestShopOptionsVie
             preview = row.get("preview_snapshot")
             if preview:
                 item.update(production_breakdown_from_preview(preview))
+            if row.get("cost_lines"):
+                item["cost_lines"] = row.get("cost_lines")
             eligible_shops.append(item)
 
         return Response(
@@ -1744,12 +1781,16 @@ class PartnerJobListDetailView(BaseRoleDetailView):
             return Response(
                 {
                     "role": "partner",
-                    "job": self._job_row(job, role=CANONICAL_PARTNER_ROLE),
+                    "job": self._job_row(job, role=CANONICAL_PARTNER_ROLE, viewer_read_at=mark_read(viewer=request.user, item_type=READ_STATE_JOB, item_id=job.id)),
                     "settlement": get_financial_split_for_job(job),
                     "canonical": build_job_projection(job, ROLE_MANAGER),
                 }
             )
-        return Response({"role": "partner", "results": order_jobs([self._job_row(job, role=CANONICAL_PARTNER_ROLE) for job in self.get_queryset(request)])})
+        rows = [self._job_row(job, role=CANONICAL_PARTNER_ROLE) for job in self.get_queryset(request)]
+        read_states = read_map(viewer=request.user, item_type=READ_STATE_JOB, item_ids=[row["id"] for row in rows])
+        for row in rows:
+            row.update(read_fields(read_states.get(row["id"])))
+        return Response({"role": "partner", "results": order_jobs(rows)})
 
 
 class ManagerJobOverrideSerializer(serializers.Serializer):
@@ -1896,39 +1937,6 @@ class PartnerClientListView(BaseRoleDetailView):
             rows.append(row)
         return rows
 
-    def get(self, request):
-        search = str(request.query_params.get("search") or request.query_params.get("q") or "").strip().lower()
-        rows = self._pending_invite_rows(request)
-        rows.extend(self._client_rows_from_quote_history(request))
-        User = get_user_model()
-        user_queryset = User.objects.filter(role=User.Role.CLIENT)
-        if search:
-            user_queryset = user_queryset.filter(
-                Q(name__icontains=search)
-                | Q(email__icontains=search)
-                | Q(username__icontains=search)
-            )
-        for user in user_queryset.order_by("name", "email", "id")[:25]:
-            row = _partner_client_payload(client_user=user)
-            if not any(existing.get("client_id") == row.get("client_id") for existing in rows):
-                rows.append(row)
-        if search:
-            rows = [
-                row for row in rows
-                if search in " ".join(str(row.get(field) or "").lower() for field in ("name", "phone", "email", "company"))
-            ]
-        return Response({"role": "partner", "results": rows[:50]})
-
-    @transaction.atomic
-    def post(self, request):
-        serializer = PartnerClientCreateSerializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
-        try:
-            payload = _resolve_or_create_partner_client(
-                partner_user=request.user,
-                client_name=serializer.validated_data.get("name", ""),
-                client_email=serializer.validated_data.get("email", ""),
-                client_phone=serializer.validated_data.get("phone", ""),
     def _pending_invite_rows(self, request):
         from accounts.models import ClientInvite
 
@@ -1960,6 +1968,44 @@ class PartnerClientListView(BaseRoleDetailView):
             )
         return rows
 
+    def get(self, request):
+        search = str(request.query_params.get("search") or request.query_params.get("q") or "").strip().lower()
+        rows = self._pending_invite_rows(request)
+        rows.extend(self._client_rows_from_quote_history(request))
+        User = get_user_model()
+        # Law 10.5: a manager sees only clients they onboarded or who have jobs
+        # with them — never the whole client base.
+        from clients.services.managed_clients import visible_client_user_ids
+
+        visible_ids = visible_client_user_ids(request.user)
+        user_queryset = User.objects.filter(role=User.Role.CLIENT, id__in=visible_ids)
+        if search:
+            user_queryset = user_queryset.filter(
+                Q(name__icontains=search)
+                | Q(email__icontains=search)
+                | Q(username__icontains=search)
+            )
+        for user in user_queryset.order_by("name", "email", "id")[:25]:
+            row = _partner_client_payload(client_user=user)
+            if not any(existing.get("client_id") == row.get("client_id") for existing in rows):
+                rows.append(row)
+        if search:
+            rows = [
+                row for row in rows
+                if search in " ".join(str(row.get(field) or "").lower() for field in ("name", "phone", "email", "company"))
+            ]
+        return Response({"role": "partner", "results": rows[:50]})
+
+    @transaction.atomic
+    def post(self, request):
+        serializer = PartnerClientCreateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        try:
+            payload = _resolve_or_create_partner_client(
+                partner_user=request.user,
+                client_name=serializer.validated_data.get("name", ""),
+                client_email=serializer.validated_data.get("email", ""),
+                client_phone=serializer.validated_data.get("phone", ""),
                 client_company=serializer.validated_data.get("company", ""),
             )
         except ValueError as exc:
@@ -2049,14 +2095,20 @@ class ProductionJobListDetailView(BaseRoleDetailView):
     def get(self, request, pk=None):
         if pk is not None:
             job = self.get_queryset(request).get(pk=pk)
+            job_read_at = mark_read(viewer=request.user, item_type=READ_STATE_JOB, item_id=job.id)
             return Response(
                 {
                     "role": "production",
-                    "job": self._job_row(job, role=CANONICAL_PRODUCTION_ROLE),
+                    "job": self._job_row(job, role=CANONICAL_PRODUCTION_ROLE, viewer_read_at=job_read_at),
                     "settlement": None,
+                    **read_fields(job_read_at),
                 }
             )
-        return Response({"role": "production", "results": order_jobs([self._job_row(job, role=CANONICAL_PRODUCTION_ROLE) for job in self.get_queryset(request)])})
+        rows = [self._job_row(job, role=CANONICAL_PRODUCTION_ROLE) for job in self.get_queryset(request)]
+        read_states = read_map(viewer=request.user, item_type=READ_STATE_JOB, item_ids=[row["id"] for row in rows])
+        for row in rows:
+            row.update(read_fields(read_states.get(row["id"])))
+        return Response({"role": "production", "results": order_jobs(rows)})
 
 
 class ProductionPricingListView(BaseRoleDetailView):

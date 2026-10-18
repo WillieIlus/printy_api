@@ -74,6 +74,18 @@ class QuoteRequest(TimeStampedModel):
         verbose_name=_("on behalf of"),
         help_text=_("End client this request was created for when a partner submits on their behalf."),
     )
+    created_by_manager = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="quote_requests_created_for_clients",
+        verbose_name=_("created by manager"),
+        help_text=_(
+            "Law 10.5: the manager who created this request on behalf of the "
+            "client. Null for buyer-created requests."
+        ),
+    )
     customer_name = models.CharField(
         max_length=255,
         default="",

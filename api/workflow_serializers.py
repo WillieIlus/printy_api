@@ -310,6 +310,8 @@ class CalculatorConfigPreviewSerializer(serializers.Serializer):
 
 class PartnerProductionMatchResultSerializer(serializers.Serializer):
     shop_id = serializers.IntegerField()
+    # Law 7.4a: the manager's printer option must carry the shop's own name.
+    name = serializers.CharField(required=False, allow_blank=True)
     shop_name = serializers.CharField(required=False, allow_blank=True)
     shop_display_name = serializers.CharField()
     shop_slug = serializers.CharField(required=False, allow_blank=True)
@@ -349,6 +351,8 @@ class PartnerProductionMatchResultSerializer(serializers.Serializer):
     product_type = serializers.CharField()
     preview_snapshot = serializers.JSONField(required=False, allow_null=True)
     production_breakdown = serializers.JSONField(required=False, allow_null=True)
+    # Law 7.4a: itemized cost lines for the manager's printer option, only.
+    cost_lines = serializers.JSONField(required=False, allow_null=True)
     selection = serializers.JSONField(required=False, allow_null=True)
 
     def get_eligible(self, obj) -> bool:
@@ -1741,6 +1745,8 @@ class ClientQuoteRequestDetailSerializer(serializers.ModelSerializer):
     managed_job = serializers.SerializerMethodField()
     tracking_token = serializers.SerializerMethodField()
     public_token = serializers.SerializerMethodField()
+    code = serializers.SerializerMethodField()
+    tracking_url = serializers.SerializerMethodField()
     assigned_manager = serializers.SerializerMethodField()
     manager_selection_mode = serializers.CharField(read_only=True)
     delivery_location = serializers.SerializerMethodField()
@@ -1777,9 +1783,21 @@ class ClientQuoteRequestDetailSerializer(serializers.ModelSerializer):
             "managed_job",
             "tracking_token",
             "public_token",
+            "code",
+            "tracking_url",
             "created_at",
             "updated_at",
         ]
+
+    def get_code(self, obj):
+        from jobs.job_codes import quote_request_code
+
+        return quote_request_code(obj)
+
+    def get_tracking_url(self, obj):
+        from jobs.job_codes import quote_request_code, tracking_url
+
+        return tracking_url(quote_request_code(obj))
 
     def get_status(self, obj):
         return normalize_quote_request_status(obj.status)
