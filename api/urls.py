@@ -44,6 +44,7 @@ from jobs.views import (
 from jobs.analytics_views import ProductionAnalyticsView
 from jobs.completion_actuals_views import JobCompletionActualsView
 from notifications.views import NotificationViewSet
+from api.public_range_views import PublicPriceRangeView
 
 # Public router (no auth required for read)
 public_router = DefaultRouter()
@@ -91,9 +92,11 @@ urlpatterns = [
     path("for-shops/rate-wizard/save-step/", workflow_views.ForShopsRateWizardSaveStepView.as_view(), name="for-shops-rate-wizard-save-step"),
     path("for-shops/rate-wizard/complete/", workflow_views.ForShopsRateWizardCompleteView.as_view(), name="for-shops-rate-wizard-complete"),
     path("shops/rate-card/setup/", workflow_views.ShopMvpRateCardSetupView.as_view(), name="shop-rate-card-setup"),
+    path("shops/rate-card/preview/", workflow_views.ShopMvpRateCardTablePreviewView.as_view(), name="shop-rate-card-table-preview"),
     path("shops/rate-card/onboarding-complete/", workflow_views.ShopMvpRateCardCompleteView.as_view(), name="shop-rate-card-complete"),
     path("calculator/public-preview/", workflow_views.CalculatorConfigPreviewView.as_view(), name="calculator-public-preview"),
     path("public/print-managers/recommended/", workflow_views.PublicRecommendedPrintManagerListView.as_view(), name="public-print-managers-recommended"),
+    path("public/price-range/", PublicPriceRangeView.as_view(), name="public-price-range"),
     path("intake/recommended-managers/", workflow_views.RecommendedPrintManagerListView.as_view(), name="intake-recommended-managers"),
     path("intake/submit/", workflow_views.IntakeSubmitView.as_view(), name="intake-submit"),
     path("calculator/preview/", workflow_views.CalculatorPreviewView.as_view(), name="calculator-preview"),

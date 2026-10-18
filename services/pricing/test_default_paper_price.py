@@ -47,7 +47,10 @@ class DefaultPaperStockPriceTestCase(TestCase):
         )
 
     def test_activated_default_rows_are_priced_at_sra3_default(self):
-        _persist_paper_rows(self.shop, _activated_default_paper_rows())
+        rows = _activated_default_paper_rows()
+        unpriced = next(r for r in rows if r["key"] == "300gsm_matte_art_card")
+        unpriced["paper_base_price"] = "0.00"
+        _persist_paper_rows(self.shop, rows)
 
         paper = Paper.objects.filter(shop=self.shop, gsm=300, category=PaperCategory.ARTCARD).get()
         self.assertEqual(paper.sheet_size, "SRA3")
@@ -62,7 +65,7 @@ class DefaultPaperStockPriceTestCase(TestCase):
             color_mode=ColorMode.COLOR,
         ).first()
         self.assertIsNotNone(sra3_color)
-        self.assertEqual(sra3_color.single_price, Decimal("45.00"))
+        self.assertEqual(sra3_color.single_price, Decimal("15.00"))
 
     def test_explicit_base_price_is_never_overridden(self):
         row = deepcopy(next(r for r in _activated_default_paper_rows() if r["key"] == "300gsm_matte_art_card"))

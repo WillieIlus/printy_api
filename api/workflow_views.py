@@ -80,10 +80,12 @@ from services.pricing.for_shops_wizard import (
     save_step_values,
 )
 from services.pricing.mvp_rate_card import (
+    StaleRateCardVersion,
     build_public_rate_card_builder_config,
     build_shop_rate_card_setup,
     complete_shop_rate_card_setup,
     preview_public_rate_card_builder,
+    preview_shop_rate_card_table,
     save_shop_rate_card_setup,
 )
 from setup.services import SHOP_STATUS_ONLY_FIELDS, get_setup_status_for_shop, get_setup_status_for_user
@@ -113,6 +115,7 @@ from .workflow_serializers import (
     MvpRateCardPublicSaveSerializer,
     MvpRateCardPreviewSerializer,
     MvpRateCardSetupSerializer,
+    MvpRateCardTablePreviewSerializer,
     PartnerQuoteCreateSerializer,
     PartnerProductionMatchResponseSerializer,
     PartnerQuotePreviewSerializer,
@@ -959,14 +962,47 @@ class ShopMvpRateCardSetupView(APIView):
         )
         if shop is None:
             return Response({"detail": NO_MANAGEABLE_SHOP_DETAIL}, status=status.HTTP_404_NOT_FOUND)
-        payload = save_shop_rate_card_setup(
-            shop,
+        try:
+            payload = save_shop_rate_card_setup(
+                shop,
+                paper_rows=serializer.validated_data.get("paper_rows") or [],
+                finishing_rows=serializer.validated_data.get("finishing_rows") or [],
+                shop_details=serializer.validated_data.get("shop_details") or {},
+                completed=False,
+                expected_version=serializer.validated_data.get("expected_version"),
+            )
+        except StaleRateCardVersion as exc:
+            return Response(
+                {
+                    "detail": str(exc),
+                    "code": "rate_card_version_conflict",
+                    "version": exc.current_version,
+                },
+                status=status.HTTP_409_CONFLICT,
+            )
+        return Response(payload)
+
+
+class ShopMvpRateCardTablePreviewView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        serializer = MvpRateCardTablePreviewSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        shop, _created = _resolve_or_bootstrap_rate_card_shop(
+            request=request,
+            shop_slug=serializer.validated_data.get("shop_slug") or request.query_params.get("shop_slug"),
+        )
+        if shop is None:
+            return Response({"detail": NO_MANAGEABLE_SHOP_DETAIL}, status=status.HTTP_404_NOT_FOUND)
+        preview = preview_shop_rate_card_table(
             paper_rows=serializer.validated_data.get("paper_rows") or [],
             finishing_rows=serializer.validated_data.get("finishing_rows") or [],
-            shop_details=serializer.validated_data.get("shop_details") or {},
-            completed=False,
+            quantity=serializer.validated_data.get("quantity") or 100,
+            product_key=serializer.validated_data.get("product_key") or "business-cards",
+            finishing_keys=serializer.validated_data.get("finishing_keys"),
         )
-        return Response(payload)
+        return Response(preview)
 
 
 class ShopMvpRateCardCompleteView(APIView):

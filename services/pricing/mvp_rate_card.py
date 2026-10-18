@@ -12,38 +12,39 @@ from rest_framework.exceptions import ValidationError
 from inventory.choices import MachineType, PaperCategory, PaperType, SheetSize
 from inventory.models import Machine, Paper
 from pricing.choices import ChargeUnit, ColorMode, FinishingBillingBasis, FinishingSideMode
-from pricing.models import FinishingRate, PrintingRate, ShopRateCardSetup
+from pricing.models import FinishingRate, PrintingRate, ShopRateCardSetup, WastePolicy
+from pricing.services.production_cost_calculator import calculate_billable_sheets
 from services.pricing.imposition import build_imposition_breakdown
 from services.pricing.marketplace_pricing import build_marketplace_pricing_summary, get_marketplace_margin_settings
 
 
 DEFAULT_PAPER_DEFINITIONS: list[dict[str, Any]] = [
-    {"key": "350gsm_matte_art_card", "id": "paper-350gsm-matte-art-card", "label": "Art Paper 350gsm", "paper_name": "Art Paper", "gsm": 350, "paper_type": "Matte", "category": "Art Card", "size": "SRA3", "supports_double_side": True, "paper_base_price": "0.00", "single_print_base": "45.00", "double_print_base": "75.00", "heavy_paper_surcharge": "0.00", "surcharge_threshold_gsm": 999, "single_side_price": "45.00", "double_side_price": "75.00", "quantity_in_stock": 500, "active": False},
-    {"key": "300gsm_matte_art_card", "id": "paper-300gsm-matte-art-card", "label": "Art Paper 300gsm", "paper_name": "Art Paper", "gsm": 300, "paper_type": "Matte", "category": "Art Card", "size": "SRA3", "supports_double_side": True, "paper_base_price": "0.00", "single_print_base": "30.00", "double_print_base": "50.00", "heavy_paper_surcharge": "0.00", "surcharge_threshold_gsm": 999, "single_side_price": "30.00", "double_side_price": "50.00", "quantity_in_stock": 500, "active": False},
-    {"key": "250gsm_matte_art_card", "id": "paper-250gsm-matte-art-card", "label": "Art Paper 250gsm", "paper_name": "Art Paper", "gsm": 250, "paper_type": "Matte", "category": "Art Card", "size": "SRA3", "supports_double_side": True, "paper_base_price": "0.00", "single_print_base": "25.00", "double_print_base": "45.00", "heavy_paper_surcharge": "0.00", "surcharge_threshold_gsm": 999, "single_side_price": "25.00", "double_side_price": "45.00", "quantity_in_stock": 500, "active": False},
-    {"key": "art_paper_200gsm", "id": "paper-art-paper-200gsm", "label": "Art Paper 200gsm", "paper_name": "Art Paper", "gsm": 200, "paper_type": "Matte", "category": "Matt", "size": "SRA3", "supports_double_side": True, "paper_base_price": "0.00", "single_print_base": "25.00", "double_print_base": "43.00", "heavy_paper_surcharge": "0.00", "surcharge_threshold_gsm": 999, "single_side_price": "25.00", "double_side_price": "43.00", "quantity_in_stock": 500, "active": False},
-    {"key": "art_paper_170gsm", "id": "paper-art-paper-170gsm", "label": "Art Paper 170gsm", "paper_name": "Art Paper", "gsm": 170, "paper_type": "Matte", "category": "Matt", "size": "SRA3", "supports_double_side": True, "paper_base_price": "0.00", "single_print_base": "23.00", "double_print_base": "43.00", "heavy_paper_surcharge": "0.00", "surcharge_threshold_gsm": 999, "single_side_price": "23.00", "double_side_price": "43.00", "quantity_in_stock": 2000, "active": False},
-    {"key": "art_paper_150gsm", "id": "paper-art-paper-150gsm", "label": "Art Paper 150gsm", "paper_name": "Art Paper", "gsm": 150, "paper_type": "Matte", "category": "Matt", "size": "SRA3", "supports_double_side": True, "paper_base_price": "0.00", "single_print_base": "22.00", "double_print_base": "42.00", "heavy_paper_surcharge": "0.00", "surcharge_threshold_gsm": 999, "single_side_price": "22.00", "double_side_price": "42.00", "quantity_in_stock": 2000, "active": False},
-    {"key": "art_paper_130gsm", "id": "paper-art-paper-130gsm", "label": "Art Paper 130gsm", "paper_name": "Art Paper", "gsm": 130, "paper_type": "Matte", "category": "Matt", "size": "SRA3", "supports_double_side": True, "paper_base_price": "0.00", "single_print_base": "20.00", "double_print_base": "38.00", "heavy_paper_surcharge": "0.00", "surcharge_threshold_gsm": 999, "single_side_price": "20.00", "double_side_price": "38.00", "quantity_in_stock": 2000, "active": False},
-    {"key": "art_paper_115gsm", "id": "paper-art-paper-115gsm", "label": "Art Paper 115gsm", "paper_name": "Art Paper", "gsm": 115, "paper_type": "Matte", "category": "Matt", "size": "SRA3", "supports_double_side": True, "paper_base_price": "0.00", "single_print_base": "18.00", "double_print_base": "35.00", "heavy_paper_surcharge": "0.00", "surcharge_threshold_gsm": 999, "single_side_price": "18.00", "double_side_price": "35.00", "quantity_in_stock": 2000, "active": False},
-    {"key": "art_paper_100gsm", "id": "paper-art-paper-100gsm", "label": "Art Paper 100gsm", "paper_name": "Art Paper", "gsm": 100, "paper_type": "Matte", "category": "Matt", "size": "SRA3", "supports_double_side": True, "paper_base_price": "0.00", "single_print_base": "15.00", "double_print_base": "35.00", "heavy_paper_surcharge": "0.00", "surcharge_threshold_gsm": 999, "single_side_price": "15.00", "double_side_price": "35.00", "quantity_in_stock": 2000, "active": False},
-    {"key": "tic_tac", "id": "paper-tic-tac", "label": "Tic Tac", "paper_name": "Tic Tac", "gsm": 150, "paper_type": "Sticker", "category": "Tictac", "size": "SRA3", "supports_double_side": False, "paper_base_price": "0.00", "single_print_base": "35.00", "double_print_base": None, "heavy_paper_surcharge": "0.00", "surcharge_threshold_gsm": 999, "single_side_price": "35.00", "double_side_price": None, "quantity_in_stock": 1000, "active": False},
-    {"key": "ivory_300gsm", "id": "paper-ivory-300gsm", "label": "Ivory 300gsm", "paper_name": "Ivory", "gsm": 300, "paper_type": "Matte", "category": "Ivory", "size": "SRA3", "supports_double_side": True, "paper_base_price": "0.00", "single_print_base": "45.00", "double_print_base": "80.00", "heavy_paper_surcharge": "0.00", "surcharge_threshold_gsm": 999, "single_side_price": "45.00", "double_side_price": "80.00", "quantity_in_stock": 500, "active": False},
+    {"key": "350gsm_matte_art_card", "id": "paper-350gsm-matte-art-card", "label": "Art Paper 350gsm", "paper_name": "Art Paper", "gsm": 350, "paper_type": "Matte", "category": "Art Card", "size": "SRA3", "supports_double_side": True, "paper_base_price": "30.00", "single_print_base": "15.00", "double_print_base": "30.00", "heavy_paper_surcharge": "10.00", "surcharge_threshold_gsm": 250, "single_side_price": "55.00", "double_side_price": "70.00", "quantity_in_stock": 500, "active": False},
+    {"key": "300gsm_matte_art_card", "id": "paper-300gsm-matte-art-card", "label": "Art Paper 300gsm", "paper_name": "Art Paper", "gsm": 300, "paper_type": "Matte", "category": "Art Card", "size": "SRA3", "supports_double_side": True, "paper_base_price": "25.00", "single_print_base": "15.00", "double_print_base": "30.00", "heavy_paper_surcharge": "10.00", "surcharge_threshold_gsm": 250, "single_side_price": "50.00", "double_side_price": "65.00", "quantity_in_stock": 500, "active": False},
+    {"key": "250gsm_matte_art_card", "id": "paper-250gsm-matte-art-card", "label": "Art Paper 250gsm", "paper_name": "Art Paper", "gsm": 250, "paper_type": "Matte", "category": "Art Card", "size": "SRA3", "supports_double_side": True, "paper_base_price": "20.00", "single_print_base": "15.00", "double_print_base": "30.00", "heavy_paper_surcharge": "10.00", "surcharge_threshold_gsm": 250, "single_side_price": "45.00", "double_side_price": "60.00", "quantity_in_stock": 500, "active": False},
+    {"key": "art_paper_200gsm", "id": "paper-art-paper-200gsm", "label": "Art Paper 200gsm", "paper_name": "Art Paper", "gsm": 200, "paper_type": "Matte", "category": "Matt", "size": "SRA3", "supports_double_side": True, "paper_base_price": "15.00", "single_print_base": "15.00", "double_print_base": "30.00", "heavy_paper_surcharge": "10.00", "surcharge_threshold_gsm": 250, "single_side_price": "30.00", "double_side_price": "45.00", "quantity_in_stock": 500, "active": False},
+    {"key": "art_paper_170gsm", "id": "paper-art-paper-170gsm", "label": "Art Paper 170gsm", "paper_name": "Art Paper", "gsm": 170, "paper_type": "Matte", "category": "Matt", "size": "SRA3", "supports_double_side": True, "paper_base_price": "13.00", "single_print_base": "15.00", "double_print_base": "30.00", "heavy_paper_surcharge": "10.00", "surcharge_threshold_gsm": 250, "single_side_price": "28.00", "double_side_price": "43.00", "quantity_in_stock": 2000, "active": False},
+    {"key": "art_paper_150gsm", "id": "paper-art-paper-150gsm", "label": "Art Paper 150gsm", "paper_name": "Art Paper", "gsm": 150, "paper_type": "Matte", "category": "Matt", "size": "SRA3", "supports_double_side": True, "paper_base_price": "10.00", "single_print_base": "15.00", "double_print_base": "30.00", "heavy_paper_surcharge": "10.00", "surcharge_threshold_gsm": 250, "single_side_price": "25.00", "double_side_price": "40.00", "quantity_in_stock": 2000, "active": False},
+    {"key": "art_paper_130gsm", "id": "paper-art-paper-130gsm", "label": "Art Paper 130gsm", "paper_name": "Art Paper", "gsm": 130, "paper_type": "Matte", "category": "Matt", "size": "SRA3", "supports_double_side": True, "paper_base_price": "5.00", "single_print_base": "15.00", "double_print_base": "30.00", "heavy_paper_surcharge": "10.00", "surcharge_threshold_gsm": 250, "single_side_price": "20.00", "double_side_price": "35.00", "quantity_in_stock": 2000, "active": False},
+    {"key": "art_paper_115gsm", "id": "paper-art-paper-115gsm", "label": "Art Paper 115gsm", "paper_name": "Art Paper", "gsm": 115, "paper_type": "Matte", "category": "Matt", "size": "SRA3", "supports_double_side": True, "paper_base_price": "5.00", "single_print_base": "15.00", "double_print_base": "30.00", "heavy_paper_surcharge": "10.00", "surcharge_threshold_gsm": 250, "single_side_price": "20.00", "double_side_price": "35.00", "quantity_in_stock": 2000, "active": False},
+    {"key": "art_paper_100gsm", "id": "paper-art-paper-100gsm", "label": "Art Paper 100gsm", "paper_name": "Art Paper", "gsm": 100, "paper_type": "Matte", "category": "Matt", "size": "SRA3", "supports_double_side": True, "paper_base_price": "5.00", "single_print_base": "15.00", "double_print_base": "30.00", "heavy_paper_surcharge": "10.00", "surcharge_threshold_gsm": 250, "single_side_price": "20.00", "double_side_price": "35.00", "quantity_in_stock": 2000, "active": False},
+    {"key": "tic_tac", "id": "paper-tic-tac", "label": "Tic Tac", "paper_name": "Tic Tac", "gsm": 150, "paper_type": "Sticker", "category": "Tictac", "size": "SRA3", "supports_double_side": False, "paper_base_price": "25.00", "single_print_base": "15.00", "double_print_base": None, "heavy_paper_surcharge": "10.00", "surcharge_threshold_gsm": 250, "single_side_price": "40.00", "double_side_price": None, "quantity_in_stock": 1000, "active": False},
+    {"key": "ivory_300gsm", "id": "paper-ivory-300gsm", "label": "Ivory 300gsm", "paper_name": "Ivory", "gsm": 300, "paper_type": "Matte", "category": "Ivory", "size": "SRA3", "supports_double_side": True, "paper_base_price": "40.00", "single_print_base": "15.00", "double_print_base": "30.00", "heavy_paper_surcharge": "10.00", "surcharge_threshold_gsm": 250, "single_side_price": "65.00", "double_side_price": "80.00", "quantity_in_stock": 500, "active": False},
 ]
 
 DEFAULT_FINISHING_DEFINITIONS: list[dict[str, Any]] = [
-    {"key": "perfect_binding", "id": "finishing-perfect-binding", "label": "Perfect Bind", "name": "Perfect Bind", "pricing_mode": "per_piece", "unit": "piece", "price": "50.00", "minimum_charge": None, "active": False},
+    {"key": "perfect_binding", "id": "finishing-perfect-binding", "label": "Perfect Bind", "name": "Perfect Bind", "pricing_mode": "per_piece", "unit": "piece", "price": "50.00", "minimum_charge": "200.00", "active": False},
     {"key": "ivory_duplex", "id": "finishing-ivory-duplex", "label": "Ivory 300 Duplex", "name": "Ivory 300 Duplex", "pricing_mode": "per_sheet", "unit": "sheet", "price": "100.00", "minimum_charge": None, "active": False},
-    {"key": "creasing", "id": "finishing-creasing", "label": "Creasing", "name": "Creasing", "pricing_mode": "flat_per_job", "unit": "job", "price": "300.00", "minimum_charge": None, "active": False},
-    {"key": "wire_o", "id": "finishing-wire-o", "label": "Wire-O-Wire", "name": "Wire-O-Wire", "pricing_mode": "per_book", "unit": "book", "price": "50.00", "minimum_charge": None, "active": False},
-    {"key": "potch_lamination", "id": "finishing-potch-lamination", "label": "Potch Lamination", "name": "Potch Lamination", "pricing_mode": "per_piece", "unit": "piece", "price": "100.00", "minimum_charge": None, "active": False},
-    {"key": "gloss_lamination_single", "id": "finishing-gloss-lamination-single", "label": "Gloss Lamination Single", "name": "Gloss Lamination Single", "pricing_mode": "per_sheet", "unit": "sheet", "price": "15.00", "minimum_charge": None, "active": False},
-    {"key": "gloss_lamination_double", "id": "finishing-gloss-lamination-double", "label": "Gloss Lamination Double", "name": "Gloss Lamination Double", "pricing_mode": "per_sheet", "unit": "sheet", "price": "20.00", "minimum_charge": "60.00", "active": False},
-    {"key": "matte_lamination_single", "id": "finishing-matte-lamination-single", "label": "Matt Lamination Single", "name": "Matt Lamination Single", "pricing_mode": "per_sheet", "unit": "sheet", "price": "15.00", "minimum_charge": None, "active": False},
-    {"key": "matte_lamination_double", "id": "finishing-matte-lamination-double", "label": "Matt Lamination Double", "name": "Matt Lamination Double", "pricing_mode": "per_sheet", "unit": "sheet", "price": "20.00", "minimum_charge": "60.00", "active": False},
-    {"key": "cutting", "id": "finishing-cutting", "label": "Cutting Standard", "name": "Cutting Standard", "pricing_mode": "flat_per_job", "unit": "job", "price": "150.00", "minimum_charge": None, "active": False},
-    {"key": "stitching_booklet", "id": "finishing-stitching-booklet", "label": "Stitching Booklet", "name": "Stitching Booklet", "pricing_mode": "per_book", "unit": "book", "price": "5.00", "minimum_charge": None, "active": False},
-    {"key": "uv_lamination", "id": "finishing-uv-lamination", "label": "UV Lamination", "name": "UV Lamination", "pricing_mode": "per_sheet", "unit": "sheet", "price": "10.00", "minimum_charge": "300.00", "active": False},
+    {"key": "creasing", "id": "finishing-creasing", "label": "Creasing", "name": "Creasing", "pricing_mode": "flat_per_job", "unit": "job", "price": "300.00", "minimum_charge": "300.00", "active": False},
+    {"key": "wire_o", "id": "finishing-wire-o", "label": "Wire-O-Wire", "name": "Wire-O-Wire", "pricing_mode": "per_book", "unit": "book", "price": "30.00", "minimum_charge": "100.00", "active": False},
+    {"key": "potch_lamination", "id": "finishing-potch-lamination", "label": "Potch Lamination", "name": "Potch Lamination", "pricing_mode": "per_piece", "unit": "piece", "price": "100.00", "minimum_charge": "100.00", "active": False},
+    {"key": "gloss_lamination_single", "id": "finishing-gloss-lamination-single", "label": "Gloss Lamination Single", "name": "Gloss Lamination Single", "pricing_mode": "per_sheet", "unit": "sheet", "price": "5.00", "minimum_charge": "50.00", "active": False},
+    {"key": "gloss_lamination_double", "id": "finishing-gloss-lamination-double", "label": "Gloss Lamination Double", "name": "Gloss Lamination Double", "pricing_mode": "per_sheet", "unit": "sheet", "price": "15.00", "minimum_charge": "50.00", "active": False},
+    {"key": "matte_lamination_single", "id": "finishing-matte-lamination-single", "label": "Matt Lamination Single", "name": "Matt Lamination Single", "pricing_mode": "per_sheet", "unit": "sheet", "price": "15.00", "minimum_charge": "50.00", "active": False},
+    {"key": "matte_lamination_double", "id": "finishing-matte-lamination-double", "label": "Matt Lamination Double", "name": "Matt Lamination Double", "pricing_mode": "per_sheet", "unit": "sheet", "price": "45.00", "minimum_charge": "50.00", "active": False},
+    {"key": "cutting", "id": "finishing-cutting", "label": "Cutting Standard", "name": "Cutting Standard", "pricing_mode": "flat_per_job", "unit": "job", "price": "50.00", "minimum_charge": "50.00", "active": False},
+    {"key": "stitching_booklet", "id": "finishing-stitching-booklet", "label": "Stitching Booklet", "name": "Stitching Booklet", "pricing_mode": "per_book", "unit": "book", "price": "5.00", "minimum_charge": "100.00", "active": False},
+    {"key": "uv_lamination", "id": "finishing-uv-lamination", "label": "UV Lamination", "name": "UV Lamination", "pricing_mode": "per_sheet", "unit": "sheet", "price": "10.00", "minimum_charge": "200.00", "active": False},
     {"key": "round_corner_piece", "id": "finishing-round-corner-piece", "label": "Round Cornering Piece", "name": "Round Cornering Piece", "pricing_mode": "per_piece", "unit": "piece", "price": "1.00", "minimum_charge": "50.00", "active": False},
     {"key": "round_corner_book", "id": "finishing-round-corner-book", "label": "Round Cornering Book", "name": "Round Cornering Book", "pricing_mode": "per_book", "unit": "book", "price": "200.00", "minimum_charge": None, "active": False},
 ]
@@ -78,6 +79,20 @@ def _activated_default_paper_rows() -> list[dict[str, Any]]:
 
 PAPER_DEFINITION_BY_KEY = {row["key"]: row for row in DEFAULT_PAPER_DEFINITIONS}
 FINISHING_DEFINITION_BY_KEY = {row["key"]: row for row in DEFAULT_FINISHING_DEFINITIONS}
+
+class StaleRateCardVersion(Exception):
+    """Raised when a rate-card save would overwrite a newer saved copy."""
+
+    def __init__(self, current_version: str):
+        self.current_version = current_version
+        super().__init__("This rate card changed since you loaded it. Reload the latest version before saving.")
+
+
+def _rate_card_version(setup: ShopRateCardSetup | None) -> str:
+    if setup is None or setup.updated_at is None:
+        return "0"
+    return setup.updated_at.isoformat()
+
 
 MARKET_GUIDE_MIN_SAMPLE_COUNT = 3
 BUSINESS_CARD_WIDTH_MM = 90
@@ -152,6 +167,14 @@ def _normalize_text(value: Any) -> str:
     return str(value or "").strip()
 
 
+def _first_present(*values: Any, default: Any = None) -> Any:
+    """Return the first value that was actually supplied (0 is a real value)."""
+    for value in values:
+        if value is not None and value != "":
+            return value
+    return default
+
+
 def _format_formula(parts: list[Decimal]) -> str:
     return " + ".join(str(int(part)) if part == part.to_integral_value() else str(part) for part in parts[:-1]) + f" = {parts[-1]}"
 
@@ -174,10 +197,28 @@ def _resolve_paper_base_price(row: dict[str, Any], definition: dict[str, Any]) -
         return _to_decimal(raw_base)
     raw_single = row.get("single_side_price")
     if raw_single not in (None, ""):
-        gsm = int(row.get("gsm") or definition.get("gsm") or 0)
-        surcharge = _to_decimal(row.get("heavy_paper_surcharge") or definition.get("heavy_paper_surcharge") or DEFAULT_HEAVY_PAPER_SURCHARGE)
-        threshold = int(row.get("surcharge_threshold_gsm") or definition.get("surcharge_threshold_gsm") or DEFAULT_SURCHARGE_THRESHOLD_GSM)
-        base = _to_decimal(raw_single) - _to_decimal(row.get("single_print_base") or definition.get("single_print_base") or DEFAULT_SINGLE_PRINT_BASE)
+        gsm = int(_first_present(row.get("gsm"), definition.get("gsm"), default=0))
+        surcharge = _to_decimal(
+            _first_present(
+                row.get("heavy_paper_surcharge"),
+                definition.get("heavy_paper_surcharge"),
+                default=DEFAULT_HEAVY_PAPER_SURCHARGE,
+            )
+        )
+        threshold = int(
+            _first_present(
+                row.get("surcharge_threshold_gsm"),
+                definition.get("surcharge_threshold_gsm"),
+                default=DEFAULT_SURCHARGE_THRESHOLD_GSM,
+            )
+        )
+        base = _to_decimal(raw_single) - _to_decimal(
+            _first_present(
+                row.get("single_print_base"),
+                definition.get("single_print_base"),
+                default=DEFAULT_SINGLE_PRINT_BASE,
+            )
+        )
         if gsm >= threshold:
             base -= surcharge
         return max(base, Decimal("0.00"))
@@ -187,12 +228,36 @@ def _resolve_paper_base_price(row: dict[str, Any], definition: dict[str, Any]) -
 def _enrich_paper_row(row: dict[str, Any], *, definition: dict[str, Any] | None = None) -> dict[str, Any]:
     resolved_definition = definition or _resolve_paper_definition(row) or row
     enriched = deepcopy(row)
-    gsm = int(enriched.get("gsm") or resolved_definition.get("gsm") or 0)
+    gsm = int(_first_present(enriched.get("gsm"), resolved_definition.get("gsm"), default=0))
     paper_base_price = _resolve_paper_base_price(enriched, resolved_definition)
-    single_print_base = _to_decimal(enriched.get("single_print_base") or resolved_definition.get("single_print_base") or DEFAULT_SINGLE_PRINT_BASE)
-    double_print_base = _to_decimal(enriched.get("double_print_base") or resolved_definition.get("double_print_base") or DEFAULT_DOUBLE_PRINT_BASE)
-    heavy_paper_surcharge = _to_decimal(enriched.get("heavy_paper_surcharge") or resolved_definition.get("heavy_paper_surcharge") or DEFAULT_HEAVY_PAPER_SURCHARGE)
-    surcharge_threshold_gsm = int(enriched.get("surcharge_threshold_gsm") or resolved_definition.get("surcharge_threshold_gsm") or DEFAULT_SURCHARGE_THRESHOLD_GSM)
+    single_print_base = _to_decimal(
+        _first_present(
+            enriched.get("single_print_base"),
+            resolved_definition.get("single_print_base"),
+            default=DEFAULT_SINGLE_PRINT_BASE,
+        )
+    )
+    # The supplied SRA3 workbook leaves the both-sides cell blank when it should
+    # simply be twice the one-side price. Preserve that rule here instead of
+    # falling back to a stale fixed number when the one-side rate changes.
+    raw_double_print_base = enriched.get("double_print_base")
+    if raw_double_print_base in (None, ""):
+        raw_double_print_base = single_print_base * Decimal("2")
+    double_print_base = _to_decimal(raw_double_print_base)
+    heavy_paper_surcharge = _to_decimal(
+        _first_present(
+            enriched.get("heavy_paper_surcharge"),
+            resolved_definition.get("heavy_paper_surcharge"),
+            default=DEFAULT_HEAVY_PAPER_SURCHARGE,
+        )
+    )
+    surcharge_threshold_gsm = int(
+        _first_present(
+            enriched.get("surcharge_threshold_gsm"),
+            resolved_definition.get("surcharge_threshold_gsm"),
+            default=DEFAULT_SURCHARGE_THRESHOLD_GSM,
+        )
+    )
     double_sided_enabled = bool(resolved_definition.get("supports_double_side", True)) and not _is_sticker_row(enriched)
     surcharge_applies = gsm >= surcharge_threshold_gsm
     surcharge_amount = heavy_paper_surcharge if surcharge_applies else Decimal("0.00")
@@ -308,6 +373,204 @@ def _build_finishing_preview(row: dict[str, Any], *, quantity: int, sheets_neede
         "shop_visible_formula": formula,
         "manager_visible_total": _decimal_string(final_total),
     }
+
+
+def _active_waste_policy_or_default() -> WastePolicy:
+    policy = WastePolicy.objects.filter(is_active=True).order_by("-updated_at", "-created_at").first()
+    return policy or WastePolicy()
+
+
+def _table_product(product_key: str | None) -> dict[str, Any]:
+    key = _normalize_text(product_key) or "business-cards"
+    product = next((item for item in _PRODUCT_CATALOG if item["key"] == key), None)
+    if product is None:
+        raise ValidationError({"product_key": ["Unknown product key."]})
+    return product
+
+
+def _default_finishing_keys(product: dict[str, Any], finishing_rows: list[dict[str, Any]]) -> list[str]:
+    keys: list[str] = []
+    for tokens in product.get("finishings", ()):
+        match = next(
+            (
+                row
+                for row in finishing_rows
+                if _is_active_finishing(row)
+                and any(token in _normalize_text(row.get("name")).lower() for token in tokens)
+            ),
+            None,
+        )
+        if match and match.get("key"):
+            keys.append(str(match["key"]))
+    return keys
+
+
+def build_rate_card_table_preview(
+    *,
+    paper_rows: list[dict[str, Any]],
+    finishing_rows: list[dict[str, Any]],
+    quantity: int = 100,
+    product_key: str = "business-cards",
+    finishing_keys: list[str] | None = None,
+) -> dict[str, Any]:
+    """Canonical Excel-like preview for the rate card table.
+
+    Paper and printing are billed on the capped billable sheet count; finishing
+    is billed on good sheets, matching ``services.pricing.engine``. Every row
+    is calculated from the same stored inputs the quote engine reads, so the
+    table cannot drift from the server price.
+    """
+    try:
+        quantity = int(quantity or 100)
+    except (TypeError, ValueError) as exc:
+        raise ValidationError({"quantity": ["Quantity must be a whole number."]}) from exc
+    if quantity <= 0:
+        raise ValidationError({"quantity": ["Quantity must be greater than zero."]})
+
+    product = _table_product(product_key)
+    width_mm, height_mm = product["size"]
+    imposition = build_imposition_breakdown(
+        quantity=quantity,
+        finished_width_mm=width_mm,
+        finished_height_mm=height_mm,
+        sheet_width_mm=SRA3_WIDTH_MM,
+        sheet_height_mm=SRA3_HEIGHT_MM,
+    )
+    good_sheets = int(imposition.good_sheets or 0)
+    waste_policy = _active_waste_policy_or_default()
+    if imposition.copies_per_sheet > 0:
+        waste = calculate_billable_sheets(
+            quantity=quantity,
+            yield_per_sheet=imposition.copies_per_sheet,
+            waste_policy=waste_policy,
+        )
+    else:
+        waste = {
+            "raw_sheets": 0,
+            "fixed_waste_sheets": 0,
+            "variable_waste_sheets": 0,
+            "waste_sheets_added": 0,
+            "total_sheets_needed": 0,
+            "billable_sheets": 0,
+            "max_billable_sheets": 0,
+            "spoilage_capped": False,
+        }
+    billable_sheets = int(waste.get("billable_sheets") or 0)
+
+    selected_keys = set(_default_finishing_keys(product, finishing_rows) if finishing_keys is None else finishing_keys)
+    finishing_previews: list[dict[str, Any]] = []
+    selected_finishing_total = Decimal("0.00")
+    for row in finishing_rows:
+        if not _is_active_finishing(row):
+            continue
+        preview = _build_finishing_preview(row, quantity=quantity, sheets_needed=good_sheets)
+        preview["key"] = row.get("key")
+        preview["label"] = row.get("label") or row.get("name")
+        preview["selected"] = str(row.get("key")) in selected_keys
+        finishing_previews.append(preview)
+        if preview["selected"]:
+            selected_finishing_total += _to_decimal(preview["final_total"] or "0.00")
+
+    def side_payload(*, paper_rate: Decimal, print_rate: Decimal | None, surcharge_rate: Decimal) -> dict[str, Any] | None:
+        if print_rate is None:
+            return None
+        paper_total = paper_rate * Decimal(billable_sheets)
+        printing_total = print_rate * Decimal(billable_sheets)
+        surcharge_total = surcharge_rate * Decimal(billable_sheets)
+        total = paper_total + printing_total + surcharge_total + selected_finishing_total
+        unit = total / Decimal(quantity) if quantity else Decimal("0.00")
+        return {
+            "paper": _decimal_string(paper_total),
+            "printing": _decimal_string(printing_total),
+            "surcharge": _decimal_string(surcharge_total),
+            "finishing": _decimal_string(selected_finishing_total),
+            "total": _decimal_string(total),
+            "unit": _decimal_string(unit),
+            "per_sheet": _decimal_string(paper_rate + print_rate + surcharge_rate),
+            "sheets": billable_sheets,
+        }
+
+    rows: list[dict[str, Any]] = []
+    for row in paper_rows:
+        paper_rate = _to_decimal(row.get("paper_base_price") or "0.00")
+        single_print_rate = _to_decimal(row.get("single_print_base") or "0.00")
+        raw_double = row.get("double_print_base")
+        double_print_rate = _to_decimal(raw_double) if raw_double not in (None, "") else single_print_rate * Decimal("2")
+        surcharge_rate = _to_decimal(row.get("heavy_paper_surcharge") or "0.00")
+        threshold = int(row.get("surcharge_threshold_gsm") or DEFAULT_SURCHARGE_THRESHOLD_GSM)
+        gsm = int(row.get("gsm") or 0)
+        surcharge_applies = gsm >= threshold and surcharge_rate > 0
+        applied_surcharge = surcharge_rate if surcharge_applies else Decimal("0.00")
+        double_enabled = bool(row.get("double_sided_enabled", True)) and raw_double is not None
+        rows.append(
+            {
+                "key": row.get("key"),
+                "label": row.get("label") or row.get("paper_name"),
+                "gsm": gsm,
+                "size": row.get("size") or "SRA3",
+                "active": bool(row.get("active")),
+                "surcharge_applies": surcharge_applies,
+                "single": side_payload(paper_rate=paper_rate, print_rate=single_print_rate, surcharge_rate=applied_surcharge),
+                "double": side_payload(paper_rate=paper_rate, print_rate=double_print_rate, surcharge_rate=applied_surcharge) if double_enabled else None,
+            }
+        )
+
+    warnings: list[str] = []
+    if not imposition.fits:
+        warnings.append(imposition.explanation)
+    if waste.get("spoilage_capped"):
+        warnings.append("Spoilage was capped at the configured maximum billable sheets.")
+    if selected_keys:
+        warnings.append("Finishing is charged on good sheets; paper and printing use billable sheets.")
+
+    return {
+        "currency": "KES",
+        "quantity": quantity,
+        "product": {
+            "key": product["key"],
+            "label": product["label"],
+            "size": f"{width_mm}×{height_mm}mm",
+            "min_qty": product.get("min_qty", 100),
+        },
+        "product_options": [
+            {
+                "key": item["key"],
+                "label": item["label"],
+                "size": f"{item['size'][0]}×{item['size'][1]}mm",
+                "min_qty": item.get("min_qty", 100),
+            }
+            for item in _PRODUCT_CATALOG
+        ],
+        "finishing_keys": sorted(selected_keys),
+        "finishings": finishing_previews,
+        "copies_per_sheet": int(imposition.copies_per_sheet or 0),
+        "good_sheets": good_sheets,
+        "billable_sheets": billable_sheets,
+        "waste_sheets_added": int(waste.get("waste_sheets_added") or 0),
+        "max_billable_sheets": int(waste.get("max_billable_sheets") or 0),
+        "spoilage_capped": bool(waste.get("spoilage_capped")),
+        "rows": rows,
+        "warnings": warnings,
+    }
+
+
+def preview_shop_rate_card_table(
+    *,
+    paper_rows: list[dict[str, Any]],
+    finishing_rows: list[dict[str, Any]],
+    quantity: int = 100,
+    product_key: str = "business-cards",
+    finishing_keys: list[str] | None = None,
+) -> dict[str, Any]:
+    normalized_papers = _normalize_paper_rows(paper_rows)
+    normalized_finishings = _normalize_finishing_rows(finishing_rows)
+    return build_rate_card_table_preview(
+        paper_rows=normalized_papers,
+        finishing_rows=normalized_finishings,
+        quantity=quantity,
+        product_key=product_key,
+        finishing_keys=finishing_keys,
+    )
 
 
 def _build_sample_job_preview(row: dict[str, Any], finishing_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -433,6 +696,15 @@ def _normalize_paper_rows(rows: list[dict[str, Any]] | None) -> list[dict[str, A
 
         normalized_row = _paper_row_from_definition(definition)
         normalized_row.update(row)
+        # A row that only carries the old all-in single price (no explicit
+        # paper-base price) must derive the paper component from that price,
+        # not inherit the default definition's paper cost.
+        if "paper_base_price" not in row and row.get("single_side_price") not in (None, ""):
+            normalized_row.pop("paper_base_price", None)
+            # Legacy stored rows carried one all-in price. Do not silently add
+            # the new default heavy-stock surcharge to an existing quote.
+            if "heavy_paper_surcharge" not in row:
+                normalized_row["heavy_paper_surcharge"] = "0.00"
         normalized_row["active"] = bool(row.get("active"))
         if normalized_row["active"]:
             try:
@@ -1004,11 +1276,11 @@ def _persist_paper_rows(shop, paper_rows: list[dict[str, Any]]) -> None:
                 sheet_size=sheet_size,
                 color_mode=ColorMode.COLOR,
                 defaults={
-                    "single_price": _to_decimal(row.get("single_print_base") or DEFAULT_SINGLE_PRINT_BASE),
+                    "single_price": _to_decimal(_first_present(row.get("single_print_base"), default=DEFAULT_SINGLE_PRINT_BASE)),
                     "double_price": _to_decimal(row.get("double_print_base"), allow_null=True),
-                    "duplex_surcharge": _to_decimal(row.get("heavy_paper_surcharge") or DEFAULT_HEAVY_PAPER_SURCHARGE),
-                    "duplex_surcharge_enabled": _to_decimal(row.get("heavy_paper_surcharge") or DEFAULT_HEAVY_PAPER_SURCHARGE) > 0,
-                    "duplex_surcharge_min_gsm": int(row.get("surcharge_threshold_gsm") or DEFAULT_SURCHARGE_THRESHOLD_GSM),
+                    "duplex_surcharge": _to_decimal(_first_present(row.get("heavy_paper_surcharge"), default=DEFAULT_HEAVY_PAPER_SURCHARGE)),
+                    "duplex_surcharge_enabled": _to_decimal(_first_present(row.get("heavy_paper_surcharge"), default=DEFAULT_HEAVY_PAPER_SURCHARGE)) > 0,
+                    "duplex_surcharge_min_gsm": int(_first_present(row.get("surcharge_threshold_gsm"), default=DEFAULT_SURCHARGE_THRESHOLD_GSM)),
                     "is_active": True,
                     "is_default": not PrintingRate.objects.filter(machine=machine, is_default=True).exists(),
                 },
@@ -1123,7 +1395,12 @@ def build_market_guides(paper_rows: list[dict[str, Any]], finishing_rows: list[d
     return guides
 
 
-def build_business_card_example(paper_rows: list[dict[str, Any]], finishing_rows: list[dict[str, Any]]) -> dict[str, Any]:
+def build_business_card_example(
+    paper_rows: list[dict[str, Any]],
+    finishing_rows: list[dict[str, Any]],
+    *,
+    include_client_pricing: bool = True,
+) -> dict[str, Any]:
     candidate_paper = next((row for row in paper_rows if _is_active_paper(row) and int(row.get("gsm") or 0) >= 250 and not _is_sticker_row(row)), None)
     lamination = next((row for row in finishing_rows if _is_active_finishing(row) and "lamination" in _normalize_text(row.get("name")).lower()), None)
     cutting = next((row for row in finishing_rows if _is_active_finishing(row) and "cutting" in _normalize_text(row.get("name")).lower()), None)
@@ -1163,7 +1440,7 @@ def build_business_card_example(paper_rows: list[dict[str, Any]], finishing_rows
         else None
     )
     is_complete = not missing_fields
-    return {
+    payload = {
         "title": "Example: 100 business cards",
         "paper_label": candidate_paper.get("label") if candidate_paper else "300gsm or 350gsm double-sided",
         "sheets_needed": sheets_needed,
@@ -1207,11 +1484,17 @@ def build_business_card_example(paper_rows: list[dict[str, Any]], finishing_rows
             },
         ],
         "production_cost": _decimal_string(estimated_total) if estimated_total > 0 else None,
-        "client_price": marketplace_pricing["client_price"] if marketplace_pricing else None,
-        "estimated_total": marketplace_pricing["client_price"] if marketplace_pricing else None,
-        "pricing_breakdown": marketplace_pricing,
         "sample_job_previews": _build_sample_job_preview(candidate_paper, finishing_rows) if candidate_paper else [],
     }
+    if include_client_pricing:
+        payload.update(
+            {
+                "client_price": marketplace_pricing["client_price"] if marketplace_pricing else None,
+                "estimated_total": marketplace_pricing["client_price"] if marketplace_pricing else None,
+                "pricing_breakdown": marketplace_pricing,
+            }
+        )
+    return payload
 
 
 def _build_completion_feed(paper_rows: list[dict[str, Any]], finishing_rows: list[dict[str, Any]]) -> list[str]:
@@ -1350,14 +1633,24 @@ def build_shop_rate_card_setup(shop, *, activate_defaults: bool = False) -> dict
         "shop_details": shop_details,
         "summary": summarize_rate_card(paper_rows, finishing_rows),
         "market_guides": build_market_guides(paper_rows, finishing_rows),
-        "example_quote": build_business_card_example(paper_rows, finishing_rows),
+        "example_quote": build_business_card_example(paper_rows, finishing_rows, include_client_pricing=False),
+        "table_preview": build_rate_card_table_preview(paper_rows=paper_rows, finishing_rows=finishing_rows),
         "market_label": "Nairobi Market Guide",
         "completed": bool(stored_setup.completed if stored_setup else getattr(shop, "pricing_ready", False)),
+        "version": _rate_card_version(stored_setup),
         "pricing_settings": _pricing_settings_payload(pricing_settings),
     }
 
 
-def save_shop_rate_card_setup(shop, *, paper_rows: list[dict[str, Any]], finishing_rows: list[dict[str, Any]], shop_details: dict[str, Any] | None = None, completed: bool | None = None) -> dict[str, Any]:
+def save_shop_rate_card_setup(
+    shop,
+    *,
+    paper_rows: list[dict[str, Any]],
+    finishing_rows: list[dict[str, Any]],
+    shop_details: dict[str, Any] | None = None,
+    completed: bool | None = None,
+    expected_version: str | None = None,
+) -> dict[str, Any]:
     normalized_papers = _normalize_paper_rows(paper_rows)
     normalized_finishings = _normalize_finishing_rows(finishing_rows)
     normalized_papers, normalized_finishings = _decorate_rate_card_rows(normalized_papers, normalized_finishings)
@@ -1371,7 +1664,8 @@ def save_shop_rate_card_setup(shop, *, paper_rows: list[dict[str, Any]], finishi
         "shop_details": normalized_details,
         "summary": summary,
         "market_guides": build_market_guides(normalized_papers, normalized_finishings),
-        "example_quote": build_business_card_example(normalized_papers, normalized_finishings),
+        "example_quote": build_business_card_example(normalized_papers, normalized_finishings, include_client_pricing=False),
+        "table_preview": build_rate_card_table_preview(paper_rows=normalized_papers, finishing_rows=normalized_finishings),
         "market_label": "Nairobi Market Guide",
         "completed": bool(completed),
         "pricing_settings": _pricing_settings_payload(pricing_settings),
@@ -1396,13 +1690,18 @@ def save_shop_rate_card_setup(shop, *, paper_rows: list[dict[str, Any]], finishi
             shop.is_public = True
 
     with transaction.atomic():
+        stored_setup = ShopRateCardSetup.objects.select_for_update().filter(shop=shop).first()
+        current_version = _rate_card_version(stored_setup)
+        if expected_version is not None and str(expected_version) != current_version:
+            raise StaleRateCardVersion(current_version)
+
         _persist_paper_rows(shop, normalized_papers)
         _persist_finishing_rows(shop, normalized_finishings)
         from shops.services import refresh_shop_pricing_ready
 
         shop.pricing_ready = refresh_shop_pricing_ready(shop)
         shop.save(update_fields=["name", "public_whatsapp_number", "phone_number", "service_area", "city", "pricing_ready", "public_match_ready", "is_active", "is_public", "updated_at"])
-        ShopRateCardSetup.objects.update_or_create(
+        setup_record, _created = ShopRateCardSetup.objects.update_or_create(
             shop=shop,
             defaults={
                 "paper_rows": normalized_papers,
@@ -1411,6 +1710,7 @@ def save_shop_rate_card_setup(shop, *, paper_rows: list[dict[str, Any]], finishi
                 "completed": bool(completed),
             },
         )
+        payload["version"] = _rate_card_version(setup_record)
     return payload
 
 
@@ -1427,6 +1727,7 @@ def complete_shop_rate_card_setup(shop) -> dict[str, Any]:
         "completed": True,
         "summary": payload["summary"],
         "shop_details": payload["shop_details"],
+        "version": payload.get("version", "0"),
     }
 
 

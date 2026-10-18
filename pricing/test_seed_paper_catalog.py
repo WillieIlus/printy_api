@@ -28,14 +28,14 @@ class SeedPaperCatalogCommandTests(TestCase):
 
         setup = ShopRateCardSetup.objects.get(shop=self.shop)
         rows = {row["key"]: row for row in setup.paper_rows}
-        self.assertEqual(rows["350gsm_matte_art_card"]["double_side_price"], "75.00")
-        self.assertEqual(rows["350gsm_matte_art_card"]["single_side_price"], "45.00")
+        self.assertEqual(rows["350gsm_matte_art_card"]["double_side_price"], "70.00")
+        self.assertEqual(rows["350gsm_matte_art_card"]["single_side_price"], "55.00")
         self.assertEqual(rows["art_paper_100gsm"]["double_side_price"], "35.00")
-        self.assertEqual(rows["art_paper_100gsm"]["single_side_price"], "15.00")
-        self.assertEqual(rows["tic_tac"]["single_side_price"], "35.00")
+        self.assertEqual(rows["art_paper_100gsm"]["single_side_price"], "20.00")
+        self.assertEqual(rows["tic_tac"]["single_side_price"], "40.00")
         self.assertIsNone(rows["tic_tac"]["double_side_price"])
         self.assertEqual(rows["ivory_300gsm"]["double_side_price"], "80.00")
-        self.assertEqual(rows["ivory_300gsm"]["single_side_price"], "45.00")
+        self.assertEqual(rows["ivory_300gsm"]["single_side_price"], "65.00")
         self.assertFalse(rows["ivory_300gsm"]["active"])
         self.assertIn("11 added", out.getvalue())
 
@@ -54,7 +54,7 @@ class SeedPaperCatalogCommandTests(TestCase):
         setup.refresh_from_db()
         first_row = setup.paper_rows[0]
         self.assertEqual(first_row["single_print_base"], "99.00")
-        self.assertEqual(first_row["single_side_price"], "99.00")
+        self.assertEqual(first_row["single_side_price"], "139.00")
         self.assertTrue(first_row["active"])
         self.assertIn("11 preserved", out.getvalue())
 
@@ -69,7 +69,7 @@ class SeedPaperCatalogCommandTests(TestCase):
         call_command("seed_paper_catalog", "--shop", self.shop.slug, "--overwrite", stdout=StringIO())
 
         setup.refresh_from_db()
-        self.assertEqual(setup.paper_rows[0]["single_print_base"], "45.00")
-        self.assertEqual(setup.paper_rows[0]["single_side_price"], "45.00")
+        self.assertEqual(setup.paper_rows[0]["single_print_base"], "15.00")
+        self.assertEqual(setup.paper_rows[0]["single_side_price"], "55.00")
 
 

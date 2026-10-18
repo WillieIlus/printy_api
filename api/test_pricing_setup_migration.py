@@ -120,7 +120,12 @@ class PricingSetupMigrationTests(TestCase):
             {"shop_slug": self.shop.slug},
         )
         self.assertEqual(setup_response.status_code, 200)
-        self.assertIsNone(setup_response.json()["example_quote"]["pricing_breakdown"])
+        # Law 1.3: a printer-facing payload must not carry buyer totals,
+        # manager margin, or the Printy fee breakdown.
+        setup_quote = setup_response.json()["example_quote"]
+        self.assertNotIn("pricing_breakdown", setup_quote)
+        self.assertNotIn("client_price", setup_quote)
+        self.assertNotIn("estimated_total", setup_quote)
 
     def test_rate_card_save_persists_to_canonical_tables(self):
         payload = save_shop_rate_card_setup(

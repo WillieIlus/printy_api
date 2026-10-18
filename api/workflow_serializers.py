@@ -1999,6 +1999,7 @@ class MvpRateCardSetupSerializer(serializers.Serializer):
     paper_rows = MvpRateCardPaperRowSerializer(many=True, required=False, default=list)
     finishing_rows = MvpRateCardFinishingRowSerializer(many=True, required=False, default=list)
     shop_details = MvpRateCardShopDetailsSerializer(required=False, default=dict)
+    expected_version = serializers.CharField(required=False, allow_blank=True, allow_null=True)
 
     def validate(self, attrs):
         attrs["paper_rows"] = attrs.get("paper_prices") or attrs.get("paper_rows") or []
@@ -2012,6 +2013,30 @@ class MvpRateCardSetupSerializer(serializers.Serializer):
             rows=attrs["finishing_rows"],
             field_name="finishings",
             allowed_keys=set(FINISHING_DEFINITION_BY_KEY.keys()),
+        )
+        return attrs
+
+
+class MvpRateCardTablePreviewSerializer(serializers.Serializer):
+    paper_rows = MvpRateCardPaperRowSerializer(many=True, required=False, default=list)
+    finishing_rows = MvpRateCardFinishingRowSerializer(many=True, required=False, default=list)
+    quantity = serializers.IntegerField(required=False, min_value=1, max_value=1_000_000, default=100)
+    product_key = serializers.CharField(required=False, allow_blank=True, default="business-cards")
+    finishing_keys = serializers.ListField(
+        child=serializers.CharField(allow_blank=False),
+        required=False,
+        allow_empty=True,
+        default=None,
+        allow_null=True,
+    )
+    shop_slug = serializers.CharField(required=False, allow_blank=True)
+
+    def validate(self, attrs):
+        attrs["finishing_rows"] = _normalize_mvp_finishing_rows(attrs.get("finishing_rows") or [])
+        _validate_mvp_rate_card_keys(
+            rows=attrs["paper_rows"],
+            field_name="paper_prices",
+            allowed_keys=set(PAPER_DEFINITION_BY_KEY.keys()),
         )
         return attrs
 

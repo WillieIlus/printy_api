@@ -315,9 +315,9 @@ class Sra3YieldFormulaContractTests(TestCase):
         tic_tac = next(row for row in DEFAULT_PAPER_DEFINITIONS if row["key"] == "tic_tac")
         flyer = next(row for row in DEFAULT_PAPER_DEFINITIONS if row["key"] == "art_paper_150gsm")
         label = tic_tac
-        self.assertEqual(tic_tac["single_side_price"], "35.00")
+        self.assertEqual(tic_tac["single_side_price"], "40.00")
         self.assertIsNone(tic_tac["double_side_price"])
-        self.assertEqual(flyer["single_side_price"], "22.00")
+        self.assertEqual(flyer["single_side_price"], "25.00")
         self.assertEqual(label["paper_name"], "Tic Tac")
 
 
@@ -494,18 +494,20 @@ class PaperRateDefaultContractTests(DjangoTestCase):
         self.shop = Shop.objects.create(name="Phase A Shop", slug="phase-a-shop", owner=self.user, is_active=True, currency="KES")
 
     def test_required_rate_card_defaults_exist_and_are_inactive(self):
+        # Real owner-supplied SRA3 workbook defaults: paper cost + one-side or
+        # both-side print + the 10 KES heavy-stock surcharge from 250gsm up.
         expected = {
-            "350gsm_matte_art_card": ("45.00", "75.00"),
-            "300gsm_matte_art_card": ("30.00", "50.00"),
-            "250gsm_matte_art_card": ("25.00", "45.00"),
-            "art_paper_200gsm": ("25.00", "43.00"),
-            "art_paper_170gsm": ("23.00", "43.00"),
-            "art_paper_150gsm": ("22.00", "42.00"),
-            "art_paper_130gsm": ("20.00", "38.00"),
-            "art_paper_115gsm": ("18.00", "35.00"),
-            "art_paper_100gsm": ("15.00", "35.00"),
-            "tic_tac": ("35.00", None),
-            "ivory_300gsm": ("45.00", "80.00"),
+            "350gsm_matte_art_card": ("55.00", "70.00"),
+            "300gsm_matte_art_card": ("50.00", "65.00"),
+            "250gsm_matte_art_card": ("45.00", "60.00"),
+            "art_paper_200gsm": ("30.00", "45.00"),
+            "art_paper_170gsm": ("28.00", "43.00"),
+            "art_paper_150gsm": ("25.00", "40.00"),
+            "art_paper_130gsm": ("20.00", "35.00"),
+            "art_paper_115gsm": ("20.00", "35.00"),
+            "art_paper_100gsm": ("20.00", "35.00"),
+            "tic_tac": ("40.00", None),
+            "ivory_300gsm": ("65.00", "80.00"),
         }
         rows = {row["key"]: row for row in DEFAULT_PAPER_DEFINITIONS}
         for key, (simplex, duplex) in expected.items():
@@ -538,8 +540,8 @@ class PaperRateDefaultContractTests(DjangoTestCase):
         self.assertTrue(PrintingRate.objects.filter(machine__shop=self.shop, sheet_size=SheetSize.SRA3, is_active=True).exists())
         persisted_setup = ShopRateCardSetup.objects.get(shop=self.shop)
         persisted_300gsm = next(row for row in persisted_setup.paper_rows if row["key"] == "300gsm_matte_art_card")
-        self.assertEqual(persisted_300gsm["single_side_price"], "30.00")
-        self.assertEqual(persisted_300gsm["double_side_price"], "50.00")
+        self.assertEqual(persisted_300gsm["single_side_price"], "50.00")
+        self.assertEqual(persisted_300gsm["double_side_price"], "65.00")
         self.assertTrue(FinishingRate.objects.filter(shop=self.shop, slug="cutting", is_active=True).exists())
 
     def test_existing_customized_shop_rows_are_preserved_without_overwrite(self):
