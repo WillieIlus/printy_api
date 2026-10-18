@@ -536,6 +536,17 @@ MPESA_TRANSACTION_DESC_DEFAULT = _get_env(
     default="Printy Order",
 )
 QUOTE_EXPIRY_HOURS = int(_get_env("QUOTE_EXPIRY_HOURS", default="48"))
+# Law 10.2(a): an open quote version older than this many days without
+# acceptance is marked EXPIRED by the expire_quotes task (kept, never deleted).
+QUOTE_VALIDITY_DAYS = int(_get_env("QUOTE_VALIDITY_DAYS", default="14"))
+# Law 10.3: a public range appears only when both thresholds are met; below
+# them the service returns nothing (not a placeholder).
+MIN_SAMPLE_FOR_PUBLIC_RANGE = int(
+    _get_env("MIN_SAMPLE_FOR_PUBLIC_RANGE", default="5")
+)
+MIN_SHOPS_FOR_PUBLIC_RANGE = int(
+    _get_env("MIN_SHOPS_FOR_PUBLIC_RANGE", default="3")
+)
 # Minimum completed/decided records before an internal production metric is
 # exposed as a value (law: never present weak samples as reliable).
 PRODUCTION_ANALYTICS_MIN_SAMPLE = int(_get_env("PRODUCTION_ANALYTICS_MIN_SAMPLE", default="5"))

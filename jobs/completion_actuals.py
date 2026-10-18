@@ -67,19 +67,89 @@ def _int_or_none(value: Any, field: str) -> int | None:
         raise ValidationError(f"{field} must be an integer.")
 
 
+def _accepted_version_for(managed_job: ManagedJob):
+    """The quote version accepted for this job, if one was stored."""
+    from quotes.models import QuoteVersion, QuoteVersionOutcome
+
+    quote = getattr(managed_job, "source_quote", None)
+    versions = QuoteVersion.objects.filter(outcome=QuoteVersionOutcome.ACCEPTED)
+    if quote is not None:
+        version = versions.filter(quote=quote).order_by("-version_number", "-id").first()
+        if version is not None:
+            return version
+    request = getattr(managed_job, "source_quote_request", None) or getattr(
+        quote, "quote_request", None
+    )
+    if request is None:
+        return None
+    return versions.filter(quote_request=request).order_by("-version_number", "-id").first()
+
+
+def _request_for_job(managed_job: ManagedJob):
+    source_quote = getattr(managed_job, "source_quote", None)
+    return getattr(managed_job, "source_quote_request", None) or getattr(
+        source_quote, "quote_request", None
+    )
+
+
+def products_for_job(managed_job: ManagedJob) -> list[str]:
+    from quotes.spec_fingerprint import product_label
+
+    request = _request_for_job(managed_job)
+    if request is None:
+        return []
+    labels = []
+    for item in request.items.select_related("product").order_by("pk"):
+        label = product_label(item)
+        if label and label not in labels:
+            labels.append(label)
+    return labels
+
+
 def estimate_for(managed_job: ManagedJob) -> dict[str, Any]:
-    """The accepted estimate the job was created from (read-only)."""
+    """The accepted estimate the job was created from (read-only).
+
+    The accepted ``QuoteVersion`` is authoritative when it captured the terms
+    at acceptance; the (locked) financial split is the fallback for legacy jobs
+    that predate stored versions. Actuals never overwrite either.
+    """
     source_quote = getattr(managed_job, "source_quote", None)
     financials = getattr(source_quote, "financial_split", None) if source_quote else None
-    if financials is not None:
-        production_cost = financials.production_cost
-        client_total = financials.client_total
-    else:
-        production_cost = None
-        client_total = getattr(managed_job, "client_total", None)
+    production_cost = financials.production_cost if financials is not None else None
+    client_total = financials.client_total if financials is not None else None
+
+    version = _accepted_version_for(managed_job)
+    source = "job"
+    if version is not None and (
+        version.printer_quoted_price is not None or version.buyer_price is not None
+    ):
+        if version.printer_quoted_price is not None:
+            production_cost = version.printer_quoted_price
+        if version.buyer_price is not None:
+            client_total = version.buyer_price
+        source = "accepted_version"
+    elif financials is not None:
+        source = "financial_split"
+    elif getattr(managed_job, "client_total", None) is not None:
+        client_total = managed_job.client_total
+
+    request = _request_for_job(managed_job)
+    spec_fingerprint = getattr(version, "spec_fingerprint", "") or ""
+    if not spec_fingerprint and request is not None:
+        from quotes.spec_fingerprint import compute_spec_fingerprint
+
+        spec_fingerprint = compute_spec_fingerprint(request)
+
+    products = products_for_job(managed_job)
     return {
         "production_cost": _money(production_cost),
         "client_total": _money(client_total),
+        "quote_version_id": getattr(version, "pk", None),
+        "quote_version_number": getattr(version, "version_number", None),
+        "spec_fingerprint": spec_fingerprint,
+        "products": products,
+        "product": " + ".join(products) or None,
+        "source": source,
     }
 
 
@@ -161,6 +231,9 @@ def record_completion_actuals(
         "delivered_at": delivered_at.isoformat() if hasattr(delivered_at, "isoformat") else delivered_at,
         "notes": notes or "",
         "production_shop_id": managed_job.assigned_shop_id,
+        "spec_fingerprint": estimate["spec_fingerprint"],
+        "product": estimate["product"],
+        "products": estimate["products"],
         "estimate": estimate,
         "variance": {
             "production_cost": _variance(actual_production, estimate["production_cost"]),

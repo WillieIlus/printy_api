@@ -20,6 +20,7 @@ from django.db.models import Max
 from django.utils import timezone
 
 from pricing.services.platform_fee_policy import get_active_platform_fee_policy
+from quotes.spec_fingerprint import compute_spec_fingerprint
 from services.pricing.result_contract import CONTRACT_VERSION
 
 PRICING_RULES_SOURCE = "printy"
@@ -78,35 +79,34 @@ def compute_pricing_rule_version() -> str:
     return f"{PRICING_RULES_SOURCE}-engine-v{CONTRACT_VERSION}-{digest}"
 
 
-def compute_spec_fingerprint(quote_request) -> str:
-    """Deterministic hash of the quoted spec set (products, spec + quantities)."""
-    request_snapshot = _as_dict(getattr(quote_request, "request_snapshot", None))
-    items = []
-    for item in quote_request.items.all().order_by("pk"):
-        spec = _as_dict(getattr(item, "item_spec_snapshot", None))
-        items.append(
-            {
-                "product_id": getattr(item, "product_id", None),
-                "item_type": getattr(item, "item_type", ""),
-                "title": getattr(item, "title", ""),
-                "quantity": getattr(item, "quantity", None),
-                "paper_id": getattr(item, "paper_id", None),
-                "sides": getattr(item, "sides", ""),
-                "color_mode": getattr(item, "color_mode", ""),
-                "width_mm": getattr(item, "chosen_width_mm", None),
-                "height_mm": getattr(item, "chosen_height_mm", None),
-                "normalized_pages": getattr(item, "normalized_pages", None),
-                "binding_type": getattr(item, "binding_type", ""),
-                "spec": spec or None,
-            }
+def _version_money_fields(quote) -> dict:
+    """Law 10.2(a) terms in force for an offered quote version."""
+    if quote is None:
+        return {
+            "printer": None,
+            "printer_quoted_price": None,
+            "manager_margin": None,
+            "fees": None,
+            "buyer_price": None,
+            "due_date": None,
+        }
+    financials = getattr(quote, "financial_split", None)
+    production_option = getattr(quote, "production_option", None)
+    production_cost = getattr(financials, "production_cost", None)
+    if production_cost is None and production_option is not None:
+        production_cost = getattr(production_option, "production_cost", None)
+    return {
+        "printer": getattr(quote, "shop", None),
+        "printer_quoted_price": production_cost,
+        "manager_margin": getattr(financials, "manager_markup", None),
+        "fees": getattr(financials, "printy_fee", None),
+        "buyer_price": getattr(financials, "client_total", None)
+        or getattr(quote, "total", None),
+        "due_date": getattr(
+            getattr(quote, "quote_request", None), "due_date", None
         )
-    payload = {
-        "matched_specs": request_snapshot.get("matched_specs"),
-        "specification": request_snapshot.get("specification")
-        or request_snapshot.get("spec"),
-        "items": items,
+        or getattr(quote, "estimated_ready_at", None),
     }
-    return _hash(payload)[:32]
 
 
 def _item_snapshots(quote_request) -> list[dict]:
@@ -165,6 +165,7 @@ def build_quote_version_snapshot(*, quote_request, quote=None) -> dict:
     elif customer_pricing.get("final_client_price") is not None:
         final_total = _str(customer_pricing.get("final_client_price"))
 
+    terms = _version_money_fields(quote)
     return {
         "quote_request_id": quote_request.pk,
         "request_reference": getattr(quote_request, "request_reference", ""),
@@ -172,6 +173,12 @@ def build_quote_version_snapshot(*, quote_request, quote=None) -> dict:
         "quote_id": getattr(quote, "pk", None),
         "quote_reference": getattr(quote, "quote_reference", ""),
         "quote_status": getattr(quote, "status", ""),
+        "printer_id": getattr(terms["printer"], "pk", None),
+        "printer_quoted_price": _str(terms["printer_quoted_price"]),
+        "manager_margin": _str(terms["manager_margin"]),
+        "fees": _str(terms["fees"]),
+        "buyer_price": _str(terms["buyer_price"]),
+        "due_date": terms["due_date"].isoformat() if hasattr(terms["due_date"], "isoformat") else terms["due_date"],
         "currency": split.get("currency") or customer_pricing.get("currency") or "KES",
         "spec_fingerprint": compute_spec_fingerprint(quote_request),
         "pricing_rule_version": compute_pricing_rule_version(),
@@ -222,11 +229,14 @@ def record_quote_version(
     )
     if resolved_quote is not None:
         previous_open = previous_open.filter(quote_id=resolved_quote.pk)
-    previous_open.update(outcome=QuoteVersionOutcome.SUPERSEDED, updated_at=timezone.now())
+    for previous in previous_open:
+        previous.outcome = QuoteVersionOutcome.SUPERSEDED
+        previous.save(update_fields=["outcome", "updated_at"])
 
     snapshot = build_quote_version_snapshot(
         quote_request=quote_request, quote=resolved_quote
     )
+    terms = _version_money_fields(resolved_quote)
     last_number = (
         QuoteVersion.objects.filter(quote_request=quote_request).aggregate(
             highest=Max("version_number")
@@ -243,6 +253,12 @@ def record_quote_version(
         outcome=outcome,
         spec_fingerprint=snapshot.get("spec_fingerprint", ""),
         pricing_rule_version=snapshot.get("pricing_rule_version", ""),
+        printer=terms["printer"],
+        printer_quoted_price=terms["printer_quoted_price"],
+        manager_margin=terms["manager_margin"],
+        fees=terms["fees"],
+        buyer_price=terms["buyer_price"],
+        due_date=terms["due_date"],
         created_by=user,
     )
 

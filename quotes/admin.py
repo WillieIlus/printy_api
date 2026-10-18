@@ -3,6 +3,7 @@ from django.utils.html import format_html
 
 from .models import (
     CalculatorDraft,
+    PriceTransaction,
     ProductionOption,
     QuoteFinancialSplit,
     QuoteItem,
@@ -12,6 +13,7 @@ from .models import (
     QuoteShareLink,
     Quote,
     QuoteAttachment,
+    QuoteVersion,
 )
 from .services import (
     calculate_quote_item,
@@ -250,6 +252,87 @@ class QuoteFinancialSplitAdmin(admin.ModelAdmin):
         "calculated_at",
     ]
     autocomplete_fields = ["quote", "policy_used", "production_option"]
+
+
+@admin.register(QuoteVersion)
+class QuoteVersionAdmin(admin.ModelAdmin):
+    """Read-only: law 10.2 history must never be edited or deleted."""
+
+    list_display = [
+        "id",
+        "quote_request",
+        "version_number",
+        "outcome",
+        "printer",
+        "printer_quoted_price",
+        "manager_margin",
+        "fees",
+        "buyer_price",
+        "due_date",
+        "created_at",
+    ]
+    list_filter = ["outcome", "printer"]
+    search_fields = ["quote_request__request_reference", "spec_fingerprint"]
+    readonly_fields = [
+        "quote_request",
+        "quote",
+        "version_number",
+        "total",
+        "per_piece",
+        "snapshot",
+        "reason",
+        "printer",
+        "printer_quoted_price",
+        "manager_margin",
+        "fees",
+        "buyer_price",
+        "due_date",
+        "outcome",
+        "spec_fingerprint",
+        "pricing_rule_version",
+        "created_by",
+        "created_at",
+        "updated_at",
+    ]
+    actions = None
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+
+@admin.register(PriceTransaction)
+class PriceTransactionAdmin(admin.ModelAdmin):
+    """Read-only: verified transactions are append-only (law 10.2(b))."""
+
+    list_display = [
+        "id",
+        "payment",
+        "quote_request",
+        "printer",
+        "price_paid",
+        "currency",
+        "confirmed_payment_at",
+        "created_at",
+    ]
+    list_filter = ["currency", "printer", "confirmed_payment_at"]
+    search_fields = ["provider_reference", "payment__account_reference", "spec_fingerprint"]
+    readonly_fields = [field.name for field in PriceTransaction._meta.fields]
+    actions = None
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
 
 
 @admin.register(QuoteShareLink)

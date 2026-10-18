@@ -113,6 +113,119 @@ def estimate_vs_actual(
     return _metric(value, count)
 
 
+def _accuracy_value(
+    total_estimate: Decimal, total_actual: Decimal, count: int
+) -> dict[str, Any] | None:
+    if count == 0:
+        return None
+    variance = total_actual - total_estimate
+    pct = (
+        (variance / total_estimate * 100).quantize(Decimal("0.01"))
+        if total_estimate != 0
+        else None
+    )
+    return {
+        "total_estimate": str(total_estimate),
+        "total_actual": str(total_actual),
+        "variance": str(variance),
+        "variance_pct": str(pct) if pct is not None else None,
+        "records": count,
+    }
+
+
+def _accuracy_groups(
+    managed_job_ids: Iterable[int] | None,
+    key_for,
+) -> list[dict[str, Any]]:
+    """Group accepted-estimate vs actual accuracy by an arbitrary key."""
+    groups: dict[Any, dict[str, Any]] = {}
+    for event in latest_actuals_per_job(managed_job_ids).values():
+        metadata = event.metadata or {}
+        estimate = _dec((metadata.get("estimate") or {}).get("production_cost"))
+        actual = _dec(metadata.get("actual_production_cost"))
+        if estimate is None or actual is None:
+            continue
+        job = getattr(event, "managed_job", None)
+        if job is None:
+            continue
+        key, label = key_for(event, metadata, job)
+        if key is None:
+            continue
+        bucket_key = tuple(sorted(key.items()))
+        bucket = groups.setdefault(
+            bucket_key,
+            {
+                "key": key,
+                "label": label,
+                "estimate": Decimal("0"),
+                "actual": Decimal("0"),
+                "count": 0,
+            },
+        )
+        bucket["estimate"] += estimate
+        bucket["actual"] += actual
+        bucket["count"] += 1
+
+    threshold = min_sample()
+    rows = []
+    for bucket in groups.values():
+        rows.append(
+            {
+                **bucket["key"],
+                "label": bucket["label"],
+                "sample_size": bucket["count"],
+                "sufficient": bucket["count"] >= threshold,
+                "min_sample": threshold,
+                "value": (
+                    _accuracy_value(bucket["estimate"], bucket["actual"], bucket["count"])
+                    if bucket["count"] >= threshold
+                    else None
+                ),
+            }
+        )
+    rows.sort(key=lambda row: (-row["sample_size"], str(row["label"])))
+    return rows
+
+
+def estimate_accuracy_by_printer(
+    managed_job_ids: Iterable[int] | None = None,
+) -> dict[str, Any]:
+    """Estimate accuracy per printer shop (law 10.2/10.3)."""
+    def key_for(event, metadata, job):
+        printer_id = metadata.get("production_shop_id") or job.assigned_shop_id
+        if printer_id is None:
+            return None, None
+        shop = getattr(job, "assigned_shop", None)
+        label = getattr(shop, "name", "") or f"Printer {printer_id}"
+        return {"printer_id": printer_id}, label
+
+    return {
+        "groups": _accuracy_groups(managed_job_ids, key_for),
+        "min_sample": min_sample(),
+    }
+
+
+def estimate_accuracy_by_product(
+    managed_job_ids: Iterable[int] | None = None,
+) -> dict[str, Any]:
+    """Estimate accuracy per product (law 10.2/10.3)."""
+    from jobs.completion_actuals import products_for_job
+
+    def key_for(event, metadata, job):
+        product = metadata.get("product")
+        if not product:
+            products = products_for_job(job)
+            product = " + ".join(products) or None
+        if not product:
+            return None, None
+        return {"product": product}, product
+
+    return {
+        "groups": _accuracy_groups(managed_job_ids, key_for),
+        "min_sample": min_sample(),
+    }
+
+
 def reprints(managed_job_ids: Iterable[int] | None = None) -> dict[str, Any]:
     """Total reprints recorded across completed jobs."""
     total = 0
@@ -213,6 +326,8 @@ def summarize(*, managed_job_ids=None, quote_versions=None) -> dict[str, Any]:
     """All internal metrics, each carrying its own sample size + sufficiency."""
     summary = {
         "estimate_vs_actual": estimate_vs_actual(managed_job_ids),
+        "estimate_accuracy_by_printer": estimate_accuracy_by_printer(managed_job_ids),
+        "estimate_accuracy_by_product": estimate_accuracy_by_product(managed_job_ids),
         "turnaround": turnaround(managed_job_ids),
         "reprints": reprints(managed_job_ids),
         "waste": waste(managed_job_ids),

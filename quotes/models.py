@@ -1798,15 +1798,33 @@ class QuoteVersionOutcome(models.TextChoices):
     SUPERSEDED = "superseded", _("Superseded")
 
 
+class AppendOnlyQuerySet(models.QuerySet):
+    """Refuse bulk mutation so a stored history can never be rewritten."""
+
+    def update(self, *args, **kwargs):  # pragma: no cover - guard
+        raise ValidationError(
+            "Stored history is append-only; update is forbidden (law 10.2)."
+        )
+
+    def delete(self, *args, **kwargs):  # pragma: no cover - guard
+        raise ValidationError(
+            "Stored history is append-only; delete is forbidden (law 10.2)."
+        )
+
+
+class QuoteVersionQuerySet(AppendOnlyQuerySet):
+    """Quote versions are immutable except for their terminal outcome."""
+
+
 class QuoteVersion(TimeStampedModel):
-    """Immutable version snapshot of a quote (law 3.4).
+    """Immutable version snapshot of a quote (law 3.4 / 10.2).
 
     A sent quote is locked. Editing a sent quote creates a new QuoteVersion
     rather than silently mutating the one the buyer already saw; the buyer must
     approve a new version before payment on the changed price.
 
-    The captured ``snapshot`` and its identifying fields are write-once; only
-    the ``outcome`` may move from ``open`` to its terminal value.
+    The captured ``snapshot`` and every term below are write-once; only the
+    ``outcome`` may move from ``open`` to its terminal value.
     """
 
     IMMUTABLE_FIELDS = (
@@ -1820,13 +1838,19 @@ class QuoteVersion(TimeStampedModel):
         "pricing_rule_version",
         "reason",
         "created_by_id",
+        "printer_id",
+        "printer_quoted_price",
+        "manager_margin",
+        "fees",
+        "buyer_price",
+        "due_date",
     )
 
-    objects = models.Manager()
+    objects = QuoteVersionQuerySet.as_manager()
 
     quote_request = models.ForeignKey(
         QuoteRequest,
-        on_delete=models.CASCADE,
+        on_delete=models.PROTECT,
         related_name="versions",
         verbose_name=_("quote request"),
     )
@@ -1866,6 +1890,53 @@ class QuoteVersion(TimeStampedModel):
         blank=True,
         default="",
         verbose_name=_("reason"),
+    )
+    printer = models.ForeignKey(
+        Shop,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="quote_versions",
+        verbose_name=_("printer"),
+        help_text=_("Shop that would produce this version (law 10.2(a))."),
+    )
+    printer_quoted_price = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        null=True,
+        blank=True,
+        verbose_name=_("printer quoted price"),
+        help_text=_("Printer's rate-card price before fees and markup (law 7.10a/10.2(a))."),
+    )
+    manager_margin = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        null=True,
+        blank=True,
+        verbose_name=_("manager margin"),
+        help_text=_("Manager markup in this version (law 10.2(a))."),
+    )
+    fees = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        null=True,
+        blank=True,
+        verbose_name=_("fees"),
+        help_text=_("Printy fee in this version (law 10.2(a))."),
+    )
+    buyer_price = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        null=True,
+        blank=True,
+        verbose_name=_("buyer price"),
+        help_text=_("Price the buyer is offered in this version (law 10.2(a))."),
+    )
+    due_date = models.DateTimeField(
+        null=True,
+        blank=True,
+        verbose_name=_("due date"),
+        help_text=_("Due date in force for this version (law 10.2(a))."),
     )
     outcome = models.CharField(
         max_length=20,
@@ -1919,8 +1990,119 @@ class QuoteVersion(TimeStampedModel):
                         )
         return super().save(*args, **kwargs)
 
+    def delete(self, *args, **kwargs):  # noqa: D401
+        raise ValidationError(
+            "Quote versions are append-only and cannot be deleted (law 10.2)."
+        )
+
     def __str__(self):
         return f"Version {self.version_number} of request #{self.quote_request_id}"
+
+
+class PriceTransaction(models.Model):
+    """Verified money actually paid (law 10.2(b)).
+
+    Rows are created only by :mod:`quotes.transactions` from a canonical
+    ``Payment`` whose provider confirmation has been verified. The price paid
+    and the confirmation time are copied from that payment and can never be
+    updated or deleted.
+    """
+
+    objects = AppendOnlyQuerySet.as_manager()
+
+    payment = models.OneToOneField(
+        "payments.Payment",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="price_transaction",
+        verbose_name=_("verified payment"),
+        help_text=_("Payment row this confirmation came from; the ledger row survives its removal."),
+    )
+    quote_version = models.ForeignKey(
+        QuoteVersion,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="price_transactions",
+        verbose_name=_("quote version"),
+        help_text=_("Accepted version this payment settles."),
+    )
+    quote_request = models.ForeignKey(
+        QuoteRequest,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="price_transactions",
+        verbose_name=_("quote request"),
+    )
+    managed_job = models.ForeignKey(
+        "jobs.ManagedJob",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="price_transactions",
+        verbose_name=_("managed job"),
+    )
+    printer = models.ForeignKey(
+        Shop,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="price_transactions",
+        verbose_name=_("printer"),
+    )
+    spec_fingerprint = models.CharField(
+        max_length=64,
+        blank=True,
+        default="",
+        verbose_name=_("specification fingerprint"),
+    )
+    price_paid = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        verbose_name=_("price paid"),
+    )
+    currency = models.CharField(max_length=3, default="KES", verbose_name=_("currency"))
+    confirmed_payment_at = models.DateTimeField(
+        verbose_name=_("confirmed payment at"),
+        help_text=_("Provider confirmation time, never the payment-initiation time."),
+    )
+    provider_reference = models.CharField(
+        max_length=100,
+        blank=True,
+        default="",
+        verbose_name=_("provider reference"),
+    )
+    payer_phone = models.CharField(
+        max_length=20,
+        blank=True,
+        default="",
+        verbose_name=_("payer phone"),
+    )
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name=_("created at"))
+
+    class Meta:
+        ordering = ["-confirmed_payment_at", "-id"]
+        verbose_name = _("price transaction")
+        verbose_name_plural = _("price transactions")
+        indexes = [
+            models.Index(fields=["spec_fingerprint"], name="price_tx_spec_idx"),
+            models.Index(fields=["printer", "confirmed_payment_at"], name="price_tx_printer_idx"),
+        ]
+
+    def save(self, *args, **kwargs):
+        if self.pk is not None and type(self).objects.filter(pk=self.pk).exists():
+            raise ValidationError(
+                "Price transactions are append-only; create a correcting record instead (law 10.2)."
+            )
+        return super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):  # noqa: D401
+        raise ValidationError("Price transactions cannot be deleted (law 10.2).")
+
+    def __str__(self):
+        return f"Transaction #{self.pk or 'new'} {self.price_paid} {self.currency}"
 
 
 class QuoteDateRevisionQuerySet(models.QuerySet):
