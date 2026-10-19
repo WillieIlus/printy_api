@@ -340,17 +340,29 @@ class BuyerQuotesListViewTestCase(TestCase):
             created_at=old_ts, updated_at=old_ts
         )
 
-        # Create a newer request
+        # Two requests, older one backdated, to check the recency tiebreak
+        older_qr = QuoteRequest.objects.create(
+            created_by=self.user,
+            customer_name="Buyer",
+            status=QuoteStatus.SUBMITTED,
+        )
+        mid_ts = timezone.now() - timedelta(days=7)
+        QuoteRequest.objects.filter(pk=older_qr.pk).update(
+            created_at=mid_ts, updated_at=mid_ts
+        )
         new_qr = QuoteRequest.objects.create(
             created_by=self.user,
             customer_name="Buyer",
             status=QuoteStatus.SUBMITTED,
         )
         resp = self.client.get("/api/calculator/buyer-quotes/")
-        self.assertEqual(len(resp.json()), 2)
-        # The QuoteRequest should be first (newer)
-        self.assertEqual(resp.json()[0]["item_type"], "quote_request")
-        self.assertEqual(resp.json()[0]["quote_request"]["id"], new_qr.id)
+        self.assertEqual(len(resp.json()), 3)
+        # Law 7.5: within a group, items needing the viewer's action come
+        # first (the unsent draft is the buyer's to send), then newest first.
+        self.assertEqual(resp.json()[0]["item_type"], "draft")
+        self.assertEqual(resp.json()[1]["item_type"], "quote_request")
+        self.assertEqual(resp.json()[1]["quote_request"]["id"], new_qr.id)
+        self.assertEqual(resp.json()[2]["quote_request"]["id"], older_qr.id)
 
     def test_does_not_show_other_users_drafts(self):
         other = _make_client(email="other@test.ke")

@@ -253,6 +253,11 @@ def _global_missing_fields(payload: dict[str, Any]) -> list[str]:
 
 def _shop_queryset(payload=None):
     qs = Shop.objects.filter(is_active=True).select_related("owner").order_by("id")
+    # Law 11.7: a printer whose rate card has not been confirmed (first save)
+    # must not appear in find-printer. Shops that never opened the rate-card
+    # screen have no setup record and stay visible (their seeded pricing is
+    # what matching has always used).
+    qs = qs.exclude(rate_card_setup__is_confirmed=False)
     # Honour an explicit shop pin so a manager sourcing on behalf of one
     # printer gets that printer only, instead of every shop in the platform.
     if isinstance(payload, dict):

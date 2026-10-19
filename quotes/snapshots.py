@@ -95,8 +95,14 @@ def _version_money_fields(quote) -> dict:
     production_cost = getattr(financials, "production_cost", None)
     if production_cost is None and production_option is not None:
         production_cost = getattr(production_option, "production_cost", None)
+    printer = getattr(quote, "shop", None)
+    rate_card_version = ""
+    if printer is not None:
+        setup = getattr(printer, "rate_card_setup", None)
+        if setup is not None:
+            rate_card_version = getattr(setup, "rate_card_version", "") or ""
     return {
-        "printer": getattr(quote, "shop", None),
+        "printer": printer,
         "printer_quoted_price": production_cost,
         "manager_margin": getattr(financials, "manager_markup", None),
         "fees": getattr(financials, "printy_fee", None),
@@ -106,6 +112,7 @@ def _version_money_fields(quote) -> dict:
             getattr(quote, "quote_request", None), "due_date", None
         )
         or getattr(quote, "estimated_ready_at", None),
+        "rate_card_version": rate_card_version,
     }
 
 
@@ -259,6 +266,7 @@ def record_quote_version(
         fees=terms["fees"],
         buyer_price=terms["buyer_price"],
         due_date=terms["due_date"],
+        rate_card_version=terms.get("rate_card_version", ""),
         created_by=user,
     )
 

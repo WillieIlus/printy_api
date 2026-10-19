@@ -62,6 +62,9 @@ class ShopRateCardSetup(TimeStampedModel):
     paper_rows = models.JSONField(default=list, blank=True)
     finishing_rows = models.JSONField(default=list, blank=True)
     shop_details = models.JSONField(default=dict, blank=True)
+    master_settings = models.JSONField(default=dict, blank=True)
+    rate_card_version = models.CharField(max_length=64, default="1", blank=True)
+    is_confirmed = models.BooleanField(default=False)
     completed = models.BooleanField(default=False)
 
     class Meta:
@@ -429,13 +432,24 @@ class PrintingRate(TimeStampedModel):
         }
 
     def get_price_for_sides(self, sides, *, paper=None, apply_duplex_surcharge=None):
-        """Return the effective per-sheet printing price for simplex or duplex."""
+        """Return the effective per-sheet printing price for simplex or duplex.
+
+        Law 11.3 / item 21: the heavy-stock surcharge is part of the print
+        charge on BOTH simplex and duplex sheets whenever the surcharge rule
+        applies, so the one-side total shown on the rate card equals what the
+        engine charges.
+        """
         if sides == Sides.DUPLEX:
             return self.get_duplex_price_breakdown(
                 paper=paper,
                 apply_duplex_surcharge=apply_duplex_surcharge,
             )["total_per_sheet"]
-        return Decimal(self.single_price or 0)
+        surcharge_applied = self.should_apply_duplex_surcharge(
+            paper=paper,
+            apply_duplex_surcharge=apply_duplex_surcharge,
+        )
+        surcharge_amount = Decimal(self.duplex_surcharge or 0) if surcharge_applied else Decimal("0")
+        return Decimal(self.single_price or 0) + surcharge_amount
 
     @classmethod
     def resolve(cls, machine, sheet_size, color_mode, sides, *, paper=None, apply_duplex_surcharge=None):

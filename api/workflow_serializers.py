@@ -1917,6 +1917,13 @@ class MvpRateCardPaperRowSerializer(serializers.Serializer):
     surcharge_threshold_gsm = serializers.IntegerField(required=False, allow_null=True, min_value=1)
     single_side_price = serializers.DecimalField(max_digits=12, decimal_places=2, required=False, allow_null=True)
     double_side_price = serializers.DecimalField(max_digits=12, decimal_places=2, required=False, allow_null=True)
+    # Law 11.3: explicit per-row overrides; null/absent means "follow master".
+    override_single_print = serializers.DecimalField(max_digits=12, decimal_places=2, required=False, allow_null=True)
+    override_double_print = serializers.DecimalField(max_digits=12, decimal_places=2, required=False, allow_null=True)
+    override_surcharge = serializers.DecimalField(max_digits=12, decimal_places=2, required=False, allow_null=True)
+    supports_double_side = serializers.BooleanField(required=False, allow_null=True)
+    double_sided_enabled = serializers.BooleanField(required=False, allow_null=True)
+    is_sticker_stock = serializers.BooleanField(required=False, allow_null=True)
     active = serializers.BooleanField(required=False, default=False)
 
 
@@ -1929,7 +1936,27 @@ class MvpRateCardFinishingRowSerializer(serializers.Serializer):
     unit = serializers.CharField(required=False, allow_blank=True)
     price = serializers.DecimalField(max_digits=12, decimal_places=2, required=False, allow_null=True)
     minimum_charge = serializers.DecimalField(max_digits=12, decimal_places=2, required=False, allow_null=True)
+    # Law 11.3: per-row overrides; null/absent means "follow master/default".
+    override_rate = serializers.DecimalField(max_digits=12, decimal_places=2, required=False, allow_null=True)
+    override_minimum = serializers.DecimalField(max_digits=12, decimal_places=2, required=False, allow_null=True)
     active = serializers.BooleanField(required=False, default=False)
+
+
+class MvpRateCardMasterSettingsSerializer(serializers.Serializer):
+    """Law 11.3 master inputs. Every field is optional; missing values fall
+    back to the preset defaults."""
+
+    single_print = serializers.DecimalField(max_digits=12, decimal_places=2, required=False, allow_null=True)
+    double_print = serializers.DecimalField(max_digits=12, decimal_places=2, required=False, allow_null=True)
+    surcharge = serializers.DecimalField(max_digits=12, decimal_places=2, required=False, allow_null=True)
+    surcharge_threshold_gsm = serializers.IntegerField(required=False, allow_null=True, min_value=1)
+    gloss_first_side = serializers.DecimalField(max_digits=12, decimal_places=2, required=False, allow_null=True)
+    matt_first_side = serializers.DecimalField(max_digits=12, decimal_places=2, required=False, allow_null=True)
+    lamination_second_multiplier = serializers.DecimalField(max_digits=6, decimal_places=2, required=False, allow_null=True)
+
+    def validate(self, attrs):
+        # Drop nulls so the resolver applies preset defaults for blank inputs.
+        return {key: value for key, value in attrs.items() if value is not None}
 
 
 class MvpRateCardShopDetailsSerializer(serializers.Serializer):
@@ -1976,6 +2003,7 @@ class MvpRateCardPreviewSerializer(serializers.Serializer):
     finishings = MvpRateCardFinishingRowSerializer(many=True, required=False, default=list)
     paper_rows = MvpRateCardPaperRowSerializer(many=True, required=False, default=list)
     finishing_rows = MvpRateCardFinishingRowSerializer(many=True, required=False, default=list)
+    master_settings = MvpRateCardMasterSettingsSerializer(required=False, allow_null=True, default=None)
 
     def validate(self, attrs):
         attrs["paper_rows"] = attrs.get("paper_prices") or attrs.get("paper_rows") or []
@@ -2000,6 +2028,7 @@ class MvpRateCardSetupSerializer(serializers.Serializer):
     finishing_rows = MvpRateCardFinishingRowSerializer(many=True, required=False, default=list)
     shop_details = MvpRateCardShopDetailsSerializer(required=False, default=dict)
     expected_version = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+    master_settings = MvpRateCardMasterSettingsSerializer(required=False, allow_null=True, default=None)
 
     def validate(self, attrs):
         attrs["paper_rows"] = attrs.get("paper_prices") or attrs.get("paper_rows") or []
@@ -2030,6 +2059,7 @@ class MvpRateCardTablePreviewSerializer(serializers.Serializer):
         allow_null=True,
     )
     shop_slug = serializers.CharField(required=False, allow_blank=True)
+    master_settings = MvpRateCardMasterSettingsSerializer(required=False, allow_null=True, default=None)
 
     def validate(self, attrs):
         attrs["finishing_rows"] = _normalize_mvp_finishing_rows(attrs.get("finishing_rows") or [])
@@ -2045,6 +2075,7 @@ class MvpRateCardPublicSaveSerializer(serializers.Serializer):
     shop = MvpRateCardPublicShopSerializer(required=False, default=dict)
     paper_prices = MvpRateCardPaperRowSerializer(many=True, required=False, default=list)
     finishings = MvpRateCardFinishingRowSerializer(many=True, required=False, default=list)
+    master_settings = MvpRateCardMasterSettingsSerializer(required=False, allow_null=True, default=None)
 
     def validate(self, attrs):
         attrs["shop_details"] = {

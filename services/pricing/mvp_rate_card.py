@@ -16,6 +16,14 @@ from pricing.models import FinishingRate, PrintingRate, ShopRateCardSetup, Waste
 from pricing.services.production_cost_calculator import calculate_billable_sheets
 from services.pricing.imposition import build_imposition_breakdown
 from services.pricing.marketplace_pricing import build_marketplace_pricing_summary, get_marketplace_margin_settings
+from services.pricing.rate_card_resolver import (
+    DEFAULT_MASTER_SETTINGS,
+    LAMINATION_ROW_KINDS,
+    finishing_charge,
+    resolve_finishing_row,
+    resolve_master_settings,
+    resolve_paper_row,
+)
 
 
 DEFAULT_PAPER_DEFINITIONS: list[dict[str, Any]] = [
@@ -89,9 +97,33 @@ class StaleRateCardVersion(Exception):
 
 
 def _rate_card_version(setup: ShopRateCardSetup | None) -> str:
-    if setup is None or setup.updated_at is None:
+    """Stored rate-card version (law 11.6). "0" means never saved."""
+    if setup is None:
+        return "0"
+    stored = _normalize_text(getattr(setup, "rate_card_version", ""))
+    if stored:
+        return stored
+    # Records saved before versioning kept the timestamp as their version.
+    if setup.updated_at is None:
         return "0"
     return setup.updated_at.isoformat()
+
+
+def _next_rate_card_version(setup: ShopRateCardSetup | None) -> str:
+    if setup is None:
+        return "1"
+    stored = _normalize_text(getattr(setup, "rate_card_version", ""))
+    if stored.isdigit():
+        return str(int(stored) + 1)
+    if setup.updated_at is None:
+        return "1"
+    return "2"
+
+
+def stored_master_settings(shop) -> dict[str, Any] | None:
+    """Master settings saved for this shop, or None when never saved."""
+    setup = _stored_rate_card_setup(shop)
+    return setup.master_settings if setup else None
 
 
 MARKET_GUIDE_MIN_SAMPLE_COUNT = 3
@@ -191,27 +223,21 @@ def _is_sticker_row(row: dict[str, Any]) -> bool:
     return "sticker" in haystack or "tictac" in haystack or "tic tac" in haystack
 
 
-def _resolve_paper_base_price(row: dict[str, Any], definition: dict[str, Any]) -> Decimal:
+def _resolve_paper_base_price(
+    row: dict[str, Any],
+    definition: dict[str, Any],
+    *,
+    master: dict[str, Any] | None = None,
+) -> Decimal:
     raw_base = row.get("paper_base_price")
     if raw_base not in (None, ""):
         return _to_decimal(raw_base)
     raw_single = row.get("single_side_price")
     if raw_single not in (None, ""):
         gsm = int(_first_present(row.get("gsm"), definition.get("gsm"), default=0))
-        surcharge = _to_decimal(
-            _first_present(
-                row.get("heavy_paper_surcharge"),
-                definition.get("heavy_paper_surcharge"),
-                default=DEFAULT_HEAVY_PAPER_SURCHARGE,
-            )
-        )
-        threshold = int(
-            _first_present(
-                row.get("surcharge_threshold_gsm"),
-                definition.get("surcharge_threshold_gsm"),
-                default=DEFAULT_SURCHARGE_THRESHOLD_GSM,
-            )
-        )
+        resolved_master = resolve_master_settings(master)
+        surcharge = _to_decimal(resolved_master["surcharge"])
+        threshold = int(resolved_master["surcharge_threshold_gsm"])
         base = _to_decimal(raw_single) - _to_decimal(
             _first_present(
                 row.get("single_print_base"),
@@ -225,66 +251,51 @@ def _resolve_paper_base_price(row: dict[str, Any], definition: dict[str, Any]) -
     return _to_decimal(definition.get("paper_base_price") or "0.00")
 
 
-def _enrich_paper_row(row: dict[str, Any], *, definition: dict[str, Any] | None = None) -> dict[str, Any]:
+def _enrich_paper_row(
+    row: dict[str, Any],
+    *,
+    definition: dict[str, Any] | None = None,
+    master: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Resolve one paper row through THE rate-card resolver (law 11.3).
+
+    Keeps the display-only decorations (formula, warnings, capability
+    placeholders) but every number comes from
+    ``services.pricing.rate_card_resolver`` — the single place derivation
+    rules live. Preview, save and the engine all share these values.
+    """
     resolved_definition = definition or _resolve_paper_definition(row) or row
-    enriched = deepcopy(row)
-    gsm = int(_first_present(enriched.get("gsm"), resolved_definition.get("gsm"), default=0))
-    paper_base_price = _resolve_paper_base_price(enriched, resolved_definition)
-    single_print_base = _to_decimal(
-        _first_present(
-            enriched.get("single_print_base"),
-            resolved_definition.get("single_print_base"),
-            default=DEFAULT_SINGLE_PRINT_BASE,
-        )
+    candidate = deepcopy(row)
+    candidate["paper_base_price"] = _decimal_string(
+        _resolve_paper_base_price(candidate, resolved_definition, master=master)
     )
-    # The supplied SRA3 workbook leaves the both-sides cell blank when it should
-    # simply be twice the one-side price. Preserve that rule here instead of
-    # falling back to a stale fixed number when the one-side rate changes.
-    raw_double_print_base = enriched.get("double_print_base")
-    if raw_double_print_base in (None, ""):
-        raw_double_print_base = single_print_base * Decimal("2")
-    double_print_base = _to_decimal(raw_double_print_base)
-    heavy_paper_surcharge = _to_decimal(
-        _first_present(
-            enriched.get("heavy_paper_surcharge"),
-            resolved_definition.get("heavy_paper_surcharge"),
-            default=DEFAULT_HEAVY_PAPER_SURCHARGE,
-        )
-    )
-    surcharge_threshold_gsm = int(
-        _first_present(
-            enriched.get("surcharge_threshold_gsm"),
-            resolved_definition.get("surcharge_threshold_gsm"),
-            default=DEFAULT_SURCHARGE_THRESHOLD_GSM,
-        )
-    )
-    double_sided_enabled = bool(resolved_definition.get("supports_double_side", True)) and not _is_sticker_row(enriched)
-    surcharge_applies = gsm >= surcharge_threshold_gsm
-    surcharge_amount = heavy_paper_surcharge if surcharge_applies else Decimal("0.00")
-    single_total = paper_base_price + single_print_base + surcharge_amount
-    double_total = paper_base_price + double_print_base + surcharge_amount if double_sided_enabled else None
+    resolved_master = resolve_master_settings(master)
+    enriched = resolve_paper_row(candidate, resolved_master)
+
+    gsm = int(enriched.get("gsm") or 0)
+    paper_base_price = _to_decimal(enriched["paper_base_price"])
+    single_print_base = _to_decimal(enriched["single_print_base"])
+    double_print_base = _to_decimal(enriched["double_print_base"], allow_null=True)
+    surcharge_amount = _to_decimal(enriched["single_side_price"]) - paper_base_price - single_print_base
+    single_total = _to_decimal(enriched["single_side_price"])
+    double_total = _to_decimal(enriched["double_side_price"], allow_null=True)
+    double_sided_enabled = bool(enriched.get("double_sided_enabled"))
+    surcharge_applies = bool(enriched.get("surcharge_applies"))
+
     single_parts = [paper_base_price, single_print_base]
-    double_parts = [paper_base_price, double_print_base]
+    double_parts = [paper_base_price, double_print_base if double_print_base is not None else single_print_base * Decimal("2")]
     if surcharge_amount > 0:
         single_parts.append(surcharge_amount)
         double_parts.append(surcharge_amount)
     single_parts.append(single_total)
     warnings: list[str] = []
     if surcharge_applies:
-        warnings.append(f"Heavy paper surcharge applied because GSM is {surcharge_threshold_gsm}+.")
+        warnings.append(f"Heavy paper surcharge applied because GSM is {int(enriched.get('surcharge_threshold_gsm') or 0)}+.")
     if not double_sided_enabled:
         warnings.append("Double-sided is disabled for sticker stock.")
     enriched.update(
         {
-            "paper_base_price": _decimal_string(paper_base_price),
-            "single_print_base": _decimal_string(single_print_base),
-            "double_print_base": _decimal_string(double_print_base),
-            "heavy_paper_surcharge": _decimal_string(heavy_paper_surcharge),
-            "surcharge_threshold_gsm": surcharge_threshold_gsm,
-            "single_side_price": _decimal_string(single_total),
-            "double_side_price": _decimal_string(double_total),
-            "double_sided_enabled": double_sided_enabled,
-            "supports_double_side": double_sided_enabled,
+            "quantity_in_stock": enriched.get("quantity_in_stock") or _default_quantity_in_stock(enriched),
             "manager_visible_single_total": _decimal_string(single_total),
             "manager_visible_double_total": _decimal_string(double_total),
             "formula_shop_visible": {
@@ -349,15 +360,16 @@ def _build_finishing_preview(row: dict[str, Any], *, quantity: int, sheets_neede
     rate = _to_decimal(row.get("price") or "0.00")
     minimum_charge = _to_decimal(row.get("minimum_charge"), allow_null=True)
     units, basis = _finishing_quantity_basis(row, quantity=quantity, sheets_needed=sheets_needed)
-    raw_total = rate * Decimal(units)
-    final_total = raw_total
-    minimum_applied = False
-    if minimum_charge is not None and final_total < minimum_charge:
-        final_total = minimum_charge
-        minimum_applied = True
+    mode = _normalize_text(row.get("pricing_mode")).lower()
+    is_flat = mode not in ("per_sheet", "per_book", "per_piece")
+    raw_total = rate * Decimal(units) if not is_flat else rate
+    # Law 11.3: the charge itself is computed by the shared resolver so the
+    # preview can never drift from the saved/engine price.
+    final_total = finishing_charge(row, quantity=quantity, units=sheets_needed if basis == "sheet" else None)
+    minimum_applied = (not is_flat) and minimum_charge is not None and final_total == minimum_charge and minimum_charge > rate * Decimal(units)
     formula = (
         f"{units} x {int(rate) if rate == rate.to_integral_value() else rate} = {int(raw_total) if raw_total == raw_total.to_integral_value() else raw_total}"
-        if units != 1 or _normalize_text(row.get('pricing_mode')).lower() != "flat_per_job"
+        if not is_flat
         else f"Flat rate = {int(rate) if rate == rate.to_integral_value() else rate}"
     )
     if minimum_applied and minimum_charge is not None:
@@ -412,13 +424,15 @@ def build_rate_card_table_preview(
     quantity: int = 100,
     product_key: str = "business-cards",
     finishing_keys: list[str] | None = None,
+    master_settings: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Canonical Excel-like preview for the rate card table.
 
     Paper and printing are billed on the capped billable sheet count; finishing
     is billed on good sheets, matching ``services.pricing.engine``. Every row
     is calculated from the same stored inputs the quote engine reads, so the
-    table cannot drift from the server price.
+    table cannot drift from the server price. All derivation happens in
+    ``services.pricing.rate_card_resolver`` (law 11.3, law 11.5).
     """
     try:
         quantity = int(quantity or 100)
@@ -426,6 +440,8 @@ def build_rate_card_table_preview(
         raise ValidationError({"quantity": ["Quantity must be a whole number."]}) from exc
     if quantity <= 0:
         raise ValidationError({"quantity": ["Quantity must be greater than zero."]})
+
+    master = resolve_master_settings(master_settings)
 
     product = _table_product(product_key)
     width_mm, height_mm = product["size"]
@@ -463,10 +479,11 @@ def build_rate_card_table_preview(
     for row in finishing_rows:
         if not _is_active_finishing(row):
             continue
-        preview = _build_finishing_preview(row, quantity=quantity, sheets_needed=good_sheets)
-        preview["key"] = row.get("key")
-        preview["label"] = row.get("label") or row.get("name")
-        preview["selected"] = str(row.get("key")) in selected_keys
+        resolved_finishing = resolve_finishing_row(row, master)
+        preview = _build_finishing_preview(resolved_finishing, quantity=quantity, sheets_needed=good_sheets)
+        preview["key"] = resolved_finishing.get("key")
+        preview["label"] = resolved_finishing.get("label") or resolved_finishing.get("name")
+        preview["selected"] = str(resolved_finishing.get("key")) in selected_keys
         finishing_previews.append(preview)
         if preview["selected"]:
             selected_finishing_total += _to_decimal(preview["final_total"] or "0.00")
@@ -492,24 +509,34 @@ def build_rate_card_table_preview(
 
     rows: list[dict[str, Any]] = []
     for row in paper_rows:
-        paper_rate = _to_decimal(row.get("paper_base_price") or "0.00")
-        single_print_rate = _to_decimal(row.get("single_print_base") or "0.00")
-        raw_double = row.get("double_print_base")
-        double_print_rate = _to_decimal(raw_double) if raw_double not in (None, "") else single_print_rate * Decimal("2")
-        surcharge_rate = _to_decimal(row.get("heavy_paper_surcharge") or "0.00")
-        threshold = int(row.get("surcharge_threshold_gsm") or DEFAULT_SURCHARGE_THRESHOLD_GSM)
-        gsm = int(row.get("gsm") or 0)
-        surcharge_applies = gsm >= threshold and surcharge_rate > 0
-        applied_surcharge = surcharge_rate if surcharge_applies else Decimal("0.00")
-        double_enabled = bool(row.get("double_sided_enabled", True)) and raw_double is not None
+        resolved = resolve_paper_row(row, master)
+        paper_rate = _to_decimal(resolved["paper_base_price"] or "0.00")
+        single_print_rate = _to_decimal(resolved["printing_alone_one_side"] or "0.00")
+        raw_double = resolved.get("printing_alone_both_sides")
+        double_print_rate = _to_decimal(raw_double) if raw_double not in (None, "") else None
+        applied_surcharge = (
+            _to_decimal(resolved.get("surcharge_rate") or "0.00") if resolved.get("surcharge_applies") else Decimal("0.00")
+        )
+        double_enabled = bool(resolved.get("double_sided_available")) and double_print_rate is not None
         rows.append(
             {
-                "key": row.get("key"),
-                "label": row.get("label") or row.get("paper_name"),
-                "gsm": gsm,
-                "size": row.get("size") or "SRA3",
-                "active": bool(row.get("active")),
-                "surcharge_applies": surcharge_applies,
+                "key": resolved.get("key"),
+                "label": resolved.get("label") or resolved.get("paper_name"),
+                "gsm": int(resolved.get("gsm") or 0),
+                "size": resolved.get("size") or "SRA3",
+                "active": bool(resolved.get("active")),
+                "surcharge_applies": bool(resolved.get("surcharge_applies")),
+                # Flat law 11.3 columns: the exact table the printer must see.
+                "paper_cost": resolved["paper_base_price"],
+                "printing_alone_one_side": resolved["printing_alone_one_side"],
+                "printing_alone_both_sides": resolved["printing_alone_both_sides"],
+                "surcharge_rate": resolved["surcharge_rate"],
+                "total_one_side": resolved["total_one_side"],
+                "total_both_sides": resolved["total_both_sides"],
+                "double_sided_available": bool(resolved.get("double_sided_available")),
+                "override_single_print": resolved.get("override_single_print"),
+                "override_double_print": resolved.get("override_double_print"),
+                "override_surcharge": resolved.get("override_surcharge"),
                 "single": side_payload(paper_rate=paper_rate, print_rate=single_print_rate, surcharge_rate=applied_surcharge),
                 "double": side_payload(paper_rate=paper_rate, print_rate=double_print_rate, surcharge_rate=applied_surcharge) if double_enabled else None,
             }
@@ -526,6 +553,7 @@ def build_rate_card_table_preview(
     return {
         "currency": "KES",
         "quantity": quantity,
+        "master_settings": master,
         "product": {
             "key": product["key"],
             "label": product["label"],
@@ -561,15 +589,18 @@ def preview_shop_rate_card_table(
     quantity: int = 100,
     product_key: str = "business-cards",
     finishing_keys: list[str] | None = None,
+    master_settings: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    normalized_papers = _normalize_paper_rows(paper_rows)
-    normalized_finishings = _normalize_finishing_rows(finishing_rows)
+    master = resolve_master_settings(master_settings)
+    normalized_papers = _normalize_paper_rows(paper_rows, master=master)
+    normalized_finishings = _normalize_finishing_rows(finishing_rows, master=master)
     return build_rate_card_table_preview(
         paper_rows=normalized_papers,
         finishing_rows=normalized_finishings,
         quantity=quantity,
         product_key=product_key,
         finishing_keys=finishing_keys,
+        master_settings=master,
     )
 
 
@@ -670,7 +701,12 @@ def _resolve_finishing_definition(row: dict[str, Any]) -> dict[str, Any] | None:
     return None
 
 
-def _normalize_paper_rows(rows: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+def _normalize_paper_rows(
+    rows: list[dict[str, Any]] | None,
+    *,
+    master: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    master_settings = resolve_master_settings(master)
     ordered_keys = [_normalize_text(row.get("key")) for row in (rows or []) if row.get("key")]
     input_rows = {_normalize_text(row.get("key")): row for row in (rows or []) if row.get("key")}
     ordered_definitions = [
@@ -708,16 +744,21 @@ def _normalize_paper_rows(rows: list[dict[str, Any]] | None) -> list[dict[str, A
         normalized_row["active"] = bool(row.get("active"))
         if normalized_row["active"]:
             try:
-                normalized.append(_enrich_paper_row(normalized_row, definition=definition))
+                normalized.append(_enrich_paper_row(normalized_row, definition=definition, master=master_settings))
             except ValidationError:
                 idx = (rows or []).index(row)
                 raise ValidationError({"paper_prices": {idx: {"paper_base_price": ["Enter a valid non-negative paper base price."]}}})
         else:
-            normalized.append(_enrich_paper_row(normalized_row, definition=definition))
+            normalized.append(_enrich_paper_row(normalized_row, definition=definition, master=master_settings))
     return normalized
 
 
-def _normalize_finishing_rows(rows: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+def _normalize_finishing_rows(
+    rows: list[dict[str, Any]] | None,
+    *,
+    master: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    master_settings = resolve_master_settings(master)
     ordered_keys = [_normalize_text(row.get("key")) for row in (rows or []) if row.get("key")]
     input_rows = {_normalize_text(row.get("key")): row for row in (rows or []) if row.get("key")}
     ordered_definitions = [
@@ -742,8 +783,22 @@ def _normalize_finishing_rows(rows: list[dict[str, Any]] | None) -> list[dict[st
             continue
 
         active = bool(row.get("active"))
-        price = _to_decimal(row.get("price"), allow_null=not active)
-        minimum_charge = _to_decimal(row.get("minimum_charge"), allow_null=True)
+        candidate = _finishing_row_from_definition(definition)
+        candidate.update(row)
+        candidate["active"] = active
+        # Lamination rates derive from the master inputs (law 11.3), so an
+        # active lamination row no longer requires a typed price; every other
+        # active service still must carry one.
+        is_lamination = _normalize_text(definition.get("key")) in LAMINATION_ROW_KINDS
+        try:
+            resolved = resolve_finishing_row(candidate, master_settings)
+        except ValidationError:
+            resolved = None
+        if is_lamination and resolved is not None:
+            price = _to_decimal(resolved["price"], allow_null=True)
+        else:
+            price = _to_decimal(row.get("price"), allow_null=True)
+        minimum_charge = _to_decimal(resolved["minimum_charge"], allow_null=True) if resolved else _to_decimal(row.get("minimum_charge"), allow_null=True)
         if active and price is None:
             idx = (rows or []).index(row)
             raise ValidationError({"finishings": {idx: {"price": ["Enter a valid non-negative finishing price."]}}})
@@ -753,6 +808,9 @@ def _normalize_finishing_rows(rows: list[dict[str, Any]] | None) -> list[dict[st
             {
                 "price": _decimal_string(price),
                 "minimum_charge": _decimal_string(minimum_charge),
+                "override_rate": resolved.get("override_rate") if resolved else None,
+                "override_minimum": resolved.get("override_minimum") if resolved else None,
+                "derived_from_master": resolved.get("derived_from_master") if resolved else False,
                 "active": active,
             }
         )
@@ -1313,7 +1371,8 @@ def _finishing_identity_from_row(shop, row: dict[str, Any], *, slug: str) -> dic
     }
 
 
-def _persist_finishing_rows(shop, finishing_rows: list[dict[str, Any]]) -> None:
+def _persist_finishing_rows(shop, finishing_rows: list[dict[str, Any]], *, master: dict[str, Any] | None = None) -> None:
+    master_settings = resolve_master_settings(master)
     for row in finishing_rows:
         definition = _resolve_finishing_definition(row)
         name = _normalize_text(row.get("name") or row.get("label") or (definition or {}).get("name"))
@@ -1325,12 +1384,27 @@ def _persist_finishing_rows(shop, finishing_rows: list[dict[str, Any]]) -> None:
             FinishingRate.objects.filter(**identity).update(is_active=False)
             continue
         price = _to_decimal(row.get("price") or "0.00")
+        double_side_price: Decimal | None = None
+        if identity["side_mode"] == FinishingSideMode.PER_SELECTED_SIDE:
+            lamination_kind = LAMINATION_ROW_KINDS.get(_normalize_text(row.get("key")))
+            if lamination_kind is not None:
+                # Law 11.3: lamination both sides = first side x (1 + master
+                # multiplier). Single rows store that derived both-side rate;
+                # double rows already carry the both-side rate as their price.
+                _tone, both_sides = lamination_kind
+                if both_sides:
+                    double_side_price = price
+                else:
+                    multiplier = Decimal(str(master_settings["lamination_second_multiplier"]))
+                    double_side_price = (price * (Decimal("1") + multiplier)).quantize(Decimal("0.01"))
+            else:
+                double_side_price = price * Decimal("2")
         FinishingRate.objects.update_or_create(
             **identity,
             defaults={
                 "name": name,
                 "price": price,
-                "double_side_price": price * Decimal("2") if identity["side_mode"] == FinishingSideMode.PER_SELECTED_SIDE else None,
+                "double_side_price": double_side_price,
                 "minimum_charge": _to_decimal(row.get("minimum_charge"), allow_null=True),
                 "setup_fee": Decimal("0.00"),
                 "is_active": True,
@@ -1547,17 +1621,23 @@ def summarize_rate_card(paper_rows: list[dict[str, Any]], finishing_rows: list[d
     }
 
 
-def _decorate_rate_card_rows(paper_rows: list[dict[str, Any]], finishing_rows: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+def _decorate_rate_card_rows(
+    paper_rows: list[dict[str, Any]],
+    finishing_rows: list[dict[str, Any]],
+    *,
+    master: dict[str, Any] | None = None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    master_settings = resolve_master_settings(master)
     decorated_papers: list[dict[str, Any]] = []
     for row in paper_rows:
-        enriched = _enrich_paper_row(row)
+        enriched = _enrich_paper_row(row, master=master_settings)
         enriched["capability_preview"] = _capability_preview_for_paper(enriched, finishing_rows)
         enriched["sample_job_previews"] = _build_sample_job_preview(enriched, finishing_rows) if _is_active_paper(enriched) else []
         decorated_papers.append(enriched)
 
     decorated_finishings: list[dict[str, Any]] = []
     for row in finishing_rows:
-        enriched = deepcopy(row)
+        enriched = resolve_finishing_row(row, master_settings)
         sample_context = next((paper_row["sample_job_previews"][0] for paper_row in decorated_papers if paper_row.get("sample_job_previews")), None)
         if sample_context:
             preview = _build_finishing_preview(
@@ -1573,7 +1653,10 @@ def _decorate_rate_card_rows(paper_rows: list[dict[str, Any]], finishing_rows: l
 
 
 def build_public_rate_card_builder_config() -> dict[str, Any]:
-    paper_rows, finishing_rows = _decorate_rate_card_rows(_build_default_paper_rows(), _build_default_finishing_rows())
+    master = resolve_master_settings(None)
+    paper_rows, finishing_rows = _decorate_rate_card_rows(
+        _build_default_paper_rows(), _build_default_finishing_rows(), master=master
+    )
     summary = summarize_rate_card(paper_rows, finishing_rows)
     pricing_settings = get_marketplace_margin_settings()
     return {
@@ -1585,13 +1668,20 @@ def build_public_rate_card_builder_config() -> dict[str, Any]:
         "example_quote": build_business_card_example(paper_rows, finishing_rows),
         "market_label": "Nairobi Market Guide",
         "pricing_settings": _pricing_settings_payload(pricing_settings),
+        "master_settings": master,
     }
 
 
-def preview_public_rate_card_builder(*, paper_rows: list[dict[str, Any]], finishing_rows: list[dict[str, Any]]) -> dict[str, Any]:
-    normalized_papers = _normalize_paper_rows(paper_rows)
-    normalized_finishings = _normalize_finishing_rows(finishing_rows)
-    normalized_papers, normalized_finishings = _decorate_rate_card_rows(normalized_papers, normalized_finishings)
+def preview_public_rate_card_builder(
+    *,
+    paper_rows: list[dict[str, Any]],
+    finishing_rows: list[dict[str, Any]],
+    master_settings: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    master = resolve_master_settings(master_settings)
+    normalized_papers = _normalize_paper_rows(paper_rows, master=master)
+    normalized_finishings = _normalize_finishing_rows(finishing_rows, master=master)
+    normalized_papers, normalized_finishings = _decorate_rate_card_rows(normalized_papers, normalized_finishings, master=master)
     pricing_settings = get_marketplace_margin_settings()
     return {
         "paper_rows": normalized_papers,
@@ -1601,24 +1691,26 @@ def preview_public_rate_card_builder(*, paper_rows: list[dict[str, Any]], finish
         "example_quote": build_business_card_example(normalized_papers, normalized_finishings),
         "market_label": "Nairobi Market Guide",
         "pricing_settings": _pricing_settings_payload(pricing_settings),
+        "master_settings": master,
     }
 
 
 def build_shop_rate_card_setup(shop, *, activate_defaults: bool = False) -> dict[str, Any]:
     stored_setup = _stored_rate_card_setup(shop)
+    master = resolve_master_settings(stored_setup.master_settings if stored_setup else None)
     stored_paper_rows = stored_setup.paper_rows if stored_setup and stored_setup.paper_rows else None
     stored_finishing_rows = stored_setup.finishing_rows if stored_setup and stored_setup.finishing_rows else None
     canonical_paper_rows = _canonical_paper_rows_for_shop(shop)
     should_activate_defaults = activate_defaults and not stored_paper_rows and not any(row.get("active") for row in canonical_paper_rows)
     default_paper_rows = _activated_default_paper_rows() if should_activate_defaults else _build_default_paper_rows()
     source_paper_rows = default_paper_rows if should_activate_defaults else (stored_paper_rows or canonical_paper_rows or default_paper_rows)
-    paper_rows = _normalize_paper_rows(source_paper_rows)
+    paper_rows = _normalize_paper_rows(source_paper_rows, master=master)
     canonical_finishing_rows = _canonical_finishing_rows_for_shop(shop)
     should_activate_finishing_defaults = should_activate_defaults and not stored_finishing_rows and not any(row.get("active") for row in canonical_finishing_rows)
     default_finishing_rows = _activated_default_finishing_rows() if should_activate_finishing_defaults else _build_default_finishing_rows()
     source_finishing_rows = default_finishing_rows if should_activate_finishing_defaults else (stored_finishing_rows or canonical_finishing_rows or default_finishing_rows)
-    finishing_rows = _normalize_finishing_rows(source_finishing_rows)
-    paper_rows, finishing_rows = _decorate_rate_card_rows(paper_rows, finishing_rows)
+    finishing_rows = _normalize_finishing_rows(source_finishing_rows, master=master)
+    paper_rows, finishing_rows = _decorate_rate_card_rows(paper_rows, finishing_rows, master=master)
     default_shop_details = {
         "shop_name": getattr(shop, "name", ""),
         "whatsapp_number": getattr(shop, "public_whatsapp_number", "") or getattr(shop, "phone_number", ""),
@@ -1634,9 +1726,11 @@ def build_shop_rate_card_setup(shop, *, activate_defaults: bool = False) -> dict
         "summary": summarize_rate_card(paper_rows, finishing_rows),
         "market_guides": build_market_guides(paper_rows, finishing_rows),
         "example_quote": build_business_card_example(paper_rows, finishing_rows, include_client_pricing=False),
-        "table_preview": build_rate_card_table_preview(paper_rows=paper_rows, finishing_rows=finishing_rows),
+        "table_preview": build_rate_card_table_preview(paper_rows=paper_rows, finishing_rows=finishing_rows, master_settings=master),
         "market_label": "Nairobi Market Guide",
         "completed": bool(stored_setup.completed if stored_setup else getattr(shop, "pricing_ready", False)),
+        "is_confirmed": bool(stored_setup.is_confirmed if stored_setup else False),
+        "master_settings": master,
         "version": _rate_card_version(stored_setup),
         "pricing_settings": _pricing_settings_payload(pricing_settings),
     }
@@ -1650,10 +1744,12 @@ def save_shop_rate_card_setup(
     shop_details: dict[str, Any] | None = None,
     completed: bool | None = None,
     expected_version: str | None = None,
+    master_settings: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    normalized_papers = _normalize_paper_rows(paper_rows)
-    normalized_finishings = _normalize_finishing_rows(finishing_rows)
-    normalized_papers, normalized_finishings = _decorate_rate_card_rows(normalized_papers, normalized_finishings)
+    master = resolve_master_settings(master_settings)
+    normalized_papers = _normalize_paper_rows(paper_rows, master=master)
+    normalized_finishings = _normalize_finishing_rows(finishing_rows, master=master)
+    normalized_papers, normalized_finishings = _decorate_rate_card_rows(normalized_papers, normalized_finishings, master=master)
     normalized_details = _normalize_shop_details(shop_details)
     summary = summarize_rate_card(normalized_papers, normalized_finishings)
     pricing_settings = get_marketplace_margin_settings(shop)
@@ -1665,9 +1761,10 @@ def save_shop_rate_card_setup(
         "summary": summary,
         "market_guides": build_market_guides(normalized_papers, normalized_finishings),
         "example_quote": build_business_card_example(normalized_papers, normalized_finishings, include_client_pricing=False),
-        "table_preview": build_rate_card_table_preview(paper_rows=normalized_papers, finishing_rows=normalized_finishings),
+        "table_preview": build_rate_card_table_preview(paper_rows=normalized_papers, finishing_rows=normalized_finishings, master_settings=master),
         "market_label": "Nairobi Market Guide",
         "completed": bool(completed),
+        "master_settings": master,
         "pricing_settings": _pricing_settings_payload(pricing_settings),
     }
 
@@ -1694,9 +1791,10 @@ def save_shop_rate_card_setup(
         current_version = _rate_card_version(stored_setup)
         if expected_version is not None and str(expected_version) != current_version:
             raise StaleRateCardVersion(current_version)
+        payload["version"] = _next_rate_card_version(stored_setup)
 
         _persist_paper_rows(shop, normalized_papers)
-        _persist_finishing_rows(shop, normalized_finishings)
+        _persist_finishing_rows(shop, normalized_finishings, master=master)
         from shops.services import refresh_shop_pricing_ready
 
         shop.pricing_ready = refresh_shop_pricing_ready(shop)
@@ -1708,9 +1806,13 @@ def save_shop_rate_card_setup(
                 "finishing_rows": normalized_finishings,
                 "shop_details": normalized_details,
                 "completed": bool(completed),
+                # Law 11.7: the first save confirms the rate card, so the shop
+                # becomes visible to find-printer matching.
+                "is_confirmed": True,
+                "master_settings": master,
+                "rate_card_version": payload["version"],
             },
         )
-        payload["version"] = _rate_card_version(setup_record)
     return payload
 
 
@@ -1722,6 +1824,7 @@ def complete_shop_rate_card_setup(shop) -> dict[str, Any]:
         finishing_rows=current["finishing_rows"],
         shop_details=current["shop_details"],
         completed=True,
+        master_settings=current.get("master_settings"),
     )
     return {
         "completed": True,

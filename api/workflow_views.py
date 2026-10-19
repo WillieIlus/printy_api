@@ -87,6 +87,7 @@ from services.pricing.mvp_rate_card import (
     preview_public_rate_card_builder,
     preview_shop_rate_card_table,
     save_shop_rate_card_setup,
+    stored_master_settings,
 )
 from setup.services import SHOP_STATUS_ONLY_FIELDS, get_setup_status_for_shop, get_setup_status_for_user
 from shops.models import Shop
@@ -892,6 +893,7 @@ class ForShopsMvpRateCardPublicPreviewView(APIView):
             preview_public_rate_card_builder(
                 paper_rows=serializer.validated_data.get("paper_rows") or [],
                 finishing_rows=serializer.validated_data.get("finishing_rows") or [],
+                master_settings=serializer.validated_data.get("master_settings"),
             )
         )
 
@@ -910,6 +912,7 @@ class ForShopsMvpRateCardSaveView(APIView):
                     "shop_details": serializer.validated_data.get("shop_details") or {},
                     "paper_rows": serializer.validated_data.get("paper_rows") or [],
                     "finishing_rows": serializer.validated_data.get("finishing_rows") or [],
+                    "master_settings": serializer.validated_data.get("master_settings"),
                 },
                 status=status.HTTP_202_ACCEPTED,
             )
@@ -927,6 +930,7 @@ class ForShopsMvpRateCardSaveView(APIView):
             finishing_rows=serializer.validated_data.get("finishing_rows") or [],
             shop_details=serializer.validated_data.get("shop_details") or {},
             completed=True,
+            master_settings=serializer.validated_data.get("master_settings"),
         )
         setup_status = get_setup_status_for_shop(shop)
         return Response(
@@ -970,6 +974,7 @@ class ShopMvpRateCardSetupView(APIView):
                 shop_details=serializer.validated_data.get("shop_details") or {},
                 completed=False,
                 expected_version=serializer.validated_data.get("expected_version"),
+                master_settings=serializer.validated_data.get("master_settings"),
             )
         except StaleRateCardVersion as exc:
             return Response(
@@ -1001,6 +1006,7 @@ class ShopMvpRateCardTablePreviewView(APIView):
             quantity=serializer.validated_data.get("quantity") or 100,
             product_key=serializer.validated_data.get("product_key") or "business-cards",
             finishing_keys=serializer.validated_data.get("finishing_keys"),
+            master_settings=serializer.validated_data.get("master_settings") or stored_master_settings(shop),
         )
         return Response(preview)
 
@@ -1671,7 +1677,8 @@ class BuyerQuotesListView(APIView):
     """Unified 'my quotes' feed for a buyer dashboard.
 
     Returns the authenticated client's own calculator drafts (not yet sent)
-    and already-submitted quote requests in a single list, newest first.
+    and already-submitted quote requests in one list, ordered by law 7.5
+    (section, then needs_attention, then newest first).
     Each item is tagged ``item_type`` ("draft" | "quote_request") so the
     frontend can render the two kinds together. Drafts that already produced
     a quote request are omitted — the request itself represents them.
@@ -1702,6 +1709,8 @@ class BuyerQuotesListView(APIView):
                 "section_label": "Unresponded / sent",
                 "needs_attention": True,
                 "muted": False,
+                "created_at": draft.created_at,
+                "updated_at": draft.updated_at,
             }
             for draft in drafts
         ]
@@ -1725,6 +1734,8 @@ class BuyerQuotesListView(APIView):
                         viewer_role="client",
                     ),
                     **read_fields(read_states.get(qr.id)),
+                    "created_at": qr.created_at,
+                    "updated_at": qr.updated_at,
                 }
             )
         items = draft_items + request_items

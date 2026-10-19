@@ -1844,6 +1844,7 @@ class QuoteVersion(TimeStampedModel):
         "fees",
         "buyer_price",
         "due_date",
+        "rate_card_version",
     )
 
     objects = QuoteVersionQuerySet.as_manager()
@@ -1958,6 +1959,13 @@ class QuoteVersion(TimeStampedModel):
         default="",
         verbose_name=_("pricing rule version"),
         help_text=_("Identifying version of the pricing engine and fee policy in force (law 1.1/10.2)."),
+    )
+    rate_card_version = models.CharField(
+        max_length=64,
+        blank=True,
+        default="",
+        verbose_name=_("rate card version"),
+        help_text=_("Identifying version of the printer rate card in force (law 11.6)."),
     )
     created_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
