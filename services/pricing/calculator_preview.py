@@ -88,6 +88,18 @@ def _as_list(value: Any) -> list[Any]:
     return value if isinstance(value, list) else []
 
 
+def _plain_float(value: Any) -> float | None:
+    """Coerce an engine millimetre/number value to a plain float for the sheet
+    projection. Returns None for anything non-numeric or non-finite."""
+    if value in (None, "") or isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number == number and number not in (float("inf"), float("-inf")) else None
+
+
 def _strip_vat_lines(values: list[Any]) -> list[Any]:
     return [
         value
@@ -752,6 +764,33 @@ def _extract_production_preview(matches: list[dict[str, Any]], product_type: str
         "warnings": warnings,
     }
 
+    # Sheet margins for the manager/printer imposition diagram (prompt: show the
+    # sheet margins and spacing). The bands are derived from the engine's own
+    # fit numbers -- sheet size, cols x rows, finished piece size + bleed and the
+    # orientation the engine chose -- so the drawing can never disagree with the
+    # fit that produced the price. No fitting decision is recomputed here: the
+    # leftover is simply split evenly around the packed grid. Both keys always
+    # ship with the projection; they are null when there is nothing to draw.
+    finished_width = _plain_float(imposition.get("finished_width_mm"))
+    finished_height = _plain_float(imposition.get("finished_height_mm"))
+    bleed = _plain_float(imposition.get("bleed_mm")) or 0.0
+    result["finished_piece"] = None
+    result["margins_mm"] = None
+    if finished_width and finished_height:
+        result["finished_piece"] = {"width_mm": finished_width, "height_mm": finished_height}
+    sheet_width = _plain_float(result["press_sheet"].get("width_mm"))
+    sheet_height = _plain_float(result["press_sheet"].get("height_mm"))
+    cols = result["layout"].get("cols")
+    rows = result["layout"].get("rows")
+    if finished_width and finished_height and sheet_width and sheet_height and cols and rows:
+        rotated = result["layout"].get("orientation") == "rotated"
+        piece_width = (finished_height if rotated else finished_width) + 2 * bleed
+        piece_height = (finished_width if rotated else finished_height) + 2 * bleed
+        horizontal = (sheet_width - cols * piece_width) / 2
+        vertical = (sheet_height - rows * piece_height) / 2
+        if horizontal >= 0 and vertical >= 0:
+            result["margins_mm"] = {"horizontal": round(horizontal, 2), "vertical": round(vertical, 2)}
+
     if product_type == "large_format":
         roll_usage = breakdown.get("roll_usage") or {}
         dimensions = breakdown.get("dimensions") or {}
@@ -798,6 +837,20 @@ def _extract_production_preview(matches: list[dict[str, Any]], product_type: str
         })
 
     return result
+
+
+def production_preview_from_engine_payload(preview: dict[str, Any], product_type: str | None) -> dict[str, Any] | None:
+    """Canonical sheet projection of ONE engine result (law 1.1).
+
+    Every surface that shows the imposed sheet -- the public calculator preview
+    and the manager's shop options (prompt: imposition below the pricing
+    results) -- must go through this single builder so the outline, grid,
+    margins, sheet counts and spoilage numbers can never diverge between
+    screens.
+    """
+    if not isinstance(preview, dict) or not preview:
+        return None
+    return _extract_production_preview([{"preview": preview}], product_type or "")
 
 
 def _extract_pricing_breakdown(matches: list[dict[str, Any]]) -> dict[str, Any] | None:

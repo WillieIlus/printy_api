@@ -350,6 +350,10 @@ class PartnerProductionMatchResultSerializer(serializers.Serializer):
     reason = serializers.CharField(required=False, allow_blank=True)
     product_type = serializers.CharField()
     preview_snapshot = serializers.JSONField(required=False, allow_null=True)
+    # Prompt (imposition below the pricing results): the canonical sheet
+    # projection of preview_snapshot -- outline, cols x rows grid, margins,
+    # sheet counts -- rendered by the manager right under the printer's quote.
+    production_preview = serializers.JSONField(required=False, allow_null=True)
     production_breakdown = serializers.JSONField(required=False, allow_null=True)
     # Law 7.4a: itemized cost lines for the manager's printer option, only.
     cost_lines = serializers.JSONField(required=False, allow_null=True)

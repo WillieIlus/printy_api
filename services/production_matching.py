@@ -18,6 +18,7 @@ from services.pricing.breakdown_projection import (
     line_items_from_preview,
     production_breakdown_from_preview,
 )
+from services.pricing.calculator_preview import production_preview_from_engine_payload
 from services.pricing.engine import calculate_sheet_pricing
 from services.pricing.finishing_normalization import (
     is_empty_finishing,
@@ -473,6 +474,12 @@ def _priced_row(*, shop: Shop, payload: dict[str, Any], paper: Paper, machine: M
         "reason": "Eligible production shop with canonical pricing.",
         "product_type": _normal(payload.get("product_type")),
         "preview_snapshot": preview,
+        # The canonical sheet projection of this engine result: the imposed
+        # outline, cols x rows grid, sheet margins, sheet counts and spoilage
+        # the manager renders directly below the pricing results (law 7.4a item
+        # 4). Built by the ONE production-preview extractor (law 1.1), never
+        # re-derived in the UI.
+        "production_preview": production_preview_from_engine_payload(preview, payload.get("product_type")),
         "production_breakdown": production_breakdown_from_preview(preview),
         # Law 7.4a: itemized cost lines from the one engine's cost components
         # (sheets, printing, lamination/cutting/finishing). Manager-only.
