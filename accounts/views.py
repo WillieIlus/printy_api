@@ -356,9 +356,35 @@ class PasswordResetRequestView(APIView):
     permission_classes = [AllowAny]
 
     def post(self, request):
-        form = ResetPasswordForm(data={"email": request.data.get("email", "")})
+        email = str(request.data.get("email", "")).strip()
+
+        form = ResetPasswordForm(data={"email": email})
         if not form.is_valid():
             return Response(form.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        # Phase 3A Task D: allauth resolves the target user via
+        # filter_users_by_email, which lowercases the input and then does a
+        # case-sensitive EmailAddress lookup. Legacy rows keep their original
+        # casing, so a lowercase request silently finds nobody and no reset
+        # email is sent. Resolve case-insensitively and, only if allauth found
+        # nobody, hand it the users we found.
+        if not getattr(form, "users", None):
+            from allauth.account.models import EmailAddress
+
+            resolved: list = []
+            for address in EmailAddress.objects.filter(email__iexact=email).select_related("user"):
+                if address.user and address.user.is_active:
+                    resolved.append(address.user)
+            if not resolved:
+                from django.contrib.auth import get_user_model
+
+                resolved = [
+                    user
+                    for user in get_user_model().objects.filter(email__iexact=email).iterator(2000)
+                    if user.is_active
+                ]
+            if resolved:
+                form.users = resolved
 
         form.save(request)
         return Response(

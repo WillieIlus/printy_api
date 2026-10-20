@@ -60,18 +60,37 @@ class Command(BaseCommand):
             self.stdout.write(f"- user={user.id} {_mask_email(user.email)} -> {_mask_email(new_email)}")
         for address, new_email in address_changes:
             self.stdout.write(f"- email_address={address.id} {_mask_email(address.email)} -> {_mask_email(new_email)}")
-        for key, ids in user_collisions:
+        for key, group in user_collisions:
             self.stdout.write(
                 self.style.WARNING(
-                    f"- skipped user collision {_mask_email(key)} for user ids {ids}"
+                    f"- skipped user collision {_mask_email(key)} across "
+                    f"{len(group)} account(s) for manual review:"
                 )
             )
-        for key, ids in address_collisions:
+            for user in group:
+                self.stdout.write(
+                    self.style.WARNING(
+                        f"    user id={user.id} active={user.is_active} "
+                        f"verified={self._is_verified(user)} "
+                        f"last_login={user.last_login or 'never'} "
+                        f"email={_mask_email(user.email)}"
+                    )
+                )
+        for key, group in address_collisions:
             self.stdout.write(
                 self.style.WARNING(
-                    f"- skipped email address collision {_mask_email(key)} for address ids {ids}"
+                    f"- skipped email address collision {_mask_email(key)} across "
+                    f"{len(group)} address(es) for manual review:"
                 )
             )
+            for address in group:
+                self.stdout.write(
+                    self.style.WARNING(
+                        f"    email_address id={address.id} user id={address.user_id} "
+                        f"verified={address.verified} "
+                        f"email={_mask_email(address.email)}"
+                    )
+                )
 
         if not apply:
             self.stdout.write(
@@ -98,7 +117,7 @@ class Command(BaseCommand):
 
         for key, group in grouped.items():
             if len(group) > 1:
-                collisions.append((key, [u.id for u in group]))
+                collisions.append((key, group))
                 continue
             user = group[0]
             if user.email != key:
@@ -115,9 +134,16 @@ class Command(BaseCommand):
 
         for (_, normalized), group in grouped.items():
             if len(group) > 1:
-                collisions.append((normalized, [a.id for a in group]))
+                collisions.append((normalized, group))
                 continue
             address = group[0]
             if address.email != normalized:
                 changes.append((address, normalized))
         return changes, collisions
+
+    @staticmethod
+    def _is_verified(user) -> bool:
+        primary = getattr(user, "emailaddress_set", None)
+        if primary is None:
+            return False
+        return primary.filter(verified=True).exists()

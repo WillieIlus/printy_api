@@ -65,6 +65,26 @@ class NormalizeUserEmailsCommandTests(TestCase):
         self.assertEqual(first.email, "Dup@Example.com")
         self.assertEqual(second.email, "dup@example.com")
 
+    def test_collision_report_includes_review_context(self):
+        first = self._legacy_user("Dup@Example.com")
+        second = self._legacy_user("dup@example.com")
+        second.is_active = False
+        second.save(update_fields=["is_active"])
+
+        out = io.StringIO()
+        call_command("normalize_user_emails", stdout=out)
+        report = out.getvalue()
+
+        self.assertIn(f"user id={first.id}", report)
+        self.assertIn(f"user id={second.id}", report)
+        self.assertIn("active=True", report)
+        self.assertIn("active=False", report)
+        self.assertIn("verified=", report)
+        self.assertIn("last_login=", report)
+        # The colliding address must be masked, never printed in the clear.
+        self.assertNotIn("Dup@Example.com", report)
+        self.assertNotIn("dup@example.com", report)
+
     def test_command_is_idempotent(self):
         user = self._legacy_user("Legacy.Mixed@Example.com")
         EmailAddress.objects.create(
