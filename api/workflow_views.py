@@ -955,7 +955,12 @@ class ShopMvpRateCardSetupView(APIView):
         )
         if shop is None:
             return Response({"detail": NO_MANAGEABLE_SHOP_DETAIL}, status=status.HTTP_404_NOT_FOUND)
-        return Response(build_shop_rate_card_setup(shop, activate_defaults=request.query_params.get("activate_defaults") in {"1", "true", "yes"}))
+        payload = build_shop_rate_card_setup(
+            shop,
+            activate_defaults=request.query_params.get("activate_defaults") in {"1", "true", "yes"},
+        )
+        payload["setup_status"] = get_setup_status_for_shop(shop)["setup_status"]
+        return Response(payload)
 
     def patch(self, request):
         serializer = MvpRateCardSetupSerializer(data=request.data)
@@ -986,6 +991,7 @@ class ShopMvpRateCardSetupView(APIView):
                 },
                 status=status.HTTP_409_CONFLICT,
             )
+        payload["setup_status"] = get_setup_status_for_shop(shop)["setup_status"]
         return Response(payload)
 
 

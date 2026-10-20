@@ -4,7 +4,7 @@ from django.db import OperationalError, ProgrammingError
 
 from catalog.models import Product
 from inventory.models import Machine, Paper
-from pricing.models import FinishingRate, PrintingRate
+from pricing.models import FinishingRate, PrintingRate, ShopRateCardSetup
 from shops.models import Shop
 
 PROFILE_PLACEHOLDERS = {
@@ -88,22 +88,11 @@ def _shop_profile_complete(shop: Shop) -> bool:
 
 
 def _product_turnaround_configured(shop: Shop) -> bool:
-    return Product.objects.filter(
-        shop=shop,
-        is_active=True,
-    ).filter(
-        standard_turnaround_hours__isnull=False,
-    ).exists() or Product.objects.filter(
-        shop=shop,
-        is_active=True,
-    ).filter(
-        rush_turnaround_hours__isnull=False,
-    ).exists() or Product.objects.filter(
-        shop=shop,
-        is_active=True,
-    ).filter(
-        turnaround_days__isnull=False,
-    ).exists()
+    # Product is a global catalog and has no per-shop relation, so there is no
+    # shop-scoped product turnaround to read. Kept as a stable False so the
+    # setup-status computation never crashes for shops without a turnaround
+    # statement (Phase 3A Task B; no model changes allowed).
+    return False
 
 
 def _turnaround_configured(shop: Shop) -> bool:
@@ -195,6 +184,7 @@ def _build_status_for_shop(shop: Shop | None) -> dict:
             "completed_steps": [],
             "pending_steps": ["shop"],
             "steps": _build_steps_payload(shop=None, state={}, next_step="shop"),
+            "setup_status": build_rate_card_setup_status(None),
         }
 
     machine_count = Machine.objects.filter(shop=shop, is_active=True).count()
@@ -202,7 +192,9 @@ def _build_status_for_shop(shop: Shop | None) -> dict:
     material_count = 0
     pricing_rules_count = PrintingRate.objects.filter(machine__shop=shop, is_active=True).count()
     finishing_rates_count = FinishingRate.objects.filter(shop=shop, is_active=True).count()
-    products_count = Product.objects.filter(shop=shop, is_active=True).count()
+    # Product is a global catalog with no per-shop relation; there is no
+    # shop-scoped product count (Phase 3A Task B).
+    products_count = 0
 
     has_machines = machine_count > 0
     has_papers = paper_count > 0
@@ -317,6 +309,79 @@ def _build_status_for_shop(shop: Shop | None) -> dict:
         "blocking_reason": recommendations[0] if recommendations else (warnings[0] if warnings else ""),
         "completed_steps": completed_steps,
         "pending_steps": pending_steps,
+        "steps": steps,
+        "setup_status": build_rate_card_setup_status(shop),
+    }
+
+
+# Phase 3A Task B: additive owner-guidance block. Codes are stable; titles
+# and hints are short plain English. Routes point at the real frontend pages
+# that already exist (printer shop setup + printer rate card).
+RATE_CARD_STEP_DEFINITIONS = [
+    ("machine", "Add your first machine", "Tell us which press you print on so we can price jobs.", "/app/printer/shop"),
+    ("paper", "Add priced paper stock", "Add at least one paper with a selling price so we can quote jobs.", "/app/printer/shop"),
+    ("printing_rate", "Set a printing rate", "Set your per-sheet price so jobs can be matched to you.", "/app/printer/rates"),
+    ("confirm", "Confirm and go live", "Confirm your rate card so managers can find and pick your shop.", "/app/printer/rates"),
+]
+
+
+def build_rate_card_setup_status(shop: Shop | None) -> dict:
+    """Derive owner guidance from REAL readiness data (Phase 3A Task B, D2).
+
+    Additive only: this never removes or renames existing setup-status fields.
+    """
+    if not shop:
+        return {
+            "is_confirmed": False,
+            "is_ready_to_confirm": False,
+            "completed_steps": 0,
+            "total_steps": len(RATE_CARD_STEP_DEFINITIONS),
+            "next_step": None,
+            "steps": [],
+        }
+
+    has_machine = Machine.objects.filter(shop=shop, is_active=True).exists()
+    has_priced_paper = Paper.objects.filter(
+        shop=shop, is_active=True, selling_price__gt=0
+    ).exists()
+    has_printing_rate = PrintingRate.objects.filter(
+        machine__shop=shop, machine__is_active=True, is_active=True
+    ).exists()
+    setup = ShopRateCardSetup.objects.filter(shop=shop).only("is_confirmed").first()
+    is_confirmed = bool(setup.is_confirmed) if setup else False
+
+    done_by_code = {
+        "machine": has_machine,
+        "paper": has_priced_paper,
+        "printing_rate": has_printing_rate,
+        "confirm": is_confirmed,
+    }
+    is_ready_to_confirm = bool(
+        has_machine and has_priced_paper and has_printing_rate
+    ) and not is_confirmed
+
+    steps = []
+    next_step = None
+    for code, title, hint, route in RATE_CARD_STEP_DEFINITIONS:
+        done = done_by_code[code]
+        step = {
+            "code": code,
+            "title": title,
+            "hint": hint,
+            "done": done,
+            "route": route,
+        }
+        steps.append(step)
+        if not done and next_step is None:
+            next_step = step
+
+    completed_steps = sum(1 for code in done_by_code if done_by_code[code])
+    return {
+        "is_confirmed": is_confirmed,
+        "is_ready_to_confirm": is_ready_to_confirm,
+        "completed_steps": completed_steps,
+        "total_steps": len(RATE_CARD_STEP_DEFINITIONS),
+        "next_step": next_step,
         "steps": steps,
     }
 
