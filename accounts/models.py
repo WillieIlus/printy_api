@@ -43,7 +43,7 @@ class UserManager(BaseUserManager):
         if not email and not phone:
             raise ValueError("Users must have an email address or a phone number")
         if email:
-            email = self.normalize_email(email)
+            email = self.normalize_email(email).lower()
         else:
             email = None
         user = self.model(email=email, **extra_fields)

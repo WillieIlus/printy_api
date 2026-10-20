@@ -22,6 +22,20 @@ from .services.roles import (
 
 logger = logging.getLogger("api.auth")
 
+
+def _mask_email_for_log(email: str) -> str:
+    """Return a non-identifying form of an email for log lines.
+
+    Never log the raw address: only the first one or two local-part
+    characters and the domain are kept.
+    """
+    value = (email or "").strip()
+    if "@" not in value:
+        return "***"
+    local, _, domain = value.partition("@")
+    keep = local[:1] if len(local) <= 2 else local[:2]
+    return f"{keep}***@{domain}"
+
 PROFILE_FIELDS = (
     "bio",
     "avatar",
@@ -281,6 +295,7 @@ class UserCreateSerializer(serializers.ModelSerializer):
         validators=[
             UniqueValidator(
                 queryset=User.objects.all(),
+                lookup="iexact",
                 message="A user with that email already exists.",
             )
         ],
@@ -315,6 +330,9 @@ class UserCreateSerializer(serializers.ModelSerializer):
             "partner_profile_enabled": {"required": False},
             "capability_overrides": {"required": False},
         }
+
+    def validate_email(self, value):
+        return (value or "").strip().lower()
 
     def validate_role(self, value):
         return _normalize_public_role(value)
@@ -374,7 +392,7 @@ class UserCreateSerializer(serializers.ModelSerializer):
         verified = email_verification == "none"
         email_address = EmailAddress.objects.create(
             user=user,
-            email=user.email,
+            email=(user.email or "").lower(),
             primary=True,
             verified=verified,
         )
@@ -452,7 +470,7 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
         return profile.user
 
     def validate(self, attrs):
-        email = (attrs.get("email") or "").strip()
+        email = (attrs.get("email") or "").strip().lower()
         phone = (attrs.get("phone") or "").strip()
         password = attrs.get("password")
 
@@ -469,8 +487,20 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
                 request=request, username=email, password=password
             )
             if self.user is None:
-                self.user = User.objects.filter(email=email).first()
-                if self.user and not self.user.check_password(password):
+                # Accounts written before email case normalisation may still
+                # hold the original local-part case, so fall back to a
+                # case-insensitive lookup. Never guess between ambiguous rows.
+                candidates = list(User.objects.filter(email__iexact=email)[:2])
+                if len(candidates) == 1:
+                    candidate = candidates[0]
+                    if candidate.check_password(password):
+                        self.user = candidate
+                elif len(candidates) > 1:
+                    logger.warning(
+                        "login_email_collision email=%s matches=%s",
+                        _mask_email_for_log(email),
+                        len(candidates),
+                    )
                     self.user = None
         else:
             self.user = self._authenticate_by_phone(phone, password)
