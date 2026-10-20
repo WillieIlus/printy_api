@@ -52,6 +52,48 @@ def shop_rate_card_is_usable(shop: Shop) -> bool:
     return has_paper_stock and has_print_rates
 
 
+def rate_card_missing_steps(shop: Shop) -> list[dict[str, str]]:
+    """Structured list of what a shop still needs before its card is usable.
+
+    Mirrors the exact same live-data criteria as :func:`shop_rate_card_is_usable`
+    so owners get told precisely what to add. Empty list means ready to confirm.
+    Codes are stable machine strings; titles/hints are plain English.
+    """
+    from inventory.models import Machine, Paper
+    from pricing.models import PrintingRate
+
+    missing: list[dict[str, str]] = []
+    if not Machine.objects.filter(shop=shop, is_active=True).exists():
+        missing.append(
+            {
+                "code": "machine",
+                "title": "Add your first machine",
+                "hint": "Tell us which press you print on so we can price jobs.",
+            }
+        )
+    if not Paper.objects.filter(shop=shop, is_active=True, selling_price__gt=0).exists():
+        missing.append(
+            {
+                "code": "paper",
+                "title": "Add priced paper stock",
+                "hint": "Add at least one paper with a selling price so we can quote jobs.",
+            }
+        )
+    if not PrintingRate.objects.filter(
+        machine__shop=shop,
+        machine__is_active=True,
+        is_active=True,
+    ).exists():
+        missing.append(
+            {
+                "code": "printing_rate",
+                "title": "Set a printing rate",
+                "hint": "Set your per-sheet price so jobs can be matched to you.",
+            }
+        )
+    return missing
+
+
 def refresh_shop_pricing_ready(shop: Shop) -> bool:
     """Recompute the deprecated `pricing_ready` flag from live canonical data.
 

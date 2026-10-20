@@ -21,6 +21,7 @@ from services.pricing.mvp_rate_card import (
     _activated_default_finishing_rows,
     _build_default_paper_rows,
     build_shop_rate_card_setup,
+    complete_shop_rate_card_setup,
     preview_shop_rate_card_table,
     save_shop_rate_card_setup,
 )
@@ -293,7 +294,8 @@ class Law9VersionImmutabilityTests(TestCase):
         self.assertEqual(first["version"], "1")
         setup = ShopRateCardSetup.objects.get(shop=self.shop)
         self.assertEqual(setup.rate_card_version, "1")
-        self.assertTrue(setup.is_confirmed)
+        # Phase 3A / D1: a plain save is a draft and does NOT confirm.
+        self.assertFalse(setup.is_confirmed)
 
         second = save_shop_rate_card_setup(
             self.shop, paper_rows=rows, finishing_rows=[], completed=False,
@@ -432,11 +434,20 @@ class Law9ConfirmationGateTests(TestCase):
         shop_ids = [row["shop_id"] for row in self._matches()["results"]]
         self.assertNotIn(self.shop.id, shop_ids)
 
-        # The first save confirms the card, so the shop reappears.
+        # Phase 3A / D1: a plain save stays a draft and does NOT confirm,
+        # so the shop stays hidden from find-printer.
         save_shop_rate_card_setup(
-            self.shop, paper_rows=_build_default_paper_rows(), finishing_rows=[], completed=True
+            self.shop, paper_rows=_build_default_paper_rows(), finishing_rows=[], completed=False
         )
         setup = ShopRateCardSetup.objects.get(shop=self.shop)
+        self.assertFalse(setup.is_confirmed)
+        shop_ids = [row["shop_id"] for row in self._matches()["results"]]
+        self.assertNotIn(self.shop.id, shop_ids)
+
+        # Only the owner's explicit confirm action grants confirmation (when
+        # the live pricing is usable), so the shop reappears.
+        complete_shop_rate_card_setup(self.shop)
+        setup.refresh_from_db()
         self.assertTrue(setup.is_confirmed)
         shop_ids = [row["shop_id"] for row in self._matches()["results"]]
         self.assertIn(self.shop.id, shop_ids)

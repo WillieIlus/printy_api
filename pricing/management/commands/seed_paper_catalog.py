@@ -105,23 +105,18 @@ class Command(BaseCommand):
             [],
         )
 
-        # Law 11.7: seeding never confirms a rate card by itself. Preserve any
-        # prior confirmation (never downgrade) and only confirm when the shop's
-        # live pricing is actually usable.
-        from shops.services import shop_rate_card_is_usable
-
-        is_confirmed = bool(setup.is_confirmed) if setup else False
-        if not is_confirmed and shop_rate_card_is_usable(shop):
-            is_confirmed = True
-
-        ShopRateCardSetup.objects.update_or_create(
-            shop=shop,
-            defaults={
-                "paper_rows": paper_rows,
-                "finishing_rows": setup.finishing_rows if setup else [],
-                "shop_details": setup.shop_details if setup else {},
-                "completed": setup.completed if setup else False,
-                "is_confirmed": is_confirmed,
-            },
-        )
+        # Phase 3A / D1: seeding never confirms a rate card by itself. It must
+        # never set is_confirmed=True and never change an existing value; only
+        # the owner's explicit confirm action grants confirmation.
+        if setup is not None:
+            ShopRateCardSetup.objects.filter(pk=setup.pk).update(paper_rows=paper_rows)
+        else:
+            ShopRateCardSetup.objects.create(
+                shop=shop,
+                paper_rows=paper_rows,
+                finishing_rows=[],
+                shop_details={},
+                completed=False,
+                is_confirmed=False,
+            )
         return {"seeded": seeded, "updated": updated, "skipped": skipped}

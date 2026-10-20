@@ -96,6 +96,19 @@ class StaleRateCardVersion(Exception):
         super().__init__("This rate card changed since you loaded it. Reload the latest version before saving.")
 
 
+class RateCardNotUsable(Exception):
+    """Raised when an owner tries to confirm a rate card whose pricing is incomplete.
+
+    Phase 3A / D1: confirmation is the visibility gate, but it can only be
+    granted once live pricing is usable. ``payload`` carries the structured
+    missing-steps list so the view can return a helpful 400.
+    """
+
+    def __init__(self, payload: dict[str, Any]):
+        self.payload = payload
+        super().__init__("Your rate card is not ready to go live yet.")
+
+
 def _rate_card_version(setup: ShopRateCardSetup | None) -> str:
     """Stored rate-card version (law 11.6). "0" means never saved."""
     if setup is None:
@@ -1745,6 +1758,7 @@ def save_shop_rate_card_setup(
     completed: bool | None = None,
     expected_version: str | None = None,
     master_settings: dict[str, Any] | None = None,
+    confirm: bool = False,
 ) -> dict[str, Any]:
     master = resolve_master_settings(master_settings)
     normalized_papers = _normalize_paper_rows(paper_rows, master=master)
@@ -1795,7 +1809,28 @@ def save_shop_rate_card_setup(
 
         _persist_paper_rows(shop, normalized_papers)
         _persist_finishing_rows(shop, normalized_finishings, master=master)
-        from shops.services import refresh_shop_pricing_ready
+        from shops.services import (
+            rate_card_missing_steps,
+            refresh_shop_pricing_ready,
+            shop_rate_card_is_usable,
+        )
+
+        # Phase 3A / D1: confirmation is the visibility gate, but it is only
+        # granted by the owner's explicit confirm action AND only once the live
+        # pricing is usable. A plain draft save never confirms (and never
+        # downgrades an already-confirmed setup).
+        is_confirmed = bool(stored_setup.is_confirmed) if stored_setup else False
+        if confirm:
+            if not shop_rate_card_is_usable(shop):
+                missing = rate_card_missing_steps(shop)
+                raise RateCardNotUsable(
+                    {
+                        "detail": "Add the missing pricing details before you can go live.",
+                        "code": "rate_card_not_usable",
+                        "missing_steps": missing,
+                    }
+                )
+            is_confirmed = True
 
         shop.pricing_ready = refresh_shop_pricing_ready(shop)
         shop.save(update_fields=["name", "public_whatsapp_number", "phone_number", "service_area", "city", "pricing_ready", "public_match_ready", "is_active", "is_public", "updated_at"])
@@ -1806,9 +1841,7 @@ def save_shop_rate_card_setup(
                 "finishing_rows": normalized_finishings,
                 "shop_details": normalized_details,
                 "completed": bool(completed),
-                # Law 11.7: the first save confirms the rate card, so the shop
-                # becomes visible to find-printer matching.
-                "is_confirmed": True,
+                "is_confirmed": is_confirmed,
                 "master_settings": master,
                 "rate_card_version": payload["version"],
             },
@@ -1825,6 +1858,7 @@ def complete_shop_rate_card_setup(shop) -> dict[str, Any]:
         shop_details=current["shop_details"],
         completed=True,
         master_settings=current.get("master_settings"),
+        confirm=True,
     )
     return {
         "completed": True,

@@ -80,6 +80,7 @@ from services.pricing.for_shops_wizard import (
     save_step_values,
 )
 from services.pricing.mvp_rate_card import (
+    RateCardNotUsable,
     StaleRateCardVersion,
     build_public_rate_card_builder_config,
     build_shop_rate_card_setup,
@@ -1021,7 +1022,10 @@ class ShopMvpRateCardCompleteView(APIView):
         )
         if shop is None:
             return Response({"detail": NO_MANAGEABLE_SHOP_DETAIL}, status=status.HTTP_404_NOT_FOUND)
-        return Response(complete_shop_rate_card_setup(shop))
+        try:
+            return Response(complete_shop_rate_card_setup(shop))
+        except RateCardNotUsable as exc:
+            return Response(exc.payload, status=status.HTTP_400_BAD_REQUEST)
 
 
 class ForShopsRateWizardPreviewView(APIView):

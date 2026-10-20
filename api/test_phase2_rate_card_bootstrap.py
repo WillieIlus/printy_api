@@ -92,18 +92,28 @@ class RateCardBootstrapAPITestCase(TestCase):
     def test_printer_without_shop_complete_bootstraps_and_marks_complete(self):
         self.client.force_authenticate(user=self.printer)
 
+        # Phase 3A / D1: confirmation is explicit AND only granted when the
+        # live pricing is usable, so an empty setup cannot go live.
+        empty = self.client.post("/api/shops/rate-card/onboarding-complete/")
+        self.assertEqual(empty.status_code, 400)
+        self.assertIn("missing_steps", empty.json())
+        shop = Shop.objects.get(owner=self.printer)
+        self.assertFalse(
+            ShopRateCardSetup.objects.filter(shop=shop, is_confirmed=True).exists()
+        )
+
+        # Save real pricing first (active paper row creates a paper + rate),
+        # then the explicit confirm action succeeds and marks the shop live.
+        self.client.patch("/api/shops/rate-card/setup/", self._paper_payload(), format="json")
         response = self.client.post("/api/shops/rate-card/onboarding-complete/")
 
-        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.status_code, 200, response.content)
         self.assertTrue(response.json()["completed"])
-        shop = Shop.objects.get(owner=self.printer)
+        shop.refresh_from_db()
         self.assertTrue(shop.public_match_ready)
         self.assertTrue(shop.is_active)
         self.assertTrue(shop.is_public)
-        # pricing_ready is data-driven: onboarding completes with zero active
-        # paper stock / printing rates, so the shop is NOT yet print-ready.
-        # This is the "paper stock is a critical printer item" rule.
-        self.assertFalse(shop.pricing_ready)
+        self.assertTrue(ShopRateCardSetup.objects.get(shop=shop).is_confirmed)
 
     def test_client_without_shop_setup_returns_actionable_404_without_creating_shop(self):
         self.client.force_authenticate(user=self.client_user)
