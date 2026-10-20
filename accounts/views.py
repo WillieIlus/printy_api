@@ -267,7 +267,10 @@ class ConfirmEmailView(APIView):
             )
 
         if state == "expired":
-            logger.info("email_verification_confirm_expired")
+            logger.warning(
+                "email_verification_confirm_rejected state=expired key_len=%s",
+                len(key),
+            )
             return Response(
                 {
                     "detail": "This verification link has expired. Request a new one.",
@@ -276,7 +279,27 @@ class ConfirmEmailView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        logger.info("email_verification_confirm_invalid")
+        # Distinguish a structurally-valid key whose signature no longer verifies
+        # (the symptom when SECRET_KEY is rotated between issue and click) from a
+        # genuinely malformed key, so operators can tell the two apart in logs.
+        signature_failed = False
+        if key and not key.startswith("ey") and key.count(":") >= 1:
+            try:
+                from allauth.account import app_settings as allauth_app_settings
+
+                signing.loads(key, salt=allauth_app_settings.SALT, max_age=None)
+            except signing.SignatureExpired:
+                signature_failed = True
+            except signing.BadSignature:
+                signature_failed = True
+            except Exception:
+                signature_failed = False
+
+        logger.warning(
+            "email_verification_confirm_rejected state=invalid signature_failed=%s key_len=%s",
+            signature_failed,
+            len(key),
+        )
         return Response(
             {
                 "detail": "This verification link is invalid.",

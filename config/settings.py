@@ -387,7 +387,6 @@ CLIENT_OTP_ECHO = os.environ.get("CLIENT_OTP_ECHO", "false").lower() in ("1", "t
 
 DIRECT_SHOP_STANDARD_MARKUP_RATE = Decimal(_get_env("DIRECT_SHOP_STANDARD_MARKUP_RATE", default="0.20"))
 
-EMAIL_CONFIRMATION_URL = f"{FRONTEND_URL}/auth/confirm-email"
 PASSWORD_RESET_URL = f"{FRONTEND_URL}/auth/reset-password"
 
 # =============================================================================
