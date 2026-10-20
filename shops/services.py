@@ -28,14 +28,13 @@ def can_manage_quotes(shop: Shop, user) -> bool:
     return can_manage_shop(shop, user)
 
 
-def refresh_shop_pricing_ready(shop: Shop) -> bool:
-    """Recompute the deprecated `pricing_ready` flag from live canonical data.
+def shop_rate_card_is_usable(shop: Shop) -> bool:
+    """Return whether a shop's live pricing data is usable for matching.
 
-    A printer is only really "print ready" when it has priced paper stock AND
-    an active printing rate on an active machine. The flag goes stale after
-    direct data edits (seed scripts, canonical tables, catalog deactivation),
-    so this recompute keeps readouts honest. Matching itself is always
-    data-driven regardless of this flag.
+    Read-only companion to :func:`refresh_shop_pricing_ready` (same criteria,
+    no write). A printer is "usable" when it has priced paper stock AND an
+    active printing rate on an active machine. This is the single definition
+    of a complete/usable rate card reused by the confirmation backfill.
     """
     from inventory.models import Paper
     from pricing.models import PrintingRate
@@ -50,6 +49,18 @@ def refresh_shop_pricing_ready(shop: Shop) -> bool:
         machine__is_active=True,
         is_active=True,
     ).exists()
-    ready = has_paper_stock and has_print_rates
+    return has_paper_stock and has_print_rates
+
+
+def refresh_shop_pricing_ready(shop: Shop) -> bool:
+    """Recompute the deprecated `pricing_ready` flag from live canonical data.
+
+    A printer is only really "print ready" when it has priced paper stock AND
+    an active printing rate on an active machine. The flag goes stale after
+    direct data edits (seed scripts, canonical tables, catalog deactivation),
+    so this recompute keeps readouts honest. Matching itself is always
+    data-driven regardless of this flag.
+    """
+    ready = shop_rate_card_is_usable(shop)
     Shop.objects.filter(pk=shop.pk).update(pricing_ready=ready)
     return ready
