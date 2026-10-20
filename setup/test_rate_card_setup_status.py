@@ -17,7 +17,11 @@ from inventory.models import Machine, Paper
 from pricing.choices import ColorMode
 from pricing.models import PrintingRate, ShopRateCardSetup
 from services.pricing.mvp_rate_card import complete_shop_rate_card_setup
-from setup.services import get_setup_status_for_shop
+from setup.services import (
+    READINESS_STEPS,
+    get_setup_status_for_shop,
+    _product_turnaround_configured,
+)
 from shops.models import Shop
 
 STEP_CODES = {"machine", "paper", "printing_rate", "confirm"}
@@ -129,3 +133,75 @@ class RateCardSetupStatusTests(TestCase):
             self.assertIn(key, status)
         self.assertIsInstance(status["next_step"], str)
         self.assertIsInstance(status["setup_status"], dict)
+
+
+class ProductFieldErrorWorkaroundTests(TestCase):
+    """Phase 3A.1 Task 2: the Product FieldError workaround must not lie.
+
+    `catalog.models.Product` has no `shop` relation, so a per-shop product
+    count / per-shop product turnaround cannot be derived (step 2c). The old
+    code answered with the silent constants `0` and `False`, which every
+    consumer reads as "the shop has no products" / "turnaround not
+    configured". Both are now explicit unknowns.
+    """
+
+    def _shop(self, slug, *, statement=""):
+        user = User.objects.create_user(
+            email=f"{slug}@test.com",
+            password="pass12345",
+            role=User.Role.PRODUCTION,
+        )
+        return Shop.objects.create(
+            owner=user,
+            name=f"{slug} Press",
+            slug=slug,
+            is_active=True,
+            is_public=True,
+            turnaround_statement=statement,
+        )
+
+    def test_product_turnaround_probe_is_explicitly_unknown(self):
+        shop = self._shop("c-product-probe")
+
+        self.assertIsNone(_product_turnaround_configured(shop))
+
+    def test_has_products_is_explicitly_unknown_for_a_shop(self):
+        shop = self._shop("c-products-null")
+
+        status = get_setup_status_for_shop(shop)
+
+        self.assertIsNone(status["has_products"])
+        # products_count is a local only; it was never a response field.
+        self.assertNotIn("products_count", status)
+
+    def test_product_probe_can_never_flip_turnaround_to_not_configured(self):
+        """Regression: `... or _product_turnaround_configured(shop)` is gone."""
+        configured = self._shop("c-turnaround-set", statement="3 working days")
+        unconfigured = self._shop("c-turnaround-unset")
+
+        self.assertTrue(
+            get_setup_status_for_shop(configured)["turnaround_configured"]
+        )
+        self.assertFalse(
+            get_setup_status_for_shop(unconfigured)["turnaround_configured"]
+        )
+
+    def test_products_is_not_a_readiness_step_so_null_is_invisible_to_the_owner(self):
+        """No owner-facing step can show 'not configured' because of Task 2."""
+        shop = self._shop("c-products-step")
+
+        readiness_keys = {key for key, _label, _cta in READINESS_STEPS}
+        self.assertNotIn("products", readiness_keys)
+
+        rendered_keys = {step["key"] for step in get_setup_status_for_shop(shop)["steps"]}
+        self.assertNotIn("products", rendered_keys)
+        self.assertEqual(rendered_keys, readiness_keys)
+
+    def test_null_does_not_break_percent_or_completeness(self):
+        shop = self._shop("c-products-percent")
+
+        status = get_setup_status_for_shop(shop)
+
+        for key in ("setup_percent", "rate_card_completeness", "completed_steps", "warnings"):
+            self.assertIn(key, status)
+        self.assertIsInstance(status["setup_percent"], int)

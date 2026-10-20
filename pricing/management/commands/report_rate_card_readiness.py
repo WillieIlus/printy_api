@@ -34,33 +34,42 @@ class Command(BaseCommand):
 
     Confirmation is now an explicit owner action, so there is no backfill.
     This report lists shops that are usable but unconfirmed (candidates for a
-    nudge) and shops that are incomplete, with exactly what each is missing.
-    Owner contact details are masked so the output can be shared safely.
+    nudge), shops that are incomplete, and — Phase 3A.1 Task 3b — shops that
+    are confirmed but not usable. Confirmed shops pass the find-printer gate,
+    so a confirmed shop that lost its live pricing data is visible to managers
+    yet cannot price a job. Owner contact details are masked so the output can
+    be shared safely.
     """
 
     help = (
         "READ-ONLY: report rate-card readiness. Lists shops that are usable but "
-        "unconfirmed, and incomplete shops with what each is missing. Never "
-        "writes anything. Owner email/phone are masked."
+        "unconfirmed, incomplete shops with what each is missing, and confirmed "
+        "shops that are no longer usable. Never writes anything. Owner "
+        "email/phone are masked."
     )
 
     def handle(self, *args, **options):
         usable_unconfirmed: list[tuple[Shop, ShopRateCardSetup]] = []
         incomplete: list[tuple[Shop, ShopRateCardSetup]] = []
+        confirmed_unusable: list[tuple[Shop, ShopRateCardSetup]] = []
 
         setups = ShopRateCardSetup.objects.select_related("shop", "shop__owner").order_by("id")
         total = setups.count()
         for setup in setups:
+            usable = shop_rate_card_is_usable(setup.shop)
             if setup.is_confirmed:
+                if not usable:
+                    confirmed_unusable.append((setup.shop, setup))
                 continue
-            if shop_rate_card_is_usable(setup.shop):
+            if usable:
                 usable_unconfirmed.append((setup.shop, setup))
             else:
                 incomplete.append((setup.shop, setup))
 
         self.stdout.write(
             f"Scanned {total} setup(s): {len(usable_unconfirmed)} usable but unconfirmed, "
-            f"{len(incomplete)} incomplete. This report writes nothing."
+            f"{len(incomplete)} incomplete, {len(confirmed_unusable)} confirmed but not usable. "
+            "This report writes nothing."
         )
 
         self.stdout.write("")
@@ -84,6 +93,25 @@ class Command(BaseCommand):
             self.stdout.write(
                 f"- shop={shop.slug} name={shop.name} "
                 f"owner={_mask_email(getattr(shop.owner, 'email', ''))} "
+                f"missing: {missing_labels}"
+            )
+
+        self.stdout.write("")
+        self.stdout.write(
+            self.style.WARNING(
+                "CONFIRMED BUT NOT USABLE "
+                "(already shown to managers, cannot price a job — fix before launch):"
+            )
+        )
+        if not confirmed_unusable:
+            self.stdout.write("- none")
+        for shop, _setup in confirmed_unusable:
+            missing = rate_card_missing_steps(shop)
+            missing_labels = ", ".join(step["title"] for step in missing) or "unknown"
+            self.stdout.write(
+                f"- shop={shop.slug} name={shop.name} "
+                f"owner={_mask_email(getattr(shop.owner, 'email', ''))} "
+                f"phone={_mask_phone(getattr(shop, 'public_whatsapp_number', '') or getattr(shop, 'phone_number', ''))} "
                 f"missing: {missing_labels}"
             )
 

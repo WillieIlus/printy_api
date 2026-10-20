@@ -209,6 +209,24 @@ python manage.py seed_demo_accounts       # accounts: demo users per role
 python manage.py seed_workflow            # workflow app state-machine demo data
 ```
 
+Seeds never confirm a rate card: confirmation is the owner's explicit "Confirm and go
+live" action (D1). `seed_paper_catalog` writes a rate-card setup row with
+`is_confirmed=False`, which hides that shop from manager find-printer results until the
+owner confirms it. A shop with **no** rate-card setup row (for example after
+`seed_shop_pricing --shop <slug>`) stays visible and usable, because it never opened the
+rate-card screen.
+
+To get a visible, confirmed shop locally, seed pricing and then confirm it (the
+`/app/printer/rates` "Confirm and go live" button does the same):
+
+```bash
+python manage.py seed_shop_pricing --shop <slug>
+python manage.py shell -c "from services.pricing.mvp_rate_card import complete_shop_rate_card_setup; from shops.models import Shop; complete_shop_rate_card_setup(Shop.objects.get(slug='<slug>'))"
+```
+
+Before launch, run `python manage.py report_rate_card_readiness` and confirm every shop
+you need on day one; the report also lists confirmed shops that are no longer usable.
+
 ### Tests
 
 ```bash

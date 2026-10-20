@@ -143,6 +143,84 @@ class ExplicitRateCardConfirmationTests(TestCase):
         complete_shop_rate_card_setup(shop)
         self.assertTrue(build_shop_rate_card_setup(shop)["is_confirmed"])
 
+    def test_second_confirm_is_idempotent(self):
+        """Phase 3A.1 Task 3c: confirming an already-confirmed, usable shop.
+
+        The second confirm must succeed and must not change confirmation,
+        visibility or the stored rate-card rows. Law 11.6 still creates a new
+        version on every save, so the version token is allowed to move; the
+        confirmation contract itself must not.
+        """
+        shop = self._shop("idempotent-confirm")
+        save_shop_rate_card_setup(
+            shop,
+            paper_rows=_build_default_paper_rows(),
+            finishing_rows=[],
+            completed=False,
+        )
+        first = complete_shop_rate_card_setup(shop)
+
+        setup = ShopRateCardSetup.objects.get(shop=shop)
+        shop.refresh_from_db()
+        snapshot = {
+            "is_confirmed": setup.is_confirmed,
+            "completed": setup.completed,
+            "paper_rows": setup.paper_rows,
+            "finishing_rows": setup.finishing_rows,
+            "shop_details": setup.shop_details,
+            "master_settings": setup.master_settings,
+            "pricing_ready": shop.pricing_ready,
+            "public_match_ready": shop.public_match_ready,
+            "is_active": shop.is_active,
+            "is_public": shop.is_public,
+            "name": shop.name,
+        }
+
+        second = complete_shop_rate_card_setup(shop)
+
+        setup.refresh_from_db()
+        shop.refresh_from_db()
+        after = {
+            "is_confirmed": setup.is_confirmed,
+            "completed": setup.completed,
+            "paper_rows": setup.paper_rows,
+            "finishing_rows": setup.finishing_rows,
+            "shop_details": setup.shop_details,
+            "master_settings": setup.master_settings,
+            "pricing_ready": shop.pricing_ready,
+            "public_match_ready": shop.public_match_ready,
+            "is_active": shop.is_active,
+            "is_public": shop.is_public,
+            "name": shop.name,
+        }
+
+        self.assertEqual(first["completed"], True)
+        self.assertEqual(second["completed"], True)
+        self.assertEqual(snapshot, after)
+        self.assertTrue(after["is_confirmed"])
+        self.assertEqual(ShopRateCardSetup.objects.filter(shop=shop).count(), 1)
+
+    def test_confirm_endpoint_second_call_returns_success(self):
+        """The owner confirm endpoint is safe to double-submit."""
+        shop = self._shop("idempotent-endpoint")
+        save_shop_rate_card_setup(
+            shop,
+            paper_rows=_build_default_paper_rows(),
+            finishing_rows=[],
+            completed=False,
+        )
+        client = APIClient()
+        client.force_authenticate(user=shop.owner)
+
+        first = client.post("/api/shops/rate-card/onboarding-complete/", {}, format="json")
+        second = client.post("/api/shops/rate-card/onboarding-complete/", {}, format="json")
+
+        self.assertEqual(first.status_code, 200, first.content)
+        self.assertEqual(second.status_code, 200, second.content)
+        self.assertEqual(second.json()["completed"], True)
+        self.assertEqual(ShopRateCardSetup.objects.filter(shop=shop).count(), 1)
+        self.assertTrue(ShopRateCardSetup.objects.get(shop=shop).is_confirmed)
+
 
 class ConfirmEndpointTests(TestCase):
     """A4: the owner confirm endpoint returns a structured 400 when incomplete."""

@@ -252,13 +252,27 @@ def _global_missing_fields(payload: dict[str, Any]) -> list[str]:
     return missing
 
 
+def confirmed_printer_shop_queryset():
+    """Base queryset of shops a manager is allowed to FIND or PICK as a printer.
+
+    Law 11.7 / Wilson's D4: a shop whose owner has not confirmed its rate card
+    must not appear anywhere a manager finds or picks a printer. This single
+    helper is the one source of truth for that rule so find-printer surfaces
+    (production-matching, shop-options, and the production-shops directory)
+    can never drift apart again.
+
+    Shops that never opened the rate-card screen have no setup record and stay
+    visible (their seeded pricing is what matching has always used).
+    """
+    return (
+        Shop.objects.filter(is_active=True)
+        .exclude(rate_card_setup__is_confirmed=False)
+        .distinct()
+    )
+
+
 def _shop_queryset(payload=None):
-    qs = Shop.objects.filter(is_active=True).select_related("owner").order_by("id")
-    # Law 11.7: a printer whose rate card has not been confirmed (first save)
-    # must not appear in find-printer. Shops that never opened the rate-card
-    # screen have no setup record and stay visible (their seeded pricing is
-    # what matching has always used).
-    qs = qs.exclude(rate_card_setup__is_confirmed=False)
+    qs = confirmed_printer_shop_queryset().select_related("owner").order_by("id")
     # Honour an explicit shop pin so a manager sourcing on behalf of one
     # printer gets that printer only, instead of every shop in the platform.
     if isinstance(payload, dict):

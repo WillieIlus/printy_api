@@ -87,16 +87,26 @@ def _shop_profile_complete(shop: Shop) -> bool:
     )
 
 
-def _product_turnaround_configured(shop: Shop) -> bool:
-    # Product is a global catalog and has no per-shop relation, so there is no
-    # shop-scoped product turnaround to read. Kept as a stable False so the
-    # setup-status computation never crashes for shops without a turnaround
-    # statement (Phase 3A Task B; no model changes allowed).
-    return False
+def _product_turnaround_configured(shop: Shop) -> bool | None:
+    """NOT DERIVABLE without a model change (Phase 3A.1 Task 2, step 2c).
+
+    `catalog.models.Product` is a global catalog model: it has no `shop`
+    foreign key and no per-shop turnaround row exists anywhere (the only
+    shop-scoped turnaround data is `Shop.turnaround_statement`). So there is
+    nothing to read.
+
+    Returns None ("unknown / not applicable") instead of the silent constant
+    False, so no caller can ever turn this into a false "not configured".
+    """
+    return None
 
 
 def _turnaround_configured(shop: Shop) -> bool:
-    return _has_real_text(getattr(shop, "turnaround_statement", "")) or _product_turnaround_configured(shop)
+    # `Shop.turnaround_statement` is the ONLY per-shop turnaround signal that
+    # exists, so it alone decides. `_product_turnaround_configured()` is None
+    # by design and must never be able to flip a configured turnaround to
+    # "not configured".
+    return _has_real_text(getattr(shop, "turnaround_statement", ""))
 
 
 def _build_steps_payload(*, shop: Shop | None, state: dict, next_step: str) -> list[dict]:
@@ -192,16 +202,18 @@ def _build_status_for_shop(shop: Shop | None) -> dict:
     material_count = 0
     pricing_rules_count = PrintingRate.objects.filter(machine__shop=shop, is_active=True).count()
     finishing_rates_count = FinishingRate.objects.filter(shop=shop, is_active=True).count()
-    # Product is a global catalog with no per-shop relation; there is no
-    # shop-scoped product count (Phase 3A Task B).
-    products_count = 0
+    # Product is a global catalog with no per-shop relation (see
+    # _product_turnaround_configured), so a per-shop product count cannot be
+    # derived without a model change. Task 2c: report None (unknown) rather
+    # than a hard-coded 0, which every consumer would read as "no products".
+    products_count: int | None = None
 
     has_machines = machine_count > 0
     has_papers = paper_count > 0
     has_materials = (paper_count + material_count) > 0
     has_pricing_rules = pricing_rules_count > 0 and paper_count > 0
     has_finishing_rates = finishing_rates_count > 0
-    has_products = products_count > 0
+    has_products: bool | None = products_count
     shop_profile_complete = _shop_profile_complete(shop)
     turnaround_configured = _turnaround_configured(shop)
     shop_published = bool(shop.is_active and shop.is_public)

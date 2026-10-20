@@ -17,6 +17,7 @@ from inventory.models import Machine, Paper
 from pricing.choices import ColorMode
 from pricing.models import PrintingRate, ShopRateCardSetup
 from shops.models import Shop
+from shops.services import shop_rate_card_is_usable
 
 
 class ReportRateCardReadinessTests(TestCase):
@@ -111,3 +112,57 @@ class ReportRateCardReadinessTests(TestCase):
         call_command("report_rate_card_readiness", stdout=out)
 
         self.assertNotIn("report-confirmed", out.getvalue())
+
+    def test_report_lists_confirmed_but_not_usable(self):
+        """Phase 3A.1 Task 3b: confirmed + not usable passes the find-printer
+        gate yet cannot price a job, so launch review must see it."""
+        confirmed_unusable = self._shop(
+            "Confirmed Unusable Shop", "report-cnu", with_pricing=False
+        )
+        ShopRateCardSetup.objects.create(shop=confirmed_unusable, is_confirmed=True)
+
+        out = io.StringIO()
+        call_command("report_rate_card_readiness", stdout=out)
+        text = out.getvalue()
+
+        self.assertIn("CONFIRMED BUT NOT USABLE", text)
+        self.assertIn("report-cnu", text)
+        self.assertIn("Add priced paper stock", text)
+        self.assertIn("Set a printing rate", text)
+
+    def test_confirmed_but_not_usable_section_masks_contact_details(self):
+        confirmed_unusable = self._shop(
+            "Confirmed Unusable Mask", "report-cnu-mask", with_pricing=False
+        )
+        ShopRateCardSetup.objects.create(shop=confirmed_unusable, is_confirmed=True)
+
+        out = io.StringIO()
+        call_command("report_rate_card_readiness", stdout=out)
+        text = out.getvalue()
+
+        self.assertIn("report-cnu-mask", text)
+        self.assertNotIn("owner-report-cnu-mask@example.com", text)
+        self.assertNotIn("+254712345678", text)
+
+    def test_confirmed_and_usable_shop_is_still_absent(self):
+        confirmed_usable = self._shop("Confirmed Usable Shop", "report-cu")
+        ShopRateCardSetup.objects.create(shop=confirmed_usable, is_confirmed=True)
+
+        out = io.StringIO()
+        call_command("report_rate_card_readiness", stdout=out)
+        text = out.getvalue()
+
+        self.assertNotIn("slug=report-cu ", text)
+        self.assertIn("- none", text)
+
+    def test_report_stays_read_only_when_reporting_confirmed_unusable(self):
+        confirmed_unusable = self._shop(
+            "Confirmed Unusable No Write", "report-cnu-nw", with_pricing=False
+        )
+        setup = ShopRateCardSetup.objects.create(shop=confirmed_unusable, is_confirmed=True)
+
+        call_command("report_rate_card_readiness", stdout=io.StringIO())
+
+        setup.refresh_from_db()
+        self.assertTrue(setup.is_confirmed)
+        self.assertFalse(shop_rate_card_is_usable(confirmed_unusable))

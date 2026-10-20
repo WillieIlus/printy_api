@@ -49,7 +49,10 @@ from quotes.guardrails import calculate_quote_expiry, validate_partner_markup_am
 from quotes.models import QuoteRequest, Quote
 from quotes.partner_services import respond_to_assigned_quote_request
 from quotes.services_workflow import update_quote_response
-from services.production_matching import build_partner_production_matches
+from services.production_matching import (
+    build_partner_production_matches,
+    confirmed_printer_shop_queryset,
+)
 from jobs.timing import timing_fields
 from jobs.job_codes import job_code, job_from_quote_ref, job_tracking_url, tracking_url
 from jobs.listing import job_flags, order_jobs, order_quotes, quote_flags
@@ -2018,7 +2021,10 @@ class PartnerProductionShopListView(BaseRoleDetailView):
 
     def get_queryset(self, request):
         queryset = (
-            Shop.objects.filter(is_active=True, is_public=True)
+            # Single source of truth for the D4 confirmation gate (see
+            # services/production_matching.confirmed_printer_shop_queryset).
+            confirmed_printer_shop_queryset()
+            .filter(is_public=True)
             .filter(Q(supports_custom_requests=True) | Q(supports_catalog_requests=True))
             .filter(
                 papers__is_active=True,
@@ -2026,7 +2032,6 @@ class PartnerProductionShopListView(BaseRoleDetailView):
                 machines__printing_rates__is_active=True,
             )
             .select_related("owner")
-            .distinct()
         )
         search = str(request.query_params.get("search") or request.query_params.get("q") or "").strip()
         if search:
