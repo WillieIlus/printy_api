@@ -872,6 +872,8 @@ def _extract_pricing_breakdown(matches: list[dict[str, Any]]) -> dict[str, Any] 
             "print_price_front": None,
             "print_price_back": None,
             "total_per_sheet": None,
+            "stock_printing_total_per_sheet": None,
+            "stock_printing_total": None,
             "estimated_total": None,
             "price_range": None,
             "formula": None,
@@ -916,6 +918,19 @@ def _extract_pricing_breakdown(matches: list[dict[str, Any]]) -> dict[str, Any] 
         "print_price_front": per_sheet.get("print_price_front"),
         "print_price_back": per_sheet.get("print_price_back"),
         "total_per_sheet": per_sheet.get("total_per_sheet"),
+        # The quote's per-sheet figure is the printer table's "Total 2s" (or
+        # "Total 1s" for single-sided work), plus the same figure over the sheets
+        # charged. One resolver produces both numbers.
+        "stock_printing_total_per_sheet": (
+            breakdown.get("stock_printing_total_per_sheet")
+            or per_sheet.get("stock_printing_total_per_sheet")
+            or per_sheet.get("total_per_sheet")
+        ),
+        "stock_printing_total": (
+            breakdown.get("stock_printing_total")
+            or per_sheet.get("stock_printing_total")
+            or totals.get("stock_printing_total")
+        ),
         "estimated_total": totals.get("grand_total"),
         "price_range": None,
         "formula": per_sheet.get("formula"),

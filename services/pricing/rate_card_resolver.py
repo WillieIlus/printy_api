@@ -172,6 +172,24 @@ def _legacy_override(candidates: list[Any], *, preset: Decimal, master_value: De
     return None
 
 
+def stock_printing_totals(
+    *,
+    paper_cost: Decimal,
+    one_side_print: Decimal,
+    both_sides_print: Decimal | None,
+    surcharge: Decimal,
+) -> dict[str, Decimal | None]:
+    """THE stock + printing per-sheet arithmetic ("Total 1s" / "Total 2s").
+
+    Both the printer rate-card table (via ``resolve_paper_row``) and the quote
+    engine call this one function, so the per-sheet figure a printer sees in the
+    table can never drift from the per-sheet figure a quote charges.
+    """
+    one_side = paper_cost + one_side_print + surcharge
+    both_sides = paper_cost + both_sides_print + surcharge if both_sides_print is not None else None
+    return {"total_one_side": one_side, "total_both_sides": both_sides}
+
+
 def resolve_paper_row(row: dict[str, Any], master: dict[str, Any] | None = None) -> dict[str, Any]:
     """Resolve one paper row under law 11.3 and return the flat table values.
 
@@ -250,8 +268,14 @@ def resolve_paper_row(row: dict[str, Any], master: dict[str, Any] | None = None)
         surcharge_applies = surcharge_rate > 0 and gsm >= master_values["surcharge_threshold_gsm"]
     applied_surcharge = surcharge_rate if surcharge_applies else Decimal("0.00")
 
-    total_one_side = paper_cost + single_print + applied_surcharge
-    total_both_sides = paper_cost + double_print + applied_surcharge if double_sided_available else None
+    totals = stock_printing_totals(
+        paper_cost=paper_cost,
+        one_side_print=single_print,
+        both_sides_print=double_print if double_sided_available else None,
+        surcharge=applied_surcharge,
+    )
+    total_one_side = totals["total_one_side"]
+    total_both_sides = totals["total_both_sides"]
 
     resolved.update(
         {

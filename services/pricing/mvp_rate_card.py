@@ -45,7 +45,7 @@ DEFAULT_FINISHING_DEFINITIONS: list[dict[str, Any]] = [
     {"key": "ivory_duplex", "id": "finishing-ivory-duplex", "label": "Ivory 300 Duplex", "name": "Ivory 300 Duplex", "pricing_mode": "per_sheet", "unit": "sheet", "price": "100.00", "minimum_charge": None, "active": False},
     {"key": "creasing", "id": "finishing-creasing", "label": "Creasing", "name": "Creasing", "pricing_mode": "flat_per_job", "unit": "job", "price": "300.00", "minimum_charge": "300.00", "active": False},
     {"key": "wire_o", "id": "finishing-wire-o", "label": "Wire-O-Wire", "name": "Wire-O-Wire", "pricing_mode": "per_book", "unit": "book", "price": "30.00", "minimum_charge": "100.00", "active": False},
-    {"key": "potch_lamination", "id": "finishing-potch-lamination", "label": "Potch Lamination", "name": "Potch Lamination", "pricing_mode": "per_piece", "unit": "piece", "price": "100.00", "minimum_charge": "100.00", "active": False},
+    {"key": "potch_lamination", "id": "finishing-potch-lamination", "label": "Potch Lamination", "name": "Potch Lamination", "pricing_mode": "per_sheet", "unit": "sheet", "price": "100.00", "minimum_charge": "100.00", "active": False},
     {"key": "gloss_lamination_single", "id": "finishing-gloss-lamination-single", "label": "Gloss Lamination Single", "name": "Gloss Lamination Single", "pricing_mode": "per_sheet", "unit": "sheet", "price": "5.00", "minimum_charge": "50.00", "active": False},
     {"key": "gloss_lamination_double", "id": "finishing-gloss-lamination-double", "label": "Gloss Lamination Double", "name": "Gloss Lamination Double", "pricing_mode": "per_sheet", "unit": "sheet", "price": "15.00", "minimum_charge": "50.00", "active": False},
     {"key": "matte_lamination_single", "id": "finishing-matte-lamination-single", "label": "Matt Lamination Single", "name": "Matt Lamination Single", "pricing_mode": "per_sheet", "unit": "sheet", "price": "15.00", "minimum_charge": "50.00", "active": False},
@@ -438,6 +438,7 @@ def build_rate_card_table_preview(
     product_key: str = "business-cards",
     finishing_keys: list[str] | None = None,
     master_settings: dict[str, Any] | None = None,
+    sides: str = "DUPLEX",
 ) -> dict[str, Any]:
     """Canonical Excel-like preview for the rate card table.
 
@@ -453,6 +454,15 @@ def build_rate_card_table_preview(
         raise ValidationError({"quantity": ["Quantity must be a whole number."]}) from exc
     if quantity <= 0:
         raise ValidationError({"quantity": ["Quantity must be greater than zero."]})
+
+    # Prompt item 5 — the figure a quote actually charges is published by the
+    # server, never recomputed in the browser (law 1.1 / 11.3).
+    duplex = str(sides or "DUPLEX").strip().upper() not in ("SIMPLEX", "SINGLE", "ONE", "1")
+    quote_column = "total_both_sides" if duplex else "total_one_side"
+    quote_label = "Total 2s" if duplex else "Total 1s"
+    quote_note = (
+        "Quote uses Total 2s for duplex" if duplex else "Quote uses Total 1s for single-sided"
+    )
 
     master = resolve_master_settings(master_settings)
 
@@ -531,6 +541,7 @@ def build_rate_card_table_preview(
             _to_decimal(resolved.get("surcharge_rate") or "0.00") if resolved.get("surcharge_applies") else Decimal("0.00")
         )
         double_enabled = bool(resolved.get("double_sided_available")) and double_print_rate is not None
+        row_quote_column = quote_column if (not duplex or double_enabled) else "total_one_side"
         rows.append(
             {
                 "key": resolved.get("key"),
@@ -546,6 +557,10 @@ def build_rate_card_table_preview(
                 "surcharge_rate": resolved["surcharge_rate"],
                 "total_one_side": resolved["total_one_side"],
                 "total_both_sides": resolved["total_both_sides"],
+                # Prompt item 5: the per-sheet figure a quote charges, resolved
+                # on the server from the same total the table already shows.
+                "quote_per_sheet": resolved.get(row_quote_column),
+                "quote_column": row_quote_column,
                 "double_sided_available": bool(resolved.get("double_sided_available")),
                 "override_single_print": resolved.get("override_single_print"),
                 "override_double_print": resolved.get("override_double_print"),
@@ -562,11 +577,21 @@ def build_rate_card_table_preview(
         warnings.append("Spoilage was capped at the configured maximum billable sheets.")
     if selected_keys:
         warnings.append("Finishing is charged on good sheets; paper and printing use billable sheets.")
+    if duplex and any(row.get("quote_column") != quote_column for row in rows):
+        warnings.append("Some stocks are single-sided only, so their quote uses Total 1s.")
 
     return {
         "currency": "KES",
         "quantity": quantity,
         "master_settings": master,
+        # Prompt item 5 — which table column the quote charges, and its exact
+        # wording, so the UI shows the server's figure and the server's note.
+        "quote_basis": {
+            "sides": "DUPLEX" if duplex else "SIMPLEX",
+            "column": quote_column,
+            "label": quote_label,
+            "note": quote_note,
+        },
         "product": {
             "key": product["key"],
             "label": product["label"],
@@ -603,6 +628,7 @@ def preview_shop_rate_card_table(
     product_key: str = "business-cards",
     finishing_keys: list[str] | None = None,
     master_settings: dict[str, Any] | None = None,
+    sides: str = "DUPLEX",
 ) -> dict[str, Any]:
     master = resolve_master_settings(master_settings)
     normalized_papers = _normalize_paper_rows(paper_rows, master=master)
@@ -614,6 +640,7 @@ def preview_shop_rate_card_table(
         product_key=product_key,
         finishing_keys=finishing_keys,
         master_settings=master,
+        sides=sides,
     )
 
 
@@ -1188,6 +1215,10 @@ def _paper_row_from_canonical(paper: Paper) -> dict[str, Any] | None:
 
 
 def _finishing_mode_from_canonical(rate: FinishingRate) -> str:
+    # Lamination is ALWAYS charged per sheet (prompt item 2). A legacy row with a
+    # per-piece basis must still be shown (and billed) as per sheet.
+    if rate.is_lamination_rule():
+        return "per_sheet"
     if rate.billing_basis == FinishingBillingBasis.PER_SHEET:
         return "per_sheet"
     if rate.billing_basis == FinishingBillingBasis.PER_PIECE:
@@ -1384,6 +1415,14 @@ def _finishing_identity_from_row(shop, row: dict[str, Any], *, slug: str) -> dic
     }
 
 
+def _is_lamination_row(row: dict[str, Any]) -> bool:
+    haystack = " ".join(
+        _normalize_text(row.get(field))
+        for field in ("key", "name", "label", "slug")
+    ).lower().replace("_", "-")
+    return "lamination" in haystack or "laminate" in haystack
+
+
 def _persist_finishing_rows(shop, finishing_rows: list[dict[str, Any]], *, master: dict[str, Any] | None = None) -> None:
     master_settings = resolve_master_settings(master)
     for row in finishing_rows:
@@ -1392,6 +1431,37 @@ def _persist_finishing_rows(shop, finishing_rows: list[dict[str, Any]], *, maste
         if not name:
             continue
         slug = slugify(_normalize_text(row.get("key")) or name)
+        if _is_lamination_row(row):
+            # Lamination is per_sheet, never per_pc, whatever mode the client
+            # sent. Editing the identity in place (rather than creating a second
+            # row) also repairs a previously stored per-piece lamination row.
+            row = {**row, "pricing_mode": "per_sheet"}
+            from services.pricing.finishing_normalization import normalize_finishing_slug
+
+            wanted_slug = normalize_finishing_slug(slug)
+            existing = next(
+                (
+                    rate
+                    for rate in FinishingRate.objects.filter(shop=shop).order_by("id")
+                    if normalize_finishing_slug(rate.slug) == wanted_slug
+                    and rate.billing_basis != FinishingBillingBasis.PER_SHEET
+                ),
+                None,
+            )
+            if existing is not None:
+                existing.billing_basis = FinishingBillingBasis.PER_SHEET
+                existing.charge_unit = ChargeUnit.PER_SHEET
+                existing.side_mode = FinishingSideMode.PER_SELECTED_SIDE
+                existing.display_unit_label = "per sheet"
+                existing.save(
+                    update_fields=[
+                        "billing_basis",
+                        "charge_unit",
+                        "side_mode",
+                        "display_unit_label",
+                        "updated_at",
+                    ]
+                )
         identity = _finishing_identity_from_row(shop, row, slug=slug)
         if not row.get("active"):
             FinishingRate.objects.filter(**identity).update(is_active=False)

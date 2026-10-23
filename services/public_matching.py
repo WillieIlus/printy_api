@@ -10,8 +10,13 @@ from django.utils.text import slugify
 
 from inventory.models import Machine, Paper
 from pricing.models import FinishingRate, PrintingRate
+from services.pricing.booklet import calculate_booklet_pricing
 from services.pricing.engine import calculate_sheet_pricing
-from services.pricing.finishing_normalization import normalize_finishing_slug, resolve_finishing_rate_for_slug
+from services.pricing.finishing_normalization import (
+    finishing_is_offered_anywhere,
+    normalize_finishing_slug,
+    resolve_finishing_rate_for_slug,
+)
 from services.pricing.marketplace_pricing import apply_marketplace_pricing_to_preview
 from shops.models import Shop
 
@@ -203,7 +208,11 @@ def _finishing_selections(shop: Shop, payload: dict[str, Any]) -> tuple[list[dic
         rule = resolve_finishing_rate_for_slug(shop, canonical_slug)
         if rule:
             selections.append({"rule": rule, "selected_side": "both"})
-        else:
+            continue
+        # A finishing this shop does not configure only excludes the shop when a
+        # verified, setup-complete shop actually offers it. Otherwise the request
+        # is a preference nobody can price yet and must not hide every price.
+        if finishing_is_offered_anywhere(canonical_slug):
             missing.append(canonical_slug)
 
     product_type = (str(payload.get("product_type") or "").strip()).lower()
@@ -350,6 +359,169 @@ def _production_intelligence(
     }
 
 
+BOOKLET_BINDING_LABELS = {
+    "saddle_stitch": "Saddle stitch",
+    "perfect_bind": "Perfect bind",
+    "wire_o": "Wire-O",
+}
+
+
+def _normalize_booklet_binding(value: Any) -> str:
+    """Map every binding vocabulary onto the booklet engine's three choices."""
+    text = normalize_finishing_slug(value)
+    if not text or text in {"none", "no"}:
+        return "saddle_stitch"
+    if "wire" in text:
+        return "wire_o"
+    if "perfect" in text or text == "binding":
+        return "perfect_bind"
+    return "saddle_stitch"
+
+
+def _normalize_cover_lamination(value: Any) -> str:
+    text = normalize_finishing_slug(value)
+    if not text or text in {"none", "no", "no-lamination"}:
+        return "none"
+    if text in {"front", "one-side", "first-side"} or "front" in text:
+        return "front"
+    return "both"
+
+
+def _booklet_paper(shop: Shop, *, category: Any, gsm: Any, usage: str) -> Paper | None:
+    """Pick the shop's nearest usable stock for a cover/insert slot.
+
+    The buyer's cover/insert choice is a preference ("nearest available stock"),
+    so a shop is never excluded merely for holding 250gsm instead of 300gsm. The
+    slot's usage flag still wins: an insert paper is never used as a cover.
+    """
+    qs = Paper.objects.filter(shop=shop, is_active=True, selling_price__gt=0)
+    if usage == "cover":
+        slot_qs = qs.filter(is_cover_stock=True)
+    else:
+        slot_qs = qs.filter(is_insert_stock=True)
+    if slot_qs.exists():
+        qs = slot_qs
+    category_text = str(category or "").strip()
+    if category_text:
+        typed_qs = qs.filter(Q(category__iexact=category_text) | Q(paper_type__iexact=category_text))
+        if typed_qs.exists():
+            qs = typed_qs
+    papers = list(qs.order_by("-is_default", "gsm", "selling_price", "id"))
+    if not papers:
+        return None
+    target = int(gsm or 0) or 0
+    if target:
+        return sorted(
+            papers,
+            key=lambda paper: (
+                abs(int(paper.gsm or 0) - target),
+                0 if paper.is_default else 1,
+                paper.selling_price,
+            ),
+        )[0]
+    return papers[0]
+
+
+def build_public_booklet_match_payload(payload):
+    """Price a brochure/booklet against every shop that can actually make it.
+
+    Brochures used to be a hardcoded stub (``booklet_matching_pending``): no shop
+    was ever matched, so a complete brochure spec always fell through to "finish
+    your spec". The booklet engine already prices cover stock, insert stock,
+    cover lamination and the chosen binding; this wires it to the same public
+    match contract as flat products.
+    """
+    matches: list[dict[str, Any]] = []
+    unsupported_reasons: list[str] = []
+    quantity = int(payload.get("quantity") or 0)
+    binding_type = _normalize_booklet_binding(payload.get("binding_type"))
+    cover_lamination_mode = _normalize_cover_lamination(payload.get("cover_lamination_mode"))
+    sides = str(payload.get("print_sides") or "DUPLEX").upper()
+    for shop in _shop_queryset():
+        cover_paper = _booklet_paper(
+            shop,
+            category=payload.get("cover_paper_type"),
+            gsm=payload.get("cover_paper_gsm"),
+            usage="cover",
+        )
+        insert_paper = _booklet_paper(
+            shop,
+            category=payload.get("insert_paper_type"),
+            gsm=payload.get("insert_paper_gsm"),
+            usage="insert",
+        )
+        if cover_paper is None or insert_paper is None:
+            reason = "No active cover and insert stock is priced on this shop's rate card."
+            if reason not in unsupported_reasons:
+                unsupported_reasons.append(reason)
+            continue
+
+        finishing_selections = []
+        cutting = _resolve_cutting_rate(shop)
+        if cutting is not None:
+            finishing_selections.append({"rule": cutting, "selected_side": "both"})
+
+        result = calculate_booklet_pricing(
+            shop=shop,
+            quantity=quantity,
+            width_mm=payload.get("width_mm"),
+            height_mm=payload.get("height_mm"),
+            total_pages=payload.get("total_pages"),
+            binding_type=binding_type,
+            cover_paper=cover_paper,
+            insert_paper=insert_paper,
+            cover_sides=sides,
+            insert_sides=sides,
+            cover_color_mode=payload.get("cover_color_mode") or payload.get("color_mode") or "COLOR",
+            insert_color_mode=payload.get("insert_color_mode") or payload.get("color_mode") or "COLOR",
+            cover_lamination_mode=cover_lamination_mode,
+            finishing_selections=finishing_selections,
+            turnaround_hours=payload.get("turnaround_hours"),
+        )
+        if not result.get("can_calculate"):
+            reason = result.get("reason") or "This shop cannot price the booklet spec yet."
+            if reason not in unsupported_reasons:
+                unsupported_reasons.append(reason)
+            continue
+        preview = apply_marketplace_pricing_to_preview(result, shop=shop)
+        preview["product_type"] = "booklet"
+        preview["quote_type"] = "booklet"
+        total = _positive_money((preview.get("totals") or {}).get("grand_total"))
+        if not total:
+            continue
+        match = _public_match(len(matches) + 1, shop, preview, "booklet", payload)
+        # The booklet projection is derived from this preview by the canonical
+        # extractor; the flat projection would hide the booklet page/binding data.
+        match["production_preview"] = None
+        matches.append(match)
+        if len(matches) >= MAX_PUBLIC_MATCHES:
+            break
+
+    totals = [
+        _positive_money(((match.get("preview") or {}).get("totals") or {}).get("grand_total"))
+        for match in matches
+    ]
+    totals = [amount for amount in totals if amount is not None]
+    return {
+        "matches": matches,
+        "matches_count": len(matches),
+        "request": payload,
+        "status": "matched" if matches else "no_matches",
+        "min_price": str(min(totals)) if totals else None,
+        "max_price": str(max(totals)) if totals else None,
+        "exact_or_estimated": bool(matches),
+        "currency": matches[0]["currency"] if matches else "KES",
+        "unsupported_reasons": unsupported_reasons,
+        "summary": (
+            "Verified public production capacity matched this booklet specification."
+            if matches
+            else "No verified shop can price this booklet specification yet."
+        ),
+        "missing_fields": [],
+        "missing_requirements": [],
+    }
+
+
 def build_public_match_payload(payload):
     matches: list[dict[str, Any]] = []
     unsupported_reasons: list[str] = []
@@ -404,11 +576,16 @@ def build_public_match_payload(payload):
         "exact_or_estimated": bool(matches),
         "currency": matches[0]["currency"] if matches else "KES",
         "unsupported_reasons": unsupported_reasons,
+        # A complete spec that no shop can price must say exactly that, not ask
+        # the buyer to "finish" a spec that is already complete.
+        "summary": (
+            "Verified public production capacity matched this specification."
+            if matches
+            else "No verified shop can price this exact specification yet."
+        ),
+        "missing_fields": [],
+        "missing_requirements": [],
     }
-
-
-def build_public_booklet_match_payload(payload):
-    return {"matches": [], "matches_count": 0, "request": payload, "status": "booklet_matching_pending"}
 
 
 def get_marketplace_matches(payload):

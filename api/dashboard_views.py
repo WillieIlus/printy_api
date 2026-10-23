@@ -4,7 +4,7 @@ import hashlib
 import json
 import secrets
 import re
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 
 from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError
@@ -29,7 +29,7 @@ from accounts.services.roles import (
 from accounts.services.capabilities import has_capability
 from accounts.models import UserProfile
 from api.services.admin_dashboard import build_admin_dashboard_payload
-from api.visibility import project_shop_identity
+from api.visibility import project_shop_identity, projection_role_for_request, scrub_response_for_role
 from jobs.choices import JobAssignmentStatus, ManagedJobAssignmentStatus, ManagedJobPaymentStatus, ManagedJobStatus
 from jobs.artwork_confirmation import get_artwork_confirmation_payload
 from jobs.artwork_workflow import artwork_payment_block_reason, get_artwork_workflow_payload
@@ -1529,6 +1529,55 @@ class PartnerQuoteAttachClientView(BaseRoleDetailView):
         )
 
 
+def _quote_prepare_quantity(quote_request: QuoteRequest, pricing_snapshot: dict) -> int:
+    """Quantity the prepared quote is priced per piece against."""
+    for entry in pricing_snapshot.get("selected_shops") or []:
+        if not isinstance(entry, dict):
+            continue
+        preview = entry.get("preview") if isinstance(entry.get("preview"), dict) else {}
+        quantity = preview.get("quantity") or entry.get("quantity")
+        if quantity:
+            try:
+                return int(quantity)
+            except (TypeError, ValueError):
+                pass
+    # Fall back to the request's own spec rather than guessing.
+    snapshot = quote_request.request_snapshot if isinstance(quote_request.request_snapshot, dict) else {}
+    calculator = snapshot.get("calculator_inputs") if isinstance(snapshot.get("calculator_inputs"), dict) else {}
+    request_details = snapshot.get("request_details") if isinstance(snapshot.get("request_details"), dict) else {}
+    return int(_dashboard_int(calculator.get("quantity") or request_details.get("quantity") or snapshot.get("quantity")) or 0)
+
+
+def _manager_quote_fields(*, preview: dict, quote_request: QuoteRequest, pricing_snapshot: dict, markup_pct) -> dict[str, str | None]:
+    """The manager-only money view of a prepared quote (item 4).
+
+    ``printer_total`` is what the printer charges, ``manager_total_to_client`` is
+    the manager's client price, and ``per_piece`` divides that by the quantity.
+    These keys are never sent to a buyer or printer payload.
+    """
+    from decimal import ROUND_HALF_UP
+    from quotes.guardrails import _money as _quote_money
+
+    printer_total = Decimal(str(preview.get("production_estimate") or "0"))
+    markup_amount = Decimal(str(preview.get("gross_margin") or "0"))
+    client_total = Decimal(str(preview.get("client_price") or "0"))
+    printy_fee = Decimal(str(preview.get("printy_fee") or "0"))
+    quantity = _quote_prepare_quantity(quote_request, pricing_snapshot)
+    per_piece = (
+        (client_total / Decimal(quantity)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        if quantity
+        else None
+    )
+    return {
+        "printer_total": str(_quote_money(printer_total)),
+        "markup_pct": str(Decimal(str(markup_pct or "0")).quantize(Decimal("0.01"))),
+        "markup_amount": str(_quote_money(markup_amount)),
+        "printy_fee": str(_quote_money(printy_fee)),
+        "manager_total_to_client": str(_quote_money(client_total)),
+        "per_piece": str(per_piece) if per_piece is not None else None,
+    }
+
+
 class PartnerAssignedRequestQuoteCreateView(ManagerCapablePartnerQuoteView):
     dashboard_role = "partner"
     allowed_roles = (CANONICAL_PARTNER_ROLE,)
@@ -1555,15 +1604,30 @@ class PartnerAssignedRequestQuoteCreateView(ManagerCapablePartnerQuoteView):
             )
         except ValueError as exc:
             raise serializers.ValidationError({"detail": str(exc)}) from exc
-        return Response(
-            {
-                "role": "partner",
-                "quote_request_id": payload["quote_request"].id,
-                "quote": QuoteResponseReadSerializer(payload["quote"], context={"request": request}).data,
-                "partner_preview": payload["preview"],
-            },
-            status=201,
-        )
+        role = projection_role_for_request(request)
+        preview = payload["preview"]
+        response_body = {
+            "role": "partner",
+            "quote_request_id": payload["quote_request"].id,
+            "quote": QuoteResponseReadSerializer(payload["quote"], context={"request": request}).data,
+            # Law 1.3: partner economics are manager-only. A buyer/printer active
+            # role never receives printy_fee, markup or the printer total.
+            "partner_preview": (
+                preview
+                if role == ROLE_MANAGER
+                else scrub_response_for_role(preview, role)
+            ),
+        }
+        if role == ROLE_MANAGER:
+            manager_fields = _manager_quote_fields(
+                preview=preview,
+                quote_request=payload["quote_request"],
+                pricing_snapshot=serializer.validated_data["pricing_snapshot"],
+                markup_pct=serializer.validated_data["markup_pct"],
+            )
+            response_body.update(manager_fields)
+            response_body["manager_pricing"] = manager_fields
+        return Response(scrub_response_for_role(response_body, role), status=201)
 
 
 class PartnerAssignedRequestShopOptionsView(ManagerCapablePartnerQuoteView):
@@ -1662,13 +1726,26 @@ class ManagerQuoteRequestPricingPreviewView(PartnerAssignedRequestShopOptionsVie
                 )
             except ValueError as exc:
                 return Response({"detail": str(exc)}, status=400)
+            # Item 4 — the margin panel never calculates on the client: the
+            # printer's quote, markup, Printy fee, client total and per-piece
+            # price all come back from this response.
+            quantity = _dashboard_int(payload.get("quantity")) or _dashboard_int(specs.get("quantity"))
+            per_piece = (
+                (split["client_total"] / Decimal(quantity)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+                if quantity
+                else None
+            )
             manager_breakdown = {
                 **production,
+                "printer_total": str(production_cost),
                 "markup_pct": str(markup_pct),
                 "markup_amount": str(split["gross_margin"]),
                 "broker_client_price": str(split["broker_client_price"]),
                 "platform_fee": str(split["printy_fee"]),
+                "printy_fee": str(split["printy_fee"]),
                 "client_total": str(split["client_total"]),
+                "manager_total_to_client": str(split["client_total"]),
+                "per_piece": str(per_piece) if per_piece is not None else None,
             }
 
         eligible_shops = []

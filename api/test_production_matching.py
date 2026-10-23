@@ -151,7 +151,9 @@ class ProductionMatchingPhaseD1TestCase(TestCase):
         self.assertEqual(first_result["pricing_source"], "canonical_rate")
         self.assertEqual(first_result["recommendation_label"], "Recommended")
         self.assertIn("production_breakdown", first_result)
-        self.assertGreaterEqual(len(first_result["production_breakdown"]["breakdown"]), 3)
+        # Item 3 (prompt): paper and printing are one stock_printing line, so a
+        # matched option prices as stock_printing + cutting.
+        self.assertGreaterEqual(len(first_result["production_breakdown"]["breakdown"]), 2)
         first_line = first_result["production_breakdown"]["breakdown"][0]
         self.assertEqual(
             set(first_line).intersection({"component", "label", "quantity", "unit_price_kes", "total_kes", "source"}),
@@ -169,8 +171,11 @@ class ProductionMatchingPhaseD1TestCase(TestCase):
         breakdown = priced["production_breakdown"]
         components = {line["component"] for line in breakdown["breakdown"]}
 
-        self.assertIn("paper", components)
-        self.assertIn("printing", components)
+        # Item 3 (prompt): the stock and the press run are one merged
+        # stock_printing line (law 11.3 / 7.4a), not separate paper+printing.
+        self.assertIn("stock_printing", components)
+        self.assertNotIn("paper", components)
+        self.assertNotIn("printing", components)
         self.assertIn("cutting", components)
         self.assertEqual(breakdown["production_cost"], priced["production_cost"])
         self.assertEqual(breakdown["breakdown_total_kes"], priced["production_cost"])

@@ -226,13 +226,20 @@ class Law74ACostLineTests(TestCase):
             self.assertIn("unit_price_kes", line)
             self.assertIn("total_kes", line)
         components = {line["component"] for line in lines}
-        # Sheets, printing, lamination and cutting must all be itemized.
-        self.assertIn("paper", components)
-        self.assertIn("printing", components)
+        # Sheets + printing land on ONE merged line; lamination and cutting stay
+        # their own lines (prompt item 3: one desc line + one rate/amount line).
+        self.assertIn("stock_printing", components)
+        self.assertNotIn("paper", components)
+        self.assertNotIn("printing", components)
         self.assertIn("cutting", components)
         self.assertTrue(components & {"finishing", "lamination"})
-        paper = next(line for line in lines if line["component"] == "paper")
-        self.assertIn("SRA3", paper["spec"])
+        stock = next(line for line in lines if line["component"] == "stock_printing")
+        self.assertIn("SRA3", stock["label"])
+        self.assertIn("sheets", stock["spec"])
+        self.assertTrue(
+            any(part in stock["spec"] for part in ("side", "sides", "SIMPLEX", "DUPLEX")),
+            f"sides missing from {stock['spec']!r}",
+        )
 
     def test_manager_projection_has_cost_lines_others_do_not(self):
         engine_payload = calculate_sheet_pricing(

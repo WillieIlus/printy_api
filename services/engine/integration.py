@@ -86,7 +86,10 @@ def classify_finishing_spec(finishing_objects, print_sides: str | None = None) -
 
         if _contains_any(name, slug, category_name, terms=("lamination", "laminate")):
             lamination_sides = max(lamination_sides, side_count)
-            lamination_mode = "per_parent_sheet" if charge_unit in {ChargeUnit.PER_SHEET, ChargeUnit.PER_SIDE_PER_SHEET} else "per_piece"
+            # Lamination is per sheet, never per piece, even when a legacy row
+            # was stored with a per-piece charge unit: charging 100 cards for a
+            # 5-sheet job overcharges the buyer ~20x.
+            lamination_mode = "per_parent_sheet"
         if _contains_any(name, slug, category_name, terms=("cut", "trim")):
             cutting_mode = "per_sheet" if charge_unit in {ChargeUnit.PER_SHEET, ChargeUnit.PER_SIDE_PER_SHEET} else "per_job"
         if _contains_any(name, slug, category_name, terms=("fold",)):

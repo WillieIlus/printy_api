@@ -21,6 +21,7 @@ from services.pricing.breakdown_projection import (
 from services.pricing.calculator_preview import production_preview_from_engine_payload
 from services.pricing.engine import calculate_sheet_pricing
 from services.pricing.finishing_normalization import (
+    finishing_is_offered_anywhere,
     is_empty_finishing,
     normalize_finishing_slug,
     resolve_finishing_rate_for_slug,
@@ -222,6 +223,12 @@ def _explicit_finishing_requirements(payload: dict[str, Any]) -> list[str]:
     lamination = normalize_finishing_slug(payload.get("lamination") or payload.get("cover_lamination"))
     if lamination and not is_empty_finishing(lamination):
         keys.append(lamination)
+    # Brochures/booklets carry their structural finishing in ``binding_type``
+    # (saddle stitch, perfect bind, wire-o). Without it the binding was silently
+    # dropped and the shop priced a brochure as if it needed no binding at all.
+    binding = normalize_finishing_slug(payload.get("binding_type"))
+    if binding and not is_empty_finishing(binding) and binding not in {"none", "no"}:
+        keys.append(binding)
     finishings = payload.get("finishings")
     if isinstance(finishings, list):
         for item in finishings:
@@ -364,6 +371,11 @@ def _finishing_selections(shop: Shop, payload: dict[str, Any]) -> tuple[list[dic
                 # finished pieces are cut out of the imposed parent sheet. A shop
                 # that handles trimming in-house must never be excluded from
                 # pricing because it has no catalogued cutting finishing rate.
+                continue
+            if not finishing_is_offered_anywhere(key):
+                # Nobody on the platform configures this finishing, so it is a
+                # preference rather than a capability gate. Excluding every shop
+                # here is what produced "finish your spec" on a complete spec.
                 continue
             missing.extend(["finishing", key])
             continue

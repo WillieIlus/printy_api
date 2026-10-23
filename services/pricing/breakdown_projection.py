@@ -70,6 +70,7 @@ def line_items_from_preview(preview: dict[str, Any]) -> list[dict[str, Any]]:
     breakdown = _as_dict(preview.get("breakdown"))
     totals = _as_dict(preview.get("totals"))
     items: list[dict[str, Any]] = []
+    saw_stock_printing = False
 
     paper = _as_dict(breakdown.get("paper"))
     paper_total = paper.get("total") or totals.get("paper_cost")
@@ -87,6 +88,7 @@ def line_items_from_preview(preview: dict[str, Any]) -> list[dict[str, Any]]:
                 source="shop_rate",
             )
         )
+        saw_stock_printing = True
 
     printing = _as_dict(breakdown.get("printing") or breakdown.get("print"))
     print_total = printing.get("total") or totals.get("print_cost")
@@ -107,6 +109,20 @@ def line_items_from_preview(preview: dict[str, Any]) -> list[dict[str, Any]]:
                 source="shop_rate",
             )
         )
+        saw_stock_printing = True
+
+    # Law 11.3 / prompt item 3 — the manager quote shows ONE combined
+    # stock + printing line (the rate card's "Total 1s" / "Total 2s"), never a
+    # separate paper line beside a separate printing line. The engine already
+    # resolved stock_printing_total, and it equals paper_cost + print_cost, so
+    # the lines still sum to the printer's quoted subtotal.
+    if saw_stock_printing:
+        merged = stock_printing_line_from_preview(preview)
+        if merged is not None:
+            replaced = [index for index, item in enumerate(items) if item.get("component") in ("paper", "printing")]
+            for index in reversed(replaced):
+                items.pop(index)
+            items.insert(replaced[0] if replaced else 0, merged)
 
     for finishing in breakdown.get("finishings") or []:
         if not isinstance(finishing, dict):
@@ -155,18 +171,73 @@ def line_items_from_preview(preview: dict[str, Any]) -> list[dict[str, Any]]:
     return items
 
 
+_SIDES_LABELS = {
+    "DUPLEX": "both sides",
+    "DOUBLE_SIDED": "both sides",
+    "BOTH": "both sides",
+    "SIMPLEX": "single side",
+    "SINGLE_SIDED": "single side",
+    "ONE_SIDED": "single side",
+}
+
+
+def stock_printing_line_from_preview(preview: dict[str, Any]) -> dict[str, Any] | None:
+    """The ONE paper + printing line the manager quote shows (law 11.3).
+
+    The rate card renders "Total 1s" / "Total 2s" per sheet, and the quote's
+    price uses exactly that figure. Rather than re-adding a separate paper line
+    and printing line on the client side, the projection publishes the combined
+    stock + printing figure the engine already resolved, so both screens read
+    from one number.
+    """
+    totals = _as_dict(preview.get("totals"))
+    per_sheet = totals.get("stock_printing_total_per_sheet")
+    total = totals.get("stock_printing_total")
+    if per_sheet in (None, "") or total in (None, ""):
+        return None
+    breakdown = _as_dict(preview.get("breakdown"))
+    paper = _as_dict(breakdown.get("paper"))
+    printing = _as_dict(breakdown.get("printing") or breakdown.get("print"))
+    sheets = preview.get("billable_sheets") or preview.get("good_sheets") or preview.get("parent_sheets_required")
+    sides_label = _SIDES_LABELS.get(str(printing.get("sides") or "").upper(), "")
+    spec = ", ".join(part for part in [sides_label, f"{_num(sheets)} sheets" if sheets else ""] if part)
+    # "SRA3 300gsm Matte, both sides, 8 sheets" — sheet size rides with the
+    # stock label so the merged line still says exactly which stock was used.
+    label = paper.get("label") or paper.get("name") or "Paper + printing"
+    sheet_size = str(paper.get("sheet_size") or "").strip()
+    if sheet_size and sheet_size.lower() not in str(label).lower():
+        label = f"{sheet_size} {label}"
+    return _component_line(
+        component="stock_printing",
+        label=label,
+        spec=spec,
+        quantity=sheets,
+        unit="sheet",
+        unit_price=per_sheet,
+        total=total,
+        source="shop_rate",
+    )
+
+
 def production_breakdown_from_preview(preview: dict[str, Any]) -> dict[str, Any]:
     totals = _as_dict(preview.get("totals"))
     line_items = line_items_from_preview(preview)
     production_cost = _money(totals.get("subtotal") or totals.get("grand_total"))
     line_total = sum((Decimal(item["total_kes"]) for item in line_items), Decimal("0.00"))
     reconciles = line_total == Decimal(production_cost)
+    stock_printing_line = stock_printing_line_from_preview(preview)
     return {
         "pieces_per_sheet": preview.get("copies_per_sheet"),
         "sheets_needed": preview.get("good_sheets"),
         "line_items": line_items,
         "breakdown": line_items,
         "production_cost": production_cost,
+        # law 11.3 — the combined stock + printing figure (“Total 1s / Total 2s”)
+        # the printer rate-card table shows, and the line the quote renders.
+        "stock_printing_total_per_sheet": totals.get("stock_printing_total_per_sheet"),
+        "stock_printing_total": totals.get("stock_printing_total"),
+        "stock_printing_sheets": stock_printing_line.get("quantity") if stock_printing_line else None,
+        "stock_printing_line": stock_printing_line,
         "breakdown_total_kes": _money(line_total),
         "breakdown_reconciles": reconciles,
         "non_reconciling_policy_values": [] if reconciles else ["vat_or_policy_adjustment"],

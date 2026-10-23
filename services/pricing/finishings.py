@@ -83,19 +83,24 @@ def compute_finishing_line(
     line_quantity: int = 1,
     selected_side: str = "both",
 ) -> FinishingChargeLine:
+    is_lamination = bool(
+        getattr(rule, "is_lamination_rule", None) and rule.is_lamination_rule()
+    )
+    # Lamination is charged per SHEET, never per piece: quantity = the good
+    # sheets the lamination actually runs over. A legacy row stored with a
+    # per-piece basis is corrected here so it can never bill per card.
+    billing_basis = FinishingBillingBasis.PER_SHEET if is_lamination else rule.billing_basis
+    side_mode = FinishingSideMode.PER_SELECTED_SIDE if is_lamination else rule.side_mode
     units, units_label = _resolve_units(
-        billing_basis=rule.billing_basis,
+        billing_basis=billing_basis,
         quantity=quantity,
         good_sheets=good_sheets,
         area_sqm=area_sqm,
         group_quantity=group_quantity,
         line_quantity=line_quantity,
     )
-    side_count = selected_side_count(selected_side) if rule.side_mode == FinishingSideMode.PER_SELECTED_SIDE else 1
+    side_count = selected_side_count(selected_side) if side_mode == FinishingSideMode.PER_SELECTED_SIDE else 1
     side_multiplier = Decimal(side_count)
-    is_lamination = bool(
-        getattr(rule, "is_lamination_rule", None) and rule.is_lamination_rule()
-    )
     use_both_side_override = bool(
         is_lamination
         and selected_side == "both"
@@ -111,7 +116,7 @@ def compute_finishing_line(
         subtotal *= side_multiplier
     minimum_charge = Decimal(str(rule.minimum_charge or "0"))
     total = max(subtotal, minimum_charge) if minimum_charge else subtotal
-    human_units_label = _format_unit_label(rule.billing_basis, units)
+    human_units_label = _format_unit_label(billing_basis, units)
     explanation = f"{rule.name}: {human_units_label} x {base_rate}"
     formula = "units x rate"
     calculation_basis = f"{units} x {base_rate}"
@@ -138,8 +143,8 @@ def compute_finishing_line(
     return FinishingChargeLine(
         name=rule.name,
         slug=rule.slug,
-        billing_basis=rule.billing_basis,
-        side_mode=rule.side_mode,
+        billing_basis=billing_basis,
+        side_mode=side_mode,
         selected_side=selected_side,
         side_count=side_count,
         good_sheets=good_sheets,

@@ -175,7 +175,9 @@ def _resolve_lamination_rule(
         return None
     if lamination_finishing_rate is not None:
         return lamination_finishing_rate
-    queryset = FinishingRate.objects.filter(shop=shop, is_active=True).select_related("category").order_by("id")
+    # FinishingRate has no ``category`` relation; selecting it raised FieldError
+    # and made every shop with a configured lamination unpriceable.
+    queryset = FinishingRate.objects.filter(shop=shop, is_active=True).order_by("id")
     for finishing in queryset:
         if finishing.is_lamination_rule():
             return finishing
@@ -194,12 +196,12 @@ def _resolve_binding_rule(
         "perfect_bind": ("perfect", "bind"),
         "wire_o": ("wire", "wire-o", "wireo"),
     }.get(binding_type, ())
-    queryset = FinishingRate.objects.filter(shop=shop, is_active=True).select_related("category").order_by("id")
+    queryset = FinishingRate.objects.filter(shop=shop, is_active=True).order_by("id")
     for finishing in queryset:
         haystacks = (
             (finishing.name or "").strip().lower(),
             (finishing.slug or "").strip().lower(),
-            (getattr(finishing.category, "name", "") or "").strip().lower(),
+            (getattr(getattr(finishing, "category", None), "name", "") or "").strip().lower(),
         )
         if any(any(token in haystack for token in tokens) for haystack in haystacks):
             return finishing
@@ -493,8 +495,8 @@ def calculate_booklet_pricing(
         haystacks = (
             (rule.name or "").strip().lower(),
             (rule.slug or "").strip().lower(),
-            (getattr(rule.category, "name", "") or "").strip().lower(),
-            (getattr(rule.category, "slug", "") or "").strip().lower(),
+            (getattr(getattr(rule, "category", None), "name", "") or "").strip().lower(),
+            (getattr(getattr(rule, "category", None), "slug", "") or "").strip().lower(),
         )
         if any("cut" in token for token in haystacks):
             cutting_total += line_total

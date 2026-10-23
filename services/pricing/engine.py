@@ -11,6 +11,7 @@ from pricing.models import PrintingRate
 from pricing.services.production_cost_calculator import calculate_billable_sheets
 from services.pricing.finishings import compute_finishing_total
 from services.pricing.imposition import build_imposition_breakdown
+from services.pricing.rate_card_resolver import stock_printing_totals
 from services.pricing.result_contract import build_contract_from_engine_payload
 
 
@@ -469,6 +470,42 @@ def calculate_sheet_pricing(
     )
     paper_cost = paper_rate * Decimal(billable_sheets)
     print_cost = print_rate_value * Decimal(billable_sheets)
+    # One source of price truth (law 11.3): the per-sheet stock + printing figure
+    # comes from the same arithmetic the printer rate-card table uses. The engine
+    # only supplies its resolved components; it never re-derives "Total 1s/2s".
+    if resolved_rate is not None:
+        single_side_print = Decimal(resolved_rate.single_price or 0)
+        if sides == Sides.DUPLEX:
+            both_sides_print = (
+                Decimal(printing_breakdown["duplex_override_price"])
+                if printing_breakdown["duplex_override_used"]
+                else Decimal(printing_breakdown["front_side_price"])
+                + Decimal(printing_breakdown["back_side_price"])
+            )
+            applied_surcharge = Decimal(printing_breakdown["duplex_surcharge"])
+        else:
+            both_sides_print = (
+                Decimal(resolved_rate.double_price)
+                if resolved_rate.double_price is not None
+                else single_side_print * Decimal("2")
+            )
+            applied_surcharge = print_rate_value - single_side_print
+    else:
+        single_side_print = print_rate_value
+        both_sides_print = print_rate_value * Decimal("2")
+        applied_surcharge = Decimal("0")
+    stock_totals = stock_printing_totals(
+        paper_cost=paper_rate,
+        one_side_print=single_side_print,
+        both_sides_print=both_sides_print,
+        surcharge=applied_surcharge,
+    )
+    stock_printing_total_per_sheet = (
+        stock_totals["total_both_sides"]
+        if sides == Sides.DUPLEX and stock_totals["total_both_sides"] is not None
+        else stock_totals["total_one_side"]
+    )
+    stock_printing_total = stock_printing_total_per_sheet * Decimal(billable_sheets)
     finishing_total, finishing_lines = compute_finishing_total(
         finishing_selections,
         quantity=quantity,
@@ -478,7 +515,7 @@ def calculate_sheet_pricing(
     vat_summary = _resolve_vat_summary(shop, subtotal)
     grand_total = vat_summary["grand_total"]
     unit_price = grand_total / Decimal(quantity) if quantity else Decimal("0")
-    total_per_sheet = paper_rate + print_rate_value
+    total_per_sheet = stock_printing_total_per_sheet
     per_sheet_formula = "paper_price + print_price_front"
     if sides == Sides.DUPLEX:
         per_sheet_formula = "paper_price + print_price_front + print_price_back"
@@ -526,6 +563,8 @@ def calculate_sheet_pricing(
             "material_cost": _format_money(Decimal("0")),
             "finishing_total": _format_money(finishing_total),
             "total_per_sheet": _format_money(total_per_sheet),
+            "stock_printing_total_per_sheet": _format_money(stock_printing_total_per_sheet),
+            "stock_printing_total": _format_money(stock_printing_total),
             "total_job_price": _format_money(grand_total),
             "vat_amount": _format_money(vat_summary["vat_amount"]),
             "vat": _format_money(vat_summary["vat_amount"]),
@@ -536,6 +575,10 @@ def calculate_sheet_pricing(
         breakdown={
             "pricing_mode_label": PRICING_MODE_LABELS[PricingMode.SHEET],
             "pricing_mode_explanation": PRICING_MODE_EXPLANATIONS[PricingMode.SHEET],
+            # Combined stock + printing totals (the rate card's "Total 1s/2s"),
+            # with the job total over the sheets actually charged.
+            "stock_printing_total_per_sheet": _format_money(stock_printing_total_per_sheet),
+            "stock_printing_total": _format_money(stock_printing_total),
             "per_sheet_pricing": {
                 "paper_price": _format_money(paper_rate),
                 "print_price_front": _format_money(printing_breakdown["front_side_price"]),
@@ -543,6 +586,8 @@ def calculate_sheet_pricing(
                 "duplex_surcharge": _format_money(printing_breakdown["duplex_surcharge"]),
                 "print_total_per_sheet": _format_money(print_rate_value),
                 "total_per_sheet": _format_money(total_per_sheet),
+                "stock_printing_total_per_sheet": _format_money(stock_printing_total_per_sheet),
+                "stock_printing_total": _format_money(stock_printing_total),
                 "total_job_price": _format_money(grand_total),
                 "formula": per_sheet_formula,
                 "explanation": per_sheet_explanation,

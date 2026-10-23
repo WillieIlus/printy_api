@@ -2064,6 +2064,11 @@ class MvpRateCardTablePreviewSerializer(serializers.Serializer):
     )
     shop_slug = serializers.CharField(required=False, allow_blank=True)
     master_settings = MvpRateCardMasterSettingsSerializer(required=False, allow_null=True, default=None)
+    sides = serializers.ChoiceField(
+        choices=["DUPLEX", "SIMPLEX"],
+        required=False,
+        default="DUPLEX",
+    )
 
     def validate(self, attrs):
         attrs["finishing_rows"] = _normalize_mvp_finishing_rows(attrs.get("finishing_rows") or [])

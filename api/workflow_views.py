@@ -1014,6 +1014,7 @@ class ShopMvpRateCardTablePreviewView(APIView):
             product_key=serializer.validated_data.get("product_key") or "business-cards",
             finishing_keys=serializer.validated_data.get("finishing_keys"),
             master_settings=serializer.validated_data.get("master_settings") or stored_master_settings(shop),
+            sides=serializer.validated_data.get("sides") or "DUPLEX",
         )
         return Response(preview)
 
