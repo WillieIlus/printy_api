@@ -1935,7 +1935,11 @@ class ShopHomeDashboardView(APIView):
                     "accepted": status_buckets["accepted"],
                     "rejected": status_buckets["rejected"],
                 },
-                "recent_requests": DashboardQuoteRequestSummarySerializer(received.order_by("-created_at")[:10], many=True).data,
+                "recent_requests": DashboardQuoteRequestSummarySerializer(
+                    received.order_by("-created_at")[:10],
+                    many=True,
+                    context={"request": request},
+                ).data,
             }
         )
 

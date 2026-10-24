@@ -3,6 +3,8 @@ from decimal import Decimal
 from django.test import TestCase
 from rest_framework.test import APIClient
 
+from accounts.models import User
+
 from .models import WorkflowJob, WorkflowManager, WorkflowPrinter
 from .views import seed_workflow
 
@@ -34,6 +36,17 @@ def _mk_job(job_id, **overrides):
     }
     defaults.update(overrides)
     return WorkflowJob.objects.create(**defaults)
+
+
+def _staff_client():
+    user = User.objects.create_user(
+        email="workflow-ops@example.com",
+        password="x",
+        is_staff=True,
+    )
+    client = APIClient()
+    client.force_authenticate(user=user)
+    return client
 
 
 def _fixtures():
@@ -102,7 +115,7 @@ class WorkflowSeedTest(TestCase):
         self.assertEqual(WorkflowJob.objects.count(), 0)
 
     def test_job_list_starts_empty_after_seed(self):
-        client_obj = APIClient()
+        client_obj = _staff_client()
         seed_workflow()
         resp = client_obj.get("/api/workflow/jobs/")
         self.assertEqual(resp.status_code, 200)
@@ -155,7 +168,7 @@ class WorkflowPrinterViewSetTest(TestCase):
 
 class WorkflowJobListRetrieveTest(TestCase):
     def setUp(self):
-        self.client_obj = APIClient()
+        self.client_obj = _staff_client()
         seed_workflow()
         _fixtures()
 
@@ -178,16 +191,16 @@ class WorkflowJobListRetrieveTest(TestCase):
         resp = self.client_obj.get("/api/workflow/jobs/j-nonexistent/")
         self.assertEqual(resp.status_code, 404)
 
-    def test_allow_any_no_auth(self):
-        resp = self.client_obj.get("/api/workflow/jobs/")
-        self.assertEqual(resp.status_code, 200)
+    def test_anonymous_is_denied(self):
+        resp = APIClient().get("/api/workflow/jobs/")
+        self.assertIn(resp.status_code, (401, 403))
 
 
 class WorkflowApprovalTransitionTest(TestCase):
     """Test approve and request-changes on jobs at the approval stage."""
 
     def setUp(self):
-        self.client_obj = APIClient()
+        self.client_obj = _staff_client()
         seed_workflow()
         fixtures = _fixtures()
         self.j2 = fixtures["j2"]
@@ -219,7 +232,7 @@ class WorkflowApprovalTransitionTest(TestCase):
 
 class WorkflowPayTransitionTest(TestCase):
     def setUp(self):
-        self.client_obj = APIClient()
+        self.client_obj = _staff_client()
         seed_workflow()
         fixtures = _fixtures()
         self.j3 = fixtures["j3"]
@@ -239,7 +252,7 @@ class WorkflowPayTransitionTest(TestCase):
 
 class WorkflowAssignTransitionTest(TestCase):
     def setUp(self):
-        self.client_obj = APIClient()
+        self.client_obj = _staff_client()
         seed_workflow()
         fixtures = _fixtures()
         self.j4 = fixtures["j4"]
@@ -281,7 +294,7 @@ class WorkflowAssignTransitionTest(TestCase):
 
 class WorkflowPressAdvanceTransitionTest(TestCase):
     def setUp(self):
-        self.client_obj = APIClient()
+        self.client_obj = _staff_client()
         seed_workflow()
         _fixtures()
 
@@ -299,7 +312,7 @@ class WorkflowPressAdvanceTransitionTest(TestCase):
 
 class WorkflowConfirmDeliveryTransitionTest(TestCase):
     def setUp(self):
-        self.client_obj = APIClient()
+        self.client_obj = _staff_client()
         seed_workflow()
         _fixtures()
 
@@ -319,7 +332,7 @@ class WorkflowConfirmDeliveryTransitionTest(TestCase):
 
 class WorkflowResolveDisputeTransitionTest(TestCase):
     def setUp(self):
-        self.client_obj = APIClient()
+        self.client_obj = _staff_client()
         seed_workflow()
         _fixtures()
 
@@ -339,7 +352,7 @@ class WorkflowResolveDisputeTransitionTest(TestCase):
 
 class WorkflowNudgeTransitionTest(TestCase):
     def setUp(self):
-        self.client_obj = APIClient()
+        self.client_obj = _staff_client()
         seed_workflow()
         _fixtures()
 
@@ -360,7 +373,7 @@ class WorkflowNudgeTransitionTest(TestCase):
 
 class WorkflowBrowsableApiTest(TestCase):
     def setUp(self):
-        self.client_obj = APIClient()
+        self.client_obj = _staff_client()
         seed_workflow()
         _fixtures()
 
@@ -400,7 +413,7 @@ class WorkflowFullFlowTest(TestCase):
     """End-to-end: approve -> pay -> assign -> press x7 -> confirm-delivery."""
 
     def setUp(self):
-        self.client_obj = APIClient()
+        self.client_obj = _staff_client()
         seed_workflow()
 
     def test_full_flow(self):

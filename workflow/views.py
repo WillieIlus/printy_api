@@ -5,7 +5,9 @@ printers are published for the admin/manager views, and every transition the
 frontend triggers (approve, pay, assign, press-advance, ...) is exposed as a
 detail action that runs the same state machine ported in workflow.transitions.
 
-Demo API: endpoints are AllowAny so the workflow demo works without auth.
+Catalog endpoints (managers/printers) are AllowAny for the demo. Job data carries
+buyer identity and value, so the job ViewSet is restricted to authenticated ops
+staff; no manager/printer/buyer ownership mapping exists for these prototype rows.
 """
 from decimal import Decimal
 
@@ -13,9 +15,11 @@ from django.db import transaction
 from django.urls import NoReverseMatch, reverse
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
-from rest_framework.permissions import AllowAny
+from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.renderers import BrowsableAPIRenderer, JSONRenderer
 from rest_framework.response import Response
+
+from api.permissions import IsStaffUser
 
 from .models import WorkflowJob, WorkflowManager, WorkflowPrinter
 from .serializers import WorkflowJobSerializer, WorkflowManagerSerializer, WorkflowPrinterSerializer
@@ -138,7 +142,7 @@ class WorkflowPrinterViewSet(viewsets.ReadOnlyModelViewSet):
 class WorkflowJobViewSet(viewsets.ModelViewSet):
     queryset = WorkflowJob.objects.all()
     serializer_class = WorkflowJobSerializer
-    permission_classes = [AllowAny]
+    permission_classes = [IsAuthenticated, IsStaffUser]
     pagination_class = None
     renderer_classes = [JSONRenderer, WorkflowBrowsableAPIRenderer]
 

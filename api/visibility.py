@@ -103,6 +103,10 @@ FORBIDDEN_CLIENT_KEYS = FORBIDDEN_CLIENT_PUBLIC_KEYS | {
 
 FORBIDDEN_SHOP_KEYS = RAW_SNAPSHOT_KEYS | {
     "client_total",
+    "total",
+    "customer_name",
+    "customer_email",
+    "customer_phone",
     "broker_payout",
     "broker_margin",
     "broker_margin_amount",

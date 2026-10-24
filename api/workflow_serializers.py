@@ -1189,6 +1189,8 @@ class DashboardQuoteRequestSummarySerializer(serializers.ModelSerializer):
             data.pop("request_snapshot", None)
         if actor == CLIENT_ACTOR:
             data.pop("shop", None)
+        if actor == SHOP_ACTOR:
+            data = strip_forbidden_keys(data, SHOP_ACTOR)
         return data
 
     def get_latest_response(self, obj):

@@ -39,6 +39,7 @@ class ActorVisibilityTestCase(TestCase):
     }
     SHOP_FORBIDDEN = {
         "client_total",
+        "total",
         "broker_payout",
         "broker_margin",
         "broker_margin_amount",
@@ -47,9 +48,15 @@ class ActorVisibilityTestCase(TestCase):
         "printy_fee",
         "platform_service_amount",
         "internal_pricing_snapshot",
+        "request_snapshot",
+        "response_snapshot",
+        "revised_pricing_snapshot",
         "client",
         "client_email",
         "client_phone",
+        "customer_name",
+        "customer_email",
+        "customer_phone",
     }
     BROKER_REQUIRED = {
         "production_cost",
