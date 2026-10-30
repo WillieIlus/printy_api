@@ -80,6 +80,12 @@ from jobs.serializers import (
     ManagedJobSerializer,
     JobPaymentSerializer,
     JobSettlementSplitSerializer,
+    PrinterAdvanceSerializer,
+)
+from jobs.printer_workflow import (
+    PrinterWorkflowError,
+    advance_printer_job,
+    undo_printer_advance,
 )
 
 
@@ -1082,6 +1088,70 @@ class JobAssignmentCompletedView(JobAssignmentActionView):
 
 class JobAssignmentIssueView(JobAssignmentActionView):
     action_name = "issue"
+
+
+class JobAssignmentAdvanceView(APIView):
+    """Prompt 4: one tap advances the printer's next stage.
+
+    The body is optional. If the client sends ``expected_stage``, a stale or
+    double tap cannot advance twice; a replay of an already-completed stage is
+    a no-op. Any client timestamp is ignored in favour of the server clock.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk):
+        assignment = get_object_or_404(
+            JobAssignment.objects.select_related("managed_job", "assigned_shop"),
+            pk=pk,
+        )
+        actor = resolve_actor(request.user)
+        if actor != SHOP_ACTOR or not _can_manage_assignment(user=request.user, assignment=assignment, actor=actor):
+            return Response({"detail": _("Not authorized.")}, status=status.HTTP_403_FORBIDDEN)
+        serializer = PrinterAdvanceSerializer(data=request.data or {})
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+        client_time = data.get("client_time") or data.get("client_timestamp")
+        try:
+            assignment, _progress, _applied = advance_printer_job(
+                assignment=assignment,
+                actor=request.user,
+                expected_stage=data.get("expected_stage") or None,
+                request_id=data.get("request_id") or None,
+                client_timestamp=client_time or None,
+            )
+        except PrinterWorkflowError as exc:
+            return Response(
+                {"detail": exc.detail, "code": exc.code},
+                status=exc.status_code,
+            )
+        return Response(JobAssignmentSerializer(assignment, context={"request": request}).data)
+
+
+class JobAssignmentUndoView(APIView):
+    """Prompt 4.5: revert the most recent printer advance within 2 minutes."""
+
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk):
+        assignment = get_object_or_404(
+            JobAssignment.objects.select_related("managed_job", "assigned_shop"),
+            pk=pk,
+        )
+        actor = resolve_actor(request.user)
+        if actor != SHOP_ACTOR or not _can_manage_assignment(user=request.user, assignment=assignment, actor=actor):
+            return Response({"detail": _("Not authorized.")}, status=status.HTTP_403_FORBIDDEN)
+        try:
+            assignment, _progress, _applied = undo_printer_advance(
+                assignment=assignment,
+                actor=request.user,
+            )
+        except PrinterWorkflowError as exc:
+            return Response(
+                {"detail": exc.detail, "code": exc.code},
+                status=exc.status_code,
+            )
+        return Response(JobAssignmentSerializer(assignment, context={"request": request}).data)
 
 
 class JobFileDownloadView(APIView):

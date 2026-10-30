@@ -3,6 +3,7 @@ Canonical managed job models.
 """
 import secrets
 import uuid
+from decimal import Decimal
 
 from django.conf import settings
 from django.core.exceptions import ValidationError
@@ -244,6 +245,28 @@ class ManagedJob(TimeStampedModel):
         default=0,
         verbose_name=_("lateness minutes"),
         help_text=_("Minutes past the acknowledged due date, recorded not penalised (law 6.6)."),
+    )
+    # --- rush promise (prompt 6) ------------------------------------------
+    speed_tier = models.CharField(
+        max_length=40,
+        blank=True,
+        default="",
+        verbose_name=_("speed tier"),
+        help_text=_("Frozen speed tier key for this job (prompt 6)."),
+    )
+    rush_premium = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        default=Decimal("0.00"),
+        verbose_name=_("rush premium"),
+        help_text=_("The part of the production uplift that is refundable if the rush promise is missed."),
+    )
+    rush_premium_status = models.CharField(
+        max_length=40,
+        blank=True,
+        default="",
+        verbose_name=_("rush premium status"),
+        help_text=_("held, refunded, released or not_applicable (prompt 6)."),
     )
     current_stage = models.CharField(
         max_length=32,

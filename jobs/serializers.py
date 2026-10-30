@@ -265,6 +265,12 @@ class JobAssignmentSerializer(serializers.ModelSerializer):
     needs_attention = serializers.SerializerMethodField()
     muted = serializers.SerializerMethodField()
     timeline = serializers.SerializerMethodField()
+    # Law Part 5 / prompt 4: one-action printer stage workflow. The label is
+    # decided by the server; the client never invents an action.
+    printer_action = serializers.SerializerMethodField()
+    printer_workflow = serializers.SerializerMethodField()
+    can_undo = serializers.SerializerMethodField()
+    undo_expires_at = serializers.SerializerMethodField()
 
     class Meta:
         model = JobAssignment
@@ -301,6 +307,10 @@ class JobAssignmentSerializer(serializers.ModelSerializer):
             "needs_attention",
             "muted",
             "timeline",
+            "printer_action",
+            "printer_workflow",
+            "can_undo",
+            "undo_expires_at",
             "workflow_projection",
             "production_order",
             "due_at",
@@ -474,6 +484,47 @@ class JobAssignmentSerializer(serializers.ModelSerializer):
         event_list = list(events.all()) if events is not None else []
         return stage_timeline(obj.managed_job, events=event_list)
 
+    def _printer_progress(self, obj):
+        cache = getattr(self, "_printer_progress_cache", None)
+        if cache is None:
+            cache = {}
+            self._printer_progress_cache = cache
+        key = getattr(obj, "pk", None) or id(obj)
+        if key not in cache:
+            from jobs.printer_workflow import build_printer_progress
+
+            cache[key] = build_printer_progress(obj)
+        return cache[key]
+
+    def get_printer_action(self, obj):
+        action = self._printer_progress(obj).get("next_action") or {}
+        # Never leak money or buyer identity through an action object.
+        return {
+            "stage_key": action.get("stage_key", ""),
+            "stage_label": action.get("stage_label", ""),
+            "action": action.get("action", ""),
+            "label": action.get("label", ""),
+            "kind": action.get("kind", ""),
+        }
+
+    def get_printer_workflow(self, obj):
+        progress = self._printer_progress(obj)
+        return {
+            "current_stage": progress.get("current_stage", ""),
+            "current_stage_label": progress.get("current_stage_label", ""),
+            "current_note": progress.get("current_note", ""),
+            "stages": progress.get("stages", []),
+            "time_taken_minutes": progress.get("time_taken_minutes", 0),
+            "paid": progress.get("paid", False),
+            "finished": progress.get("finished", False),
+        }
+
+    def get_can_undo(self, obj):
+        return bool(self._printer_progress(obj).get("can_undo"))
+
+    def get_undo_expires_at(self, obj):
+        return self._printer_progress(obj).get("undo_expires_at")
+
     def get_production_timeline_steps(self, obj):
         operational_snapshot = obj.operational_snapshot if isinstance(obj.operational_snapshot, dict) else {}
         stage = self._production_stage(obj)
@@ -585,6 +636,20 @@ class JobStatusEventSerializer(serializers.ModelSerializer):
 
 class JobActionSerializer(serializers.Serializer):
     note = serializers.CharField(required=False, allow_blank=True, max_length=500)
+
+
+class PrinterAdvanceSerializer(serializers.Serializer):
+    """Body is optional by design (prompt 4.1): the server decides the stage.
+
+    ``expected_stage`` is the idempotency guard: a retry that still names the
+    stage it just completed is a no-op. ``client_time`` is accepted so a client
+    cannot fail while sending it, then deliberately ignored (prompt 4.4).
+    """
+
+    expected_stage = serializers.CharField(required=False, allow_blank=True, max_length=64)
+    request_id = serializers.CharField(required=False, allow_blank=True, max_length=64)
+    client_time = serializers.CharField(required=False, allow_blank=True, max_length=64)
+    client_timestamp = serializers.CharField(required=False, allow_blank=True, max_length=64)
 
 
 class JobPaymentSerializer(serializers.Serializer):

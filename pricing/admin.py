@@ -1,13 +1,19 @@
 from django.contrib import admin
 
 from .models import (
+    EstimatePolicy,
     FinishingRate,
     PlatformFeePolicy,
     PrintingRate,
+    PublicHoliday,
     QuantityPricingTier,
     ShopRateCardSetup,
     ShopPricingSettings,
+    ShopSpeedTierOptIn,
+    ShopTimeWindowOptIn,
+    SpeedTier,
     SetupCostPolicy,
+    TimeWindowRule,
     VolumeDiscount,
     WastePolicy,
 )
@@ -207,6 +213,46 @@ class FinishingRateAdmin(admin.ModelAdmin):
             },
         ),
     )
+
+
+@admin.register(SpeedTier)
+class SpeedTierAdmin(admin.ModelAdmin):
+    list_display = ["key", "label", "multiplier", "sort_order", "is_active"]
+    list_filter = ["is_active"]
+    prepopulated_fields = {"key": ("label",)}
+
+
+@admin.register(TimeWindowRule)
+class TimeWindowRuleAdmin(admin.ModelAdmin):
+    list_display = ["key", "label", "multiplier", "covers_public_holidays", "is_active"]
+    list_filter = ["is_active", "covers_public_holidays"]
+
+
+@admin.register(PublicHoliday)
+class PublicHolidayAdmin(admin.ModelAdmin):
+    list_display = ["date", "name", "is_active"]
+    list_filter = ["is_active"]
+    search_fields = ["name"]
+
+
+@admin.register(ShopSpeedTierOptIn)
+class ShopSpeedTierOptInAdmin(admin.ModelAdmin):
+    list_display = ["shop", "tier", "is_active"]
+    list_filter = ["is_active", "tier"]
+    search_fields = ["shop__name"]
+
+
+@admin.register(ShopTimeWindowOptIn)
+class ShopTimeWindowOptInAdmin(admin.ModelAdmin):
+    list_display = ["shop", "rule", "is_active"]
+    list_filter = ["is_active", "rule"]
+    search_fields = ["shop__name"]
+
+
+@admin.register(EstimatePolicy)
+class EstimatePolicyAdmin(admin.ModelAdmin):
+    list_display = ["name", "minimum_measured_jobs", "is_active", "updated_at"]
+    list_filter = ["is_active"]
 
 
 @admin.register(VolumeDiscount)

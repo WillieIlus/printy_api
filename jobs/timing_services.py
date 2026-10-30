@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from decimal import Decimal
 from typing import Any
 
 from django.core.exceptions import ValidationError
@@ -18,6 +19,7 @@ from jobs.timing import (
 )
 from jobs.timing_config import OWNER_BUYER
 from quotes.models import QuoteDateRevision
+from services.pricing.speed_tiers import due_date_for_request, lock_speed_at_acceptance
 
 
 # --- append-only event log (law 6.3) --------------------------------------
@@ -99,11 +101,25 @@ def set_due_date_at_acceptance(*, quote, actor=None) -> datetime:
     """
     quote_request = quote.quote_request
     start = getattr(quote, "accepted_at", None) or timezone.now()
-    due = quote_request.due_date or compute_due_date(start)
+    fallback = quote_request.due_date or compute_due_date(start)
+    due = due_date_for_request(quote_request=quote_request, fallback=fallback)
     if quote_request.due_date != due:
         quote_request.due_date = due
         quote_request.save(update_fields=["due_date", "updated_at"])
+    lock_speed_at_acceptance(quote_request=quote_request, accepted_at=start)
     for managed_job in quote_request.managed_jobs.all():
+        update_fields = []
+        if quote_request.speed_tier and managed_job.speed_tier != quote_request.speed_tier:
+            managed_job.speed_tier = quote_request.speed_tier
+            update_fields.append("speed_tier")
+        if quote_request.rush_premium and managed_job.rush_premium != quote_request.rush_premium:
+            managed_job.rush_premium = quote_request.rush_premium
+            update_fields.append("rush_premium")
+        if quote_request.rush_premium_status and managed_job.rush_premium_status != quote_request.rush_premium_status:
+            managed_job.rush_premium_status = quote_request.rush_premium_status
+            update_fields.append("rush_premium_status")
+        if update_fields:
+            managed_job.save(update_fields=[*update_fields, "updated_at"])
         sync_job_timing(managed_job, due=due)
         record_job_event(
             managed_job=managed_job,
@@ -280,7 +296,66 @@ def record_lateness(managed_job: ManagedJob, *, now: datetime | None = None) -> 
                 "counted_against_printer": attribution["counted_against_printer"],
             },
         )
+        settle_rush_lateness(managed_job, attribution=attribution, due=due)
     return managed_job
+
+
+@transaction.atomic
+def settle_rush_lateness(managed_job: ManagedJob, *, attribution: dict, due=None) -> None:
+    """Refund or hold the rush premium as its own line, never a silent deduction.
+
+    The premium is refunded to the buyer when the printer is late, held for
+    review when the manager's stage caused the delay, and left alone when the
+    buyer's own delay caused it. The 10% lateness penalty is recorded as a
+    separate line; neither touches the printer payout automatically.
+    """
+    premium = getattr(managed_job, "rush_premium", 0) or 0
+    if premium <= 0:
+        return
+    stage_key = attribution.get("stage") or current_stage_for_job(managed_job)
+    owner = attribution.get("owner", "")
+    if attribution.get("buyer_caused"):
+        status = "not_refunded"
+    elif owner == "printer":
+        status = "refunded"
+    elif owner == "manager":
+        status = "held"
+    else:
+        status = "held"
+    penalty = (Decimal(str(premium)) * Decimal("0.10")).quantize(Decimal("0.01"))
+    managed_job.rush_premium_status = status
+    managed_job.save(update_fields=["rush_premium_status", "updated_at"])
+    record_job_event(
+        managed_job=managed_job,
+        stage=stage_key,
+        event="rush_premium_settlement",
+        actor=None,
+        actor_role=owner,
+        source=JobEvent.SOURCE_SYSTEM,
+        metadata={
+            "premium": str(premium),
+            "status": status,
+            "attributed_owner": owner,
+            "buyer_caused": bool(attribution.get("buyer_caused")),
+            "due_date": due.isoformat() if due else None,
+            "reason": "rush promise missed",
+        },
+    )
+    record_job_event(
+        managed_job=managed_job,
+        stage=stage_key,
+        event="rush_premium_penalty",
+        actor=None,
+        actor_role=owner,
+        source=JobEvent.SOURCE_SYSTEM,
+        metadata={
+            "premium": str(premium),
+            "penalty_rate": "0.10",
+            "penalty": str(penalty),
+            "attributed_owner": owner,
+            "buyer_caused": bool(attribution.get("buyer_caused")),
+        },
+    )
 
 
 __all__ = [
@@ -293,4 +368,5 @@ __all__ = [
     "record_date_revision",
     "acknowledge_date_update",
     "record_lateness",
+    "settle_rush_lateness",
 ]

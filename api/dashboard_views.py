@@ -33,6 +33,7 @@ from api.visibility import project_shop_identity, projection_role_for_request, s
 from jobs.choices import JobAssignmentStatus, ManagedJobAssignmentStatus, ManagedJobPaymentStatus, ManagedJobStatus
 from jobs.artwork_confirmation import get_artwork_confirmation_payload
 from jobs.artwork_workflow import artwork_payment_block_reason, get_artwork_workflow_payload
+from jobs.buyer_tracking import buyer_tracked_jobs
 from jobs.models import JobAssignment, ManagedJob
 from jobs.visibility import partner_managed_job_filter
 from inventory.models import Paper
@@ -1091,6 +1092,15 @@ class ClientJobListView(BaseRoleDetailView):
         for row in rows:
             row.update(read_fields(read_states.get(row["id"])))
         return Response({"role": "client", "results": order_jobs(rows)})
+
+
+class ClientTrackedJobsView(BaseRoleDetailView):
+    dashboard_role = "client"
+    allowed_roles = (CANONICAL_CLIENT_ROLE,)
+
+    def get(self, request):
+        results = buyer_tracked_jobs(user=request.user)
+        return Response({"role": "client", "count": len(results), "results": results})
 
 
 class ClientJobDetailView(BaseRoleDetailView):

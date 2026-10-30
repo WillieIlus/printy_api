@@ -4,7 +4,7 @@ API URL configuration with DRF routers.
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 
-from . import account_admin_views, dashboard_views, payment_views, pricing_views, public_matching_views, quote_views, views, workflow_views
+from . import account_admin_views, dashboard_views, payment_views, pricing_views, public_matching_views, quote_views, speed_views, views, workflow_views
 from .workflow_views import GuestQuoteRequestView
 from .seo_views import (
     SEOProductDetailView,
@@ -19,11 +19,13 @@ from jobs.views import (
     JobFileRejectView,
     JobFileRevisionView,
     JobAssignmentAcceptView,
+    JobAssignmentAdvanceView,
     JobAssignmentCompletedView,
     JobAssignmentFinishingView,
     JobAssignmentInProductionView,
     JobAssignmentIssueView,
     JobAssignmentReadyView,
+    JobAssignmentUndoView,
     JobAssignmentRejectView,
     JobStatusEventListView,
     ManagedJobArtworkConfirmationRequestView,
@@ -81,6 +83,8 @@ urlpatterns = [
     path("shops/<slug:shop_slug>/setup-status/", workflow_views.ShopSetupStatusCompatView.as_view(), name="shop-setup-status-compat"),
     path("calculator/config/", workflow_views.CalculatorConfigView.as_view(), name="calculator-config"),
     path("pricing/quote-financials/preview/", pricing_views.QuoteFinancialPreviewView.as_view(), name="quote-financial-preview"),
+    path("pricing/speed-options/", speed_views.SpeedOptionsView.as_view(), name="pricing-speed-options"),
+    path("pricing/quote-speed/", speed_views.QuoteSpeedSelectionView.as_view(), name="pricing-quote-speed"),
     path("pricing/quotes/<int:quote_id>/financials/", pricing_views.QuoteFinancialDetailView.as_view(), name="quote-financial-detail"),
     path("for-shops/rate-wizard/public-config/", workflow_views.ForShopsRateWizardPublicConfigView.as_view(), name="for-shops-rate-wizard-public-config"),
     path("for-shops/rate-wizard/public-preview/", workflow_views.ForShopsRateWizardPublicPreviewView.as_view(), name="for-shops-rate-wizard-public-preview"),
@@ -154,6 +158,13 @@ urlpatterns = [
     path("dashboard/client/quotes/<int:pk>/", dashboard_views.ClientQuoteDetailView.as_view(), name="dashboard-client-quote-detail"),
     path("dashboard/client/jobs/", dashboard_views.ClientJobListView.as_view(), name="dashboard-client-jobs"),
     path("dashboard/client/jobs/<int:pk>/", dashboard_views.ClientJobDetailView.as_view(), name="dashboard-client-job-detail"),
+    path("dashboard/client/tracked-jobs/", dashboard_views.ClientTrackedJobsView.as_view(), name="dashboard-client-tracked-jobs"),
+    path("dashboard/client/jobs/tracked/", dashboard_views.ClientTrackedJobsView.as_view(), name="dashboard-client-jobs-tracked"),
+    path("client/tracked-jobs/", dashboard_views.ClientTrackedJobsView.as_view(), name="client-tracked-jobs"),
+    path("client/jobs/tracked/", dashboard_views.ClientTrackedJobsView.as_view(), name="client-jobs-tracked"),
+    path("jobs/tracked/", dashboard_views.ClientTrackedJobsView.as_view(), name="client-tracked-jobs-compat"),
+    path("managed-jobs/tracked/", dashboard_views.ClientTrackedJobsView.as_view(), name="managed-jobs-tracked"),
+    path("tracked-jobs/", dashboard_views.ClientTrackedJobsView.as_view(), name="tracked-jobs"),
     path("jobs/", dashboard_views.ClientJobListView.as_view(), name="client-jobs-compat"),
     path("dashboard/client/payments/", dashboard_views.ClientPaymentListView.as_view(), name="dashboard-client-payments"),
     path("dashboard/manager/requests/", dashboard_views.PartnerQuoteListDetailView.as_view(), name="dashboard-manager-requests"),
@@ -238,6 +249,9 @@ urlpatterns = [
     path("job-assignments/<int:pk>/mark-ready/", JobAssignmentReadyView.as_view(), name="job-assignment-ready"),
     path("job-assignments/<int:pk>/mark-completed/", JobAssignmentCompletedView.as_view(), name="job-assignment-completed"),
     path("job-assignments/<int:pk>/report-issue/", JobAssignmentIssueView.as_view(), name="job-assignment-report-issue"),
+    # Prompt 4: one-tap stage advance + 2-minute undo for the assigned printer.
+    path("job-assignments/<int:pk>/advance/", JobAssignmentAdvanceView.as_view(), name="job-assignment-advance"),
+    path("job-assignments/<int:pk>/undo/", JobAssignmentUndoView.as_view(), name="job-assignment-undo"),
     path("shops/nearby/", views.ShopsNearbyView.as_view(), name="shops-nearby"),
     path("shops/<slug:shop_slug>/incoming-requests/", include(incoming_router.urls)),
     path("", include(seller_router.urls)),

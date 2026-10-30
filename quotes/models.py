@@ -206,6 +206,55 @@ class QuoteRequest(TimeStampedModel):
         related_name="acknowledged_quote_price_updates",
         verbose_name=_("price acknowledged by"),
     )
+    # --- speed / odd hours (prompt 6) ------------------------------------
+    speed_tier = models.CharField(
+        max_length=40,
+        blank=True,
+        default="",
+        verbose_name=_("speed tier"),
+        help_text=_("Selected speed tier key. Empty means the default standard tier."),
+    )
+    time_window_rule = models.CharField(
+        max_length=40,
+        blank=True,
+        default="",
+        verbose_name=_("time window rule"),
+        help_text=_("Odd-hours rule applied to the selected speed option."),
+    )
+    speed_multiplier = models.DecimalField(
+        max_digits=5,
+        decimal_places=2,
+        default=Decimal("1.00"),
+        verbose_name=_("speed multiplier"),
+        help_text=_("The single higher-of multiplier applied to production cost."),
+    )
+    production_uplift = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        default=Decimal("0.00"),
+        verbose_name=_("production uplift"),
+        help_text=_("Rush uplift paid in full to the printer."),
+    )
+    rush_premium = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        default=Decimal("0.00"),
+        verbose_name=_("rush premium"),
+        help_text=_("Premium refundable/holdable if the rush promise is missed."),
+    )
+    rush_premium_status = models.CharField(
+        max_length=40,
+        blank=True,
+        default="",
+        verbose_name=_("rush premium status"),
+    )
+    speed_snapshot = models.JSONField(
+        default=dict,
+        blank=True,
+        verbose_name=_("speed snapshot"),
+        help_text=_("Frozen speed option: tier, window, multiplier, uplift and ready time."),
+    )
+
     # --- timeliness / due date (law Part 4, 6.2/6.5) ----------------------
     due_date = models.DateTimeField(
         null=True,

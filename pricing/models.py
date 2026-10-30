@@ -758,3 +758,140 @@ class VolumeDiscount(TimeStampedModel):
 
     def __str__(self):
         return f"{self.name} ({self.shop.name}): {self.discount_percent}% off @ {self.min_quantity}+"
+
+
+# --- speed tiers and odd-hours pricing (prompt 6) -------------------------
+# All four tables are admin-editable. No multiplier or holiday is hardcoded in
+# the pricing service; it reads these rows.
+class SpeedTier(models.Model):
+    """Standard / Faster / Fastest. Multiplier applies to production only."""
+
+    key = models.SlugField(max_length=40, unique=True)
+    label = models.CharField(max_length=80)
+    multiplier = models.DecimalField(max_digits=5, decimal_places=2, default=Decimal("1.00"))
+    # {"business_card": 24, "flyer": 12, "default": 24} — target hours.
+    target_turnaround_hours = models.JSONField(default=dict, blank=True)
+    sort_order = models.PositiveIntegerField(default=0)
+    is_active = models.BooleanField(default=True)
+
+    class Meta:
+        ordering = ["sort_order", "id"]
+        verbose_name = _("speed tier")
+        verbose_name_plural = _("speed tiers")
+
+    def __str__(self):
+        return f"{self.label} ({self.multiplier}x)"
+
+    def clean(self):
+        super().clean()
+        if self.multiplier < 1:
+            raise ValidationError({"multiplier": _("Speed multiplier must be at least 1.")})
+
+    def target_hours_for(self, product_category: str | None) -> int | None:
+        targets = self.target_turnaround_hours if isinstance(self.target_turnaround_hours, dict) else {}
+        for key in (product_category, "default"):
+            value = targets.get(key) if key else None
+            if value not in (None, ""):
+                try:
+                    return max(1, int(value))
+                except (TypeError, ValueError):
+                    continue
+        return None
+
+
+class TimeWindowRule(models.Model):
+    """A configurable odd-hours window and its production-only multiplier."""
+
+    key = models.SlugField(max_length=40, unique=True)
+    label = models.CharField(max_length=120)
+    multiplier = models.DecimalField(max_digits=5, decimal_places=2, default=Decimal("1.00"))
+    # ISO weekdays: Monday=1..Sunday=7. Empty means every day.
+    weekdays = models.JSONField(default=list, blank=True)
+    start_time = models.TimeField(null=True, blank=True)
+    end_time = models.TimeField(null=True, blank=True)
+    covers_public_holidays = models.BooleanField(default=False)
+    is_active = models.BooleanField(default=True)
+
+    class Meta:
+        ordering = ["multiplier", "id"]
+        verbose_name = _("time window rule")
+        verbose_name_plural = _("time window rules")
+
+    def __str__(self):
+        return f"{self.label} ({self.multiplier}x)"
+
+    def clean(self):
+        super().clean()
+        if self.multiplier < 1:
+            raise ValidationError({"multiplier": _("Time window multiplier must be at least 1.")})
+
+
+class PublicHoliday(models.Model):
+    """Admin-editable public holiday calendar (never hardcoded)."""
+
+    date = models.DateField(unique=True)
+    name = models.CharField(max_length=120)
+    is_active = models.BooleanField(default=True)
+
+    class Meta:
+        ordering = ["date"]
+        verbose_name = _("public holiday")
+        verbose_name_plural = _("public holidays")
+
+    def __str__(self):
+        return f"{self.date} — {self.name}"
+
+
+class ShopSpeedTierOptIn(models.Model):
+    """A printer opts into each speed tier it can actually meet."""
+
+    shop = models.ForeignKey(Shop, on_delete=models.CASCADE, related_name="speed_tier_optins")
+    tier = models.ForeignKey(SpeedTier, on_delete=models.CASCADE, related_name="shop_optins")
+    is_active = models.BooleanField(default=True)
+
+    class Meta:
+        ordering = ["shop", "tier__sort_order"]
+        verbose_name = _("shop speed tier opt-in")
+        verbose_name_plural = _("shop speed tier opt-ins")
+        constraints = [
+            models.UniqueConstraint(fields=["shop", "tier"], name="unique_shop_speed_tier_optin"),
+        ]
+
+    def __str__(self):
+        return f"{self.shop.name} — {self.tier.label}"
+
+
+class ShopTimeWindowOptIn(models.Model):
+    """A printer opts into the odd-hours windows it is willing to work."""
+
+    shop = models.ForeignKey(Shop, on_delete=models.CASCADE, related_name="time_window_optins")
+    rule = models.ForeignKey(TimeWindowRule, on_delete=models.CASCADE, related_name="shop_optins")
+    is_active = models.BooleanField(default=True)
+
+    class Meta:
+        ordering = ["shop", "rule__multiplier"]
+        verbose_name = _("shop time window opt-in")
+        verbose_name_plural = _("shop time window opt-ins")
+        constraints = [
+            models.UniqueConstraint(fields=["shop", "rule"], name="unique_shop_time_window_optin"),
+        ]
+
+    def __str__(self):
+        return f"{self.shop.name} — {self.rule.label}"
+
+
+class EstimatePolicy(models.Model):
+    """How many completed jobs are needed before measured times are shown."""
+
+    name = models.CharField(max_length=120, default="Default Estimate Policy")
+    minimum_measured_jobs = models.PositiveIntegerField(default=5)
+    is_active = models.BooleanField(default=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-updated_at", "-id"]
+        verbose_name = _("estimate policy")
+        verbose_name_plural = _("estimate policies")
+
+    def __str__(self):
+        return f"{self.name} (min {self.minimum_measured_jobs} jobs)"

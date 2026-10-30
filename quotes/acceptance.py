@@ -111,7 +111,12 @@ def accept_quote_for_payment(*, quote: Quote, accepted_by, payer_phone: str = ""
         )
     from jobs.timing_services import set_due_date_at_acceptance
 
-    set_due_date_at_acceptance(quote=quote, actor=accepted_by)
+    due = set_due_date_at_acceptance(quote=quote, actor=accepted_by)
+    # Price and date lock together at acceptance (prompt 6 item 6).
+    quote.pricing_locked_at = quote.pricing_locked_at or now
+    quote.save(update_fields=["pricing_locked_at", "updated_at"])
+    quote_request.due_date = due
+    quote_request.save(update_fields=["due_date", "updated_at"])
 
     payment = create_payment_for_quote(quote=quote, payer=accepted_by, payer_phone=payer_phone)
     return quote, payment
