@@ -988,6 +988,10 @@ class RecommendedPrintManagerSerializer(serializers.Serializer):
     on_time_rate = serializers.FloatField(required=False, allow_null=True)
     distance_km = serializers.FloatField(required=False, allow_null=True)
     is_previous_manager = serializers.BooleanField(default=False)
+    # B1.3: the client's own manager (pinned first) and the separate, manually
+    # granted Verified flag. Both are booleans only - never any fee or margin.
+    is_client_manager = serializers.BooleanField(default=False)
+    is_verified = serializers.BooleanField(default=False)
     badge = serializers.CharField(required=False, allow_null=True, allow_blank=True)
     recommendation_reason = serializers.CharField()
 
@@ -1969,6 +1973,13 @@ class MvpRateCardShopDetailsSerializer(serializers.Serializer):
     shop_name = serializers.CharField(required=False, allow_blank=True, default="")
     whatsapp_number = serializers.CharField(required=False, allow_blank=True, default="")
     location_area = serializers.CharField(required=False, allow_blank=True, default="")
+    # LAW 17: the shop's estimated standard turnaround in business hours.
+    standard_turnaround_hours = serializers.IntegerField(
+        required=False,
+        allow_null=True,
+        min_value=1,
+        max_value=2000,
+    )
 
 
 class MvpRateCardPublicShopSerializer(serializers.Serializer):

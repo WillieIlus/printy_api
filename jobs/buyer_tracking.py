@@ -15,6 +15,7 @@ from jobs.choices import ManagedJobPaymentStatus, ManagedJobStatus
 from jobs.job_codes import job_code
 from jobs.models import ManagedJob
 from jobs.timing_config import STAGES_BY_KEY
+from services.pricing.spec_title import build_job_title
 
 
 BUYER_STAGES: tuple[tuple[str, str], ...] = (
@@ -135,7 +136,7 @@ def build_tracked_job(job: ManagedJob, *, now: datetime | None = None) -> dict[s
     return {
         "id": job.id,
         "job_code": job_code(job),
-        "title": job.title or "Managed print job",
+        "title": build_job_title(job, long_form=True),
         "current_stage": current_label,
         "current_stage_key": current_key,
         "stage_note": _stage_note(
@@ -155,6 +156,7 @@ def build_tracked_job(job: ManagedJob, *, now: datetime | None = None) -> dict[s
         "overdue_minutes": overdue_minutes,
         "lateness_minutes": overdue_minutes,
         "last_updated_at": last_updated_at,
+        "short_title": build_job_title(job, long_form=False),
         "_due_sort": due_at or datetime.max.replace(tzinfo=dt_timezone.utc),
         "_delivered_sort": _iso(milestones["delivered_at"]),
         "_job_id": job.id,

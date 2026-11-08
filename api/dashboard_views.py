@@ -41,6 +41,7 @@ from notifications.models import Notification
 from notifications.services import notify_quote_event
 from jobs.file_services import managed_job_artwork_state, notify_missing_artwork
 from pricing.models import FinishingRate, PrintingRate
+from pricing.services.fee_waiver import fee_waived_for_quote_request
 from pricing.services.platform_fee_policy import calculate_financial_split, create_quote_financial_split
 from pricing.services.production_cost_calculator import calculate_client_price_with_waste_setup_and_quantity_tier
 from jobs.settlement_compat import get_financial_split_for_job
@@ -49,6 +50,11 @@ from payments.services import create_payment_for_quote, initiate_stk_push, norma
 from quotes.guardrails import calculate_quote_expiry, validate_partner_markup_amount
 from quotes.models import QuoteRequest, Quote
 from quotes.partner_services import respond_to_assigned_quote_request
+from services.pricing.speed_tiers import (
+    apply_speed_selection,
+    build_speed_options,
+    select_speed_option,
+)
 from quotes.services_workflow import update_quote_response
 from services.production_matching import (
     build_partner_production_matches,
@@ -789,12 +795,22 @@ def _quote_partner_pricing_payload(quote_request: QuoteRequest, latest_response:
             customer_pricing.get("gross_margin_percent"),
         )
 
+    # LAW: a manager's own client pays no Printy fee. The frozen decision on the split
+    # is authoritative; a quote that has not been split yet asks the same service the
+    # send uses, so the badge can never disagree with what will be charged.
+    fee_waived = (
+        bool(getattr(split, "fee_waived", False))
+        if split is not None
+        else bool(fee_waived_for_quote_request(quote_request))
+    )
+
     return {
         "client_total": str(client_total) if client_total is not None else None,
         "production_cost": str(production_cost) if production_cost is not None else None,
         "gross_margin": str(gross_margin) if gross_margin is not None else None,
         "manager_margin": str(gross_margin) if gross_margin is not None else None,
         "margin_percent": str(margin_percent) if margin_percent is not None else None,
+        "fee_waived": fee_waived,
     }
 
 
@@ -1191,7 +1207,7 @@ class PartnerQuoteListDetailView(ManagerCapablePartnerQuoteView):
         return Response({"role": "partner", "results": order_quotes(rows)})
 
 
-def _partner_quote_send_key(*, production_cost_inputs, financial_split, gross_margin_type, gross_margin_value, note) -> str:
+def _partner_quote_send_key(*, production_cost_inputs, financial_split, gross_margin_type, gross_margin_value, note, speed_tier: str = "") -> str:
     payload = json.dumps(
         {
             "production_cost_inputs": production_cost_inputs if isinstance(production_cost_inputs, dict) else None,
@@ -1200,11 +1216,34 @@ def _partner_quote_send_key(*, production_cost_inputs, financial_split, gross_ma
             "gross_margin_type": gross_margin_type,
             "gross_margin_value": str(gross_margin_value or ""),
             "note": str(note or ""),
+            "speed_tier": str(speed_tier or ""),
         },
         sort_keys=True,
         default=str,
     )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _resolve_partner_speed_option(*, quote_request, base_price, request):
+    """The requested speed option, or (None, None) when no speed was chosen."""
+    tier_key = str(request.data.get("speed_tier") or "").strip().lower()
+    if not tier_key:
+        return None, None
+    if quote_request.shop is None:
+        return None, Response(
+            {"detail": "This request has no production shop yet."}, status=400
+        )
+    options = build_speed_options(
+        shop=quote_request.shop,
+        product_category=str(request.data.get("product_category") or "").strip().lower(),
+        base_production_cost=base_price,
+    )
+    option = select_speed_option(options=options, tier_key=tier_key)
+    if option is None:
+        return None, Response(
+            {"detail": "That speed option is not available for this printer."}, status=400
+        )
+    return option, None
 
 
 class PartnerQuoteSendToClientView(ManagerCapablePartnerQuoteView):
@@ -1218,8 +1257,27 @@ class PartnerQuoteSendToClientView(ManagerCapablePartnerQuoteView):
 
     def post(self, request, pk):
         quote_request = get_object_or_404(self.get_queryset(request), pk=pk)
+        # LAW 4-5: one decision for the whole send. The displayed pricing and the
+        # persisted split below must both use it, or the sent quote would disagree
+        # with what the client is charged.
+        fee_waived = fee_waived_for_quote_request(quote_request)
         request_snapshot = dict(quote_request.request_snapshot or {})
         pending_client = dict(request_snapshot.get("pending_client") or {})
+        # LAW 8: the send step carries its own client section - name and phone
+        # (WhatsApp), email optional. Writing it into pending_client here means the
+        # first-touch resolution further down creates or links the client record on
+        # this same request, for a quote that is no longer a draft. Nothing is
+        # touched once the request already has a client.
+        if quote_request.on_behalf_of_id is None:
+            for body_key, snapshot_key in (
+                ("client_name", "name"),
+                ("client_phone", "phone"),
+                ("client_email", "email"),
+                ("client_company", "company"),
+            ):
+                value = str(request.data.get(body_key) or "").strip()
+                if value:
+                    pending_client[snapshot_key] = value
         if quote_request.on_behalf_of_id is None and pending_client.get("client_user_id"):
             quote_request.on_behalf_of_id = pending_client["client_user_id"]
             quote_request.customer_name = pending_client.get("name") or quote_request.customer_name
@@ -1238,17 +1296,61 @@ class PartnerQuoteSendToClientView(ManagerCapablePartnerQuoteView):
             pending_client["email"] = pending_client.get("email") or quote_request.customer_email
             pending_client["phone"] = pending_client.get("phone") or quote_request.customer_phone
             pending_client["company"] = pending_client.get("company") or ""
+            # LAW 8-9: the manager adds the client here, at the send-quote step, from the
+            # name + phone (WhatsApp) they captured; email is optional. This is the same
+            # first-touch path the attach endpoint uses: a phone that already belongs to a
+            # client account is linked and never re-originated, and anything else records
+            # this manager as the client's origin through a phone-first invite.
+            captured_phone = pending_client.get("phone") or ""
+            captured_email = pending_client.get("email") or ""
+            if captured_phone or captured_email:
+                try:
+                    captured_client = _resolve_or_create_partner_client(
+                        partner_user=request.user,
+                        client_name=pending_client.get("name") or "",
+                        client_email=captured_email,
+                        client_phone=captured_phone,
+                        client_company=pending_client.get("company") or "",
+                    )
+                except ValueError as exc:
+                    return Response({"detail": str(exc)}, status=400)
+                pending_client["name"] = pending_client.get("name") or captured_client.get("name") or ""
+                pending_client["phone"] = captured_client.get("phone") or pending_client.get("phone") or ""
+                pending_client["email"] = pending_client.get("email") or captured_client.get("email") or ""
+                if captured_client.get("invite_id"):
+                    pending_client["invite_id"] = captured_client["invite_id"]
+                    pending_client["claim_token"] = captured_client.get("claim_token")
+                    pending_client["invite_status"] = captured_client.get("status")
+                linked_client_id = captured_client.get("client_id")
+                if linked_client_id:
+                    pending_client["client_user_id"] = linked_client_id
+                    pending_client["offline_client"] = False
+                    quote_request.on_behalf_of_id = linked_client_id
             request_snapshot["pending_client"] = pending_client
             request_snapshot.setdefault("offline_claim_token", _new_offline_claim_token())
             quote_request.customer_name = pending_client.get("name") or quote_request.customer_name
             quote_request.customer_email = pending_client.get("email") or quote_request.customer_email
             quote_request.customer_phone = pending_client.get("phone") or quote_request.customer_phone
             quote_request.request_snapshot = request_snapshot
-            quote_request.save(update_fields=["customer_name", "customer_email", "customer_phone", "request_snapshot", "updated_at"])
+            if quote_request.on_behalf_of_id:
+                quote_request.save(
+                    update_fields=["on_behalf_of", "customer_name", "customer_email", "customer_phone", "request_snapshot", "updated_at"]
+                )
+            else:
+                quote_request.save(update_fields=["customer_name", "customer_email", "customer_phone", "request_snapshot", "updated_at"])
+            # A captured phone that resolved to an existing client account is no longer an
+            # offline client: they pay from their own account, so this request must not push
+            # an anonymous STK below.
+            is_offline_quote = quote_request.on_behalf_of_id is None
+        # The client section can link the client on this very request, and the client is
+        # what decides the fee. Re-derive once the pair is settled so the pricing shown to
+        # the client and the split persisted below use one decision, not two.
+        fee_waived = fee_waived_for_quote_request(quote_request)
         latest_response = quote_request.quotes.order_by("-created_at", "-id").first()
         if latest_response is None or latest_response.total is None:
             return Response({"detail": "A production base quote is required before sending to the client."}, status=400)
 
+        chosen_speed = None
         production_cost_inputs = (
             request.data.get("production_cost_inputs")
             or request_snapshot.get("production_cost_inputs")
@@ -1263,9 +1365,22 @@ class PartnerQuoteSendToClientView(ManagerCapablePartnerQuoteView):
                 return Response({"detail": str(exc)}, status=400)
             base_price = Decimal(str(canonical_pricing["production_cost"]))
             broker_client_price = Decimal(str(canonical_pricing["final_client_price"]))
+            # LAW 18/22: the chosen speed enlarges the production amount before the
+            # split runs, so the surcharge passes through fee logic and the waiver.
+            speed_option, speed_error = _resolve_partner_speed_option(
+                quote_request=quote_request, base_price=base_price, request=request
+            )
+            if speed_error is not None:
+                return speed_error
+            if speed_option is not None:
+                markup_amount = broker_client_price - base_price
+                base_price = Decimal(str(speed_option["production_total"]))
+                broker_client_price = base_price + markup_amount
+                chosen_speed = apply_speed_selection(quote_request=quote_request, option=speed_option)
             financial_split = calculate_financial_split(
                 production_cost=base_price,
                 broker_client_price=broker_client_price,
+                fee_waived=fee_waived,
             )
             quantity_pricing_snapshot = {
                 "raw_sheets": canonical_pricing["raw_sheets"],
@@ -1284,6 +1399,15 @@ class PartnerQuoteSendToClientView(ManagerCapablePartnerQuoteView):
             gross_margin_value = Decimal(str(request.data.get("broker_margin_value") or default_broker_percent))
             existing_split = getattr(latest_response, "financial_split", None)
             base_price = Decimal(str(existing_split.production_cost if existing_split is not None else latest_response.total))
+            # Re-sending an already surcharged quote must not stack the speed uplift
+            # (and the percent margin must stay anchored to the standard base).
+            previous_multiplier = (
+                Decimal(str(quote_request.speed_multiplier or "1.00"))
+                if quote_request.speed_tier
+                else Decimal("1.00")
+            )
+            if previous_multiplier > 0 and previous_multiplier != Decimal("1.00"):
+                base_price = (base_price / previous_multiplier).quantize(Decimal("0.01"))
 
             if gross_margin_type == "fixed":
                 try:
@@ -1302,9 +1426,18 @@ class PartnerQuoteSendToClientView(ManagerCapablePartnerQuoteView):
                     return Response({"detail": str(exc)}, status=400)
                 gross_margin_amount = (base_price * rate / Decimal("100")).quantize(Decimal("0.01"))
 
+            speed_option, speed_error = _resolve_partner_speed_option(
+                quote_request=quote_request, base_price=base_price, request=request
+            )
+            if speed_error is not None:
+                return speed_error
+            if speed_option is not None:
+                base_price = Decimal(str(speed_option["production_total"]))
+                chosen_speed = apply_speed_selection(quote_request=quote_request, option=speed_option)
             financial_split = calculate_financial_split(
                 production_cost=base_price,
                 broker_client_price=base_price + gross_margin_amount,
+                fee_waived=fee_waived,
             )
         client_send_key = _partner_quote_send_key(
             production_cost_inputs=production_cost_inputs,
@@ -1312,6 +1445,7 @@ class PartnerQuoteSendToClientView(ManagerCapablePartnerQuoteView):
             gross_margin_type=gross_margin_type,
             gross_margin_value=request.data.get("broker_margin_value"),
             note=request.data.get("note"),
+            speed_tier=str(request.data.get("speed_tier") or ""),
         )
         stored_snapshot = dict(latest_response.response_snapshot or {})
         if (
@@ -1349,12 +1483,31 @@ class PartnerQuoteSendToClientView(ManagerCapablePartnerQuoteView):
         }
         response_snapshot["internal_pricing_snapshot"] = internal_pricing_snapshot
         response_snapshot["client_send_key"] = client_send_key
-        response_snapshot["customer_pricing"] = {
+        if chosen_speed is not None:
+            # LAW 20/21: the buyer sees the chosen speed and an honest estimate.
+            response_snapshot["speed"] = chosen_speed
+            internal_pricing_snapshot["speed_tier"] = chosen_speed["tier"]["key"]
+            internal_pricing_snapshot["speed_multiplier"] = chosen_speed["multiplier"]
+            internal_pricing_snapshot["production_uplift"] = chosen_speed["uplift"]
+        customer_pricing = {
             "currency": response_snapshot.get("currency") or "KES",
             "final_client_price": str(financial_split["client_total"]),
             "estimated_total": str(financial_split["client_total"]),
             "gross_margin_type": gross_margin_type,
         }
+        if chosen_speed is not None:
+            customer_pricing.update(
+                {
+                    "speed_tier": chosen_speed["tier"]["key"],
+                    "speed_label": chosen_speed["tier"]["label"],
+                    "surcharge_percent": chosen_speed["surcharge_percent"],
+                    "production_uplift": chosen_speed["uplift"],
+                    "ready_by": chosen_speed["ready_by"],
+                    "ready_label": chosen_speed["ready_label"],
+                    "is_estimate": True,
+                }
+            )
+        response_snapshot["customer_pricing"] = customer_pricing
         if quantity_pricing_snapshot:
             response_snapshot["quantity_pricing_snapshot"] = quantity_pricing_snapshot
         response_snapshot["pricing"] = {**dict(response_snapshot.get("pricing") or {}), "grand_total": str(financial_split["client_total"])}
@@ -1397,6 +1550,7 @@ class PartnerQuoteSendToClientView(ManagerCapablePartnerQuoteView):
             production_cost=financial_split["production_cost"],
             broker_client_price=financial_split["broker_client_price"],
             policy=financial_split["policy"],
+            fee_waived=fee_waived,
         )
 
         request_snapshot["customer_pricing"] = response_snapshot["customer_pricing"]
@@ -1453,6 +1607,7 @@ class PartnerQuoteSendToClientView(ManagerCapablePartnerQuoteView):
                 "quote_request_id": quote_request.id,
                 "quote_id": latest_response.id,
                 "pricing": response_snapshot["customer_pricing"],
+                "speed": chosen_speed,
                 "offline_client": is_offline_quote,
                 "claim_token": request_snapshot.get("offline_claim_token") if is_offline_quote else None,
                 "payment": payment_payload,
@@ -1733,6 +1888,7 @@ class ManagerQuoteRequestPricingPreviewView(PartnerAssignedRequestShopOptionsVie
                 split = calculate_financial_split(
                     production_cost=production_cost,
                     broker_client_price=production_cost + markup_amount,
+                    fee_waived=fee_waived_for_quote_request(quote_request),
                 )
             except ValueError as exc:
                 return Response({"detail": str(exc)}, status=400)
@@ -1756,6 +1912,9 @@ class ManagerQuoteRequestPricingPreviewView(PartnerAssignedRequestShopOptionsVie
                 "client_total": str(split["client_total"]),
                 "manager_total_to_client": str(split["client_total"]),
                 "per_piece": str(per_piece) if per_piece is not None else None,
+                # LAW: the manager's own client carries a 0% Printy fee. The flag is
+                # the one the split above was calculated with.
+                "fee_waived": bool(split.get("fee_waived", False)),
             }
 
         eligible_shops = []
@@ -1997,6 +2156,56 @@ class OfflineQuoteClaimView(BaseRoleDetailView):
                 "quote_request_id": quote_request.id,
                 "quote_id": latest_response.id if latest_response else None,
                 "claimed": True,
+            }
+        )
+
+
+class PartnerClientLookupView(ManagerCapablePartnerQuoteView):
+    """LAW 8: is this phone already a Printy client?
+
+    GET /api/dashboard/partner/clients/lookup/?phone=07... — the send-to-client step
+    asks before offering to claim the client. The answer is deliberately thin: the
+    step only needs enough to decide whether to show "Existing Printy client" and
+    hide the claim flow. No name, email, account id or history is returned, so a
+    manager cannot use it to read anyone's account.
+    """
+
+    dashboard_role = "partner"
+    allowed_roles = (CANONICAL_PARTNER_ROLE,)
+
+    def get(self, request):
+        from accounts.models import User
+        from accounts.services.client_invites import find_account_by_phone
+        from accounts.services.phone import normalize_phone
+
+        raw_phone = str(request.query_params.get("phone") or "").strip()
+        if not raw_phone:
+            return Response(
+                {"phone": "", "status": "invalid_phone", "is_client": False, "detail": "Send a phone number to check."},
+                status=400,
+            )
+        try:
+            normalized = normalize_phone(raw_phone)
+        except Exception:
+            return Response(
+                {"phone": raw_phone, "status": "invalid_phone", "is_client": False, "detail": "That phone number is not valid."},
+                status=400,
+            )
+
+        owner = find_account_by_phone(normalized)
+        if owner is None:
+            # A phone we have never seen, or one only ever captured on a pending
+            # invite: either way the manager may still create/claim the client.
+            return Response({"phone": normalized, "status": "new_client", "is_client": False})
+        if getattr(owner, "role", "") == User.Role.CLIENT:
+            return Response({"phone": normalized, "status": "existing_client", "is_client": True})
+        # A manager, printer or staff number is never offered as a client to claim.
+        return Response(
+            {
+                "phone": normalized,
+                "status": "not_a_client",
+                "is_client": False,
+                "detail": "That number belongs to a Printy partner account, not a client.",
             }
         )
 

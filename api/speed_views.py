@@ -20,14 +20,23 @@ from rest_framework.views import APIView
 from api.visibility import projection_role_for_request
 from catalog.models import Product
 from quotes.models import QuoteRequest
+from pricing.models import ShopSpeedTierOptIn, SpeedTier
 from services.pricing.role_projection import ROLE_MANAGER, ROLE_PRINTER
+from services.pricing.speed_config import (
+    FASTER_TIER,
+    FASTEST_TIER,
+    STANDARD_TIER,
+    surcharge_percent_for_tier,
+)
 from services.pricing.speed_tiers import (
     apply_speed_selection,
     build_speed_options,
     buyer_speed_payload,
     select_speed_option,
+    shop_tier_target_hours,
 )
 from shops.models import Shop
+from shops.services import can_manage_shop, refresh_shop_pricing_ready
 
 MANAGER_ROLES = {ROLE_MANAGER, ROLE_PRINTER}
 
@@ -161,3 +170,113 @@ class QuoteSpeedSelectionView(APIView):
             )
         snapshot = apply_speed_selection(quote_request=quote_request, option=option)
         return Response({"quote_request": quote_request.id, "speed": snapshot})
+
+
+class ShopSpeedSettingsView(APIView):
+    """GET/POST /api/pricing/shop-speed-settings/ — printer's own speed setup.
+
+    LAW 17/19: the owner declares the shop's standard turnaround, may override
+    either rush tier's hours, and may switch either tier off. Standard is always
+    on. A switched-off tier is excluded from every speed option list.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def _shop_for(self, request, shop_id):
+        if not shop_id:
+            return None, Response({"detail": "shop is required."}, status=status.HTTP_400_BAD_REQUEST)
+        shop = get_object_or_404(Shop, pk=shop_id)
+        if not can_manage_shop(shop, request.user):
+            return None, Response(
+                {"detail": "You cannot change this shop's speed settings."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        return shop, None
+
+    def _payload(self, shop) -> dict:
+        tiers = []
+        for tier in SpeedTier.objects.filter(key__in=[FASTER_TIER, FASTEST_TIER]).order_by("sort_order", "id"):
+            optin = ShopSpeedTierOptIn.objects.filter(shop=shop, tier=tier).first()
+            tiers.append(
+                {
+                    "key": tier.key,
+                    "label": tier.label,
+                    "enabled": bool(optin.is_active) if optin else False,
+                    "hours": shop_tier_target_hours(shop=shop, tier=tier),
+                    "hours_overridden": bool(optin and optin.target_hours),
+                    "surcharge_percent": surcharge_percent_for_tier(tier.key),
+                }
+            )
+        return {
+            "shop": shop.id,
+            "standard_turnaround_hours": shop.standard_turnaround_hours,
+            "tiers": tiers,
+        }
+
+    def get(self, request):
+        shop, error = self._shop_for(request, request.query_params.get("shop"))
+        if error:
+            return error
+        return Response(self._payload(shop))
+
+    def post(self, request):
+        shop, error = self._shop_for(request, request.data.get("shop"))
+        if error:
+            return error
+        standard = request.data.get("standard_turnaround_hours")
+        if standard not in (None, ""):
+            try:
+                hours = int(standard)
+            except (TypeError, ValueError):
+                return Response(
+                    {"detail": "standard_turnaround_hours must be a whole number of hours."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            if hours < 1:
+                return Response(
+                    {"detail": "standard_turnaround_hours must be at least 1 hour."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            shop.standard_turnaround_hours = hours
+            shop.save(update_fields=["standard_turnaround_hours", "updated_at"])
+            refresh_shop_pricing_ready(shop)
+        tiers = request.data.get("tiers") or []
+        if not isinstance(tiers, list):
+            return Response({"detail": "tiers must be a list."}, status=status.HTTP_400_BAD_REQUEST)
+        for entry in tiers:
+            if not isinstance(entry, dict):
+                continue
+            key = str(entry.get("key") or "").strip().lower()
+            if key == STANDARD_TIER:
+                return Response(
+                    {"detail": "The standard speed can never be switched off."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            tier = SpeedTier.objects.filter(key=key).first()
+            if tier is None:
+                return Response(
+                    {"detail": f"Unknown speed tier: {key}"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            raw_hours = entry.get("hours")
+            if raw_hours in (None, ""):
+                override = None
+            else:
+                try:
+                    override = int(raw_hours)
+                except (TypeError, ValueError):
+                    return Response(
+                        {"detail": f"{key} hours must be a whole number."},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+                if override < 1:
+                    return Response(
+                        {"detail": f"{key} hours must be at least 1 hour."},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+            ShopSpeedTierOptIn.objects.update_or_create(
+                shop=shop,
+                tier=tier,
+                defaults={"is_active": bool(entry.get("enabled", True)), "target_hours": override},
+            )
+        return Response(self._payload(shop))

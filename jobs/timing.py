@@ -13,6 +13,8 @@ from typing import TYPE_CHECKING, Any, Iterable
 
 from django.utils import timezone
 
+from zoneinfo import ZoneInfo
+
 from jobs.timing_config import (
     DUE_DATE_BUFFER_WORKING_HOURS,
     HOLIDAYS,
@@ -36,44 +38,75 @@ def is_working_day(day) -> bool:
     return day.weekday() in WORKING_WEEKDAYS and day not in HOLIDAYS
 
 
-def _combine(day, clock) -> datetime:
-    return datetime(day.year, day.month, day.day, clock.hour, clock.minute, tzinfo=SHOP_TIMEZONE)
+def _combine(day, clock, *, tz=None) -> datetime:
+    tz = tz or SHOP_TIMEZONE
+    return datetime(day.year, day.month, day.day, clock.hour, clock.minute, tzinfo=tz)
 
 
-def next_working_instant(moment: datetime) -> datetime:
-    """Return the first working instant at or after ``moment`` (shop-local)."""
-    local = moment.astimezone(SHOP_TIMEZONE)
+def next_working_instant(
+    moment: datetime,
+    *,
+    day_start=WORK_DAY_START,
+    day_end=WORK_DAY_END,
+    timezone_name: str | None = None,
+) -> datetime:
+    """Return the first working instant at or after ``moment`` (shop-local).
+
+    ``day_start``/``day_end``/``timezone_name`` let a caller use a shop's own
+    opening and closing times instead of the platform default; the working-
+    weekday and holiday calendar is shared.
+    """
+    tz = SHOP_TIMEZONE if not timezone_name else ZoneInfo(timezone_name)
+    local = moment.astimezone(tz)
     for _ in range(3660):
         if not is_working_day(local.date()):
-            local = _combine(local.date() + timedelta(days=1), WORK_DAY_START)
+            local = _combine(local.date() + timedelta(days=1), day_start, tz=tz)
             continue
-        if local.timetz().replace(tzinfo=None) < WORK_DAY_START:
-            return _combine(local.date(), WORK_DAY_START)
-        if local.timetz().replace(tzinfo=None) >= WORK_DAY_END:
-            local = _combine(local.date() + timedelta(days=1), WORK_DAY_START)
+        clock = local.timetz().replace(tzinfo=None)
+        if clock < day_start:
+            return _combine(local.date(), day_start, tz=tz)
+        if clock >= day_end:
+            local = _combine(local.date() + timedelta(days=1), day_start, tz=tz)
             continue
         return local
     raise RuntimeError("No working instant found within a decade; check the holiday calendar.")
 
 
-def add_working_hours(start: datetime, hours: Decimal | int | float) -> datetime:
-    """Return the UTC instant ``hours`` working hours after ``start``."""
+def add_working_hours(
+    start: datetime,
+    hours: Decimal | int | float,
+    *,
+    day_start=WORK_DAY_START,
+    day_end=WORK_DAY_END,
+    timezone_name: str | None = None,
+) -> datetime:
+    """Return the UTC instant ``hours`` working hours after ``start``.
+
+    Pass a shop's ``day_start``/``day_end``/``timezone_name`` for the shop's own
+    business hours; without them the platform working calendar applies.
+    """
     hours = Decimal(str(hours))
     if hours <= 0:
         return start.astimezone(dt_timezone.utc)
-    cursor = next_working_instant(start)
+    tz = SHOP_TIMEZONE if not timezone_name else ZoneInfo(timezone_name)
+    cursor = next_working_instant(start, day_start=day_start, day_end=day_end, timezone_name=timezone_name)
     remaining = hours
     for _ in range(3660):
         if remaining <= 0:
             break
-        day_end = _combine(cursor.date(), WORK_DAY_END)
-        available = Decimal(str((day_end - cursor).total_seconds())) / Decimal("3600")
+        day_end_instant = _combine(cursor.date(), day_end, tz=tz)
+        available = Decimal(str((day_end_instant - cursor).total_seconds())) / Decimal("3600")
         if available >= remaining:
             cursor = cursor + timedelta(hours=float(remaining))
             remaining = Decimal("0")
         else:
             remaining -= available
-            cursor = next_working_instant(day_end + timedelta(seconds=1))
+            cursor = next_working_instant(
+                day_end_instant + timedelta(seconds=1),
+                day_start=day_start,
+                day_end=day_end,
+                timezone_name=timezone_name,
+            )
     return cursor.astimezone(dt_timezone.utc)
 
 

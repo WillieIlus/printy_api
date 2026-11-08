@@ -75,29 +75,37 @@ class SpeedTierTests(TestCase):
 
         self.assertEqual(standard["multiplier"], "1.00")
         self.assertEqual(standard["production_total"], "1000.00")
-        # Faster lands at 21:00, which is the evening window (1.5x), so the
-        # higher-of rule keeps 1.5x — it must NOT become 2.25x.
+        # LAW 18: the configured surcharge is +50% / +100%, never stacked with a
+        # second multiplier.
         self.assertEqual(faster["multiplier"], "1.50")
         self.assertEqual(faster["production_total"], "1500.00")
         self.assertEqual(faster["applied_rule"], "speed_tier")
         self.assertEqual(fastest["multiplier"], "2.00")
         self.assertEqual(fastest["production_total"], "2000.00")
 
-    def test_sunday_work_uses_the_two_hundred_percent_window(self):
+    def test_sunday_start_rolls_into_the_next_business_day(self):
+        # LAW 20: ready-by is always computed inside business hours, so a Sunday
+        # start cannot produce a Sunday ready time (or a Sunday surcharge).
         option = self._option("faster", start=monday(10, day=date(2026, 11, 1)))
+        ready = datetime.fromisoformat(option["ready_by"]).astimezone(EAT)
 
-        self.assertEqual(option["time_window"]["key"], "sunday")
-        self.assertEqual(option["multiplier"], "2.00")
-        self.assertEqual(option["production_total"], "2000.00")
-        # The 1.5x speed tier is not stacked on top of the 2x Sunday rule.
-        self.assertEqual(option["applied_rule"], "time_window")
-        self.assertIn("Sunday", option["surcharge_line"])
+        self.assertLess(ready.weekday(), 5)  # never a Sunday ready-by
+        self.assertGreaterEqual(ready.date(), date(2026, 11, 2))
+        self.assertGreaterEqual(ready.hour, 8)
+        self.assertLess(ready.hour, 18)
+        self.assertIsNone(option["time_window"])
+        self.assertEqual(option["multiplier"], "1.50")
+        self.assertEqual(option["production_total"], "1500.00")
 
-    def test_public_holiday_uses_the_configured_holiday_table(self):
-        PublicHoliday.objects.create(date=date(2026, 11, 2), name="Test Holiday")
-        option = self._option("fastest", start=monday(9))
+    def test_public_holiday_rolls_past_the_configured_holiday_table(self):
+        # 2026-12-25 is Christmas Day in the platform working calendar.
+        christmas = date(2026, 12, 25)
+        option = self._option("fastest", start=monday(9, day=christmas))
+        ready = datetime.fromisoformat(option["ready_by"]).astimezone(EAT)
 
-        self.assertEqual(option["time_window"]["key"], "public_holiday")
+        self.assertNotEqual(ready.date(), christmas)
+        self.assertLess(ready.weekday(), 5)
+        self.assertIsNone(option["time_window"])
         self.assertEqual(option["multiplier"], "2.00")
         self.assertEqual(option["production_total"], "2000.00")
 
@@ -112,8 +120,8 @@ class SpeedTierTests(TestCase):
 
         self.assertEqual([item["tier"]["key"] for item in options], ["standard"])
 
-    def test_tier_is_hidden_when_the_required_window_is_not_accepted(self):
-        self.shop.time_window_optins.filter(rule__key="evening").update(is_active=False)
+    def test_odd_hour_windows_never_touch_a_business_hours_ready_time(self):
+        self.shop.time_window_optins.update(is_active=False)
         options = build_speed_options(
             shop=self.shop,
             product_category="flyer",
@@ -121,7 +129,10 @@ class SpeedTierTests(TestCase):
             start_at=monday(9),
         )
 
-        self.assertNotIn("faster", [item["tier"]["key"] for item in options])
+        self.assertEqual(
+            [item["tier"]["key"] for item in options], ["standard", "faster", "fastest"]
+        )
+        self.assertTrue(all(item["time_window"] is None for item in options))
 
     def test_printer_payout_includes_the_full_uplift(self):
         option = self._option("fastest", start=monday(9))
@@ -328,7 +339,7 @@ class SpeedTierTests(TestCase):
         )
 
         with mock.patch("quotes.acceptance.create_payment_for_quote", return_value=object()):
-            accepted, _payment = accept_quote(quote=quote, accepted_by=self.owner)
+            accepted = accept_quote(quote=quote, accepted_by=self.owner)
 
         accepted.refresh_from_db()
         request.refresh_from_db()

@@ -31,9 +31,71 @@ from pricing.models import (
     SpeedTier,
     TimeWindowRule,
 )
+from services.pricing.speed_config import (
+    STANDARD_TIER,
+    derived_turnaround_hours,
+    multiplier_for_tier,
+    surcharge_percent_for_tier,
+)
 
-STANDARD_TIER = "standard"
 MONEY_QUANT = Decimal("0.01")
+DEFAULT_DAY_START = time(8, 0)
+DEFAULT_DAY_END = time(18, 0)
+DEFAULT_TIMEZONE_NAME = "Africa/Nairobi"
+
+
+def _as_time(value, fallback: time) -> time:
+    """Shop hours may come back as ``time`` or as a stored "HH:MM" string."""
+    if isinstance(value, time):
+        return value
+    if isinstance(value, str) and value.strip():
+        parts = value.strip().split(":")
+        try:
+            return time(int(parts[0]), int(parts[1]) if len(parts) > 1 else 0)
+        except (TypeError, ValueError):
+            return fallback
+    return fallback
+
+
+def shop_business_hours(shop) -> dict[str, Any]:
+    """The shop's own business hours, defaulting to the platform calendar (law 20)."""
+    day_start = _as_time(getattr(shop, "opening_time", None), DEFAULT_DAY_START)
+    day_end = _as_time(getattr(shop, "closing_time", None), DEFAULT_DAY_END)
+    if day_end <= day_start:
+        day_start, day_end = DEFAULT_DAY_START, DEFAULT_DAY_END
+    timezone_name = str(getattr(shop, "timezone", "") or DEFAULT_TIMEZONE_NAME)
+    return {"day_start": day_start, "day_end": day_end, "timezone_name": timezone_name}
+
+
+def _tier_by_key(key: str) -> SpeedTier | None:
+    return SpeedTier.objects.filter(key=key).first()
+
+
+def shop_standard_hours(shop, *, product_category: str | None = None) -> int | None:
+    """The shop's declared standard turnaround, else the seeded standard target."""
+    declared = getattr(shop, "standard_turnaround_hours", None)
+    if declared:
+        return max(1, int(declared))
+    tier = _tier_by_key(STANDARD_TIER)
+    return tier.target_hours_for(product_category) if tier else None
+
+
+def shop_tier_target_hours(*, shop, tier: SpeedTier, product_category: str | None = None) -> int | None:
+    """Turnaround hours for one tier: shop override, else derived from standard.
+
+    Standard always uses the shop's declared standard turnaround. Faster/Fastest
+    honour a per-shop override, otherwise they derive from the standard using the
+    configured factors (law 19)."""
+    if tier.key == STANDARD_TIER:
+        return shop_standard_hours(shop, product_category=product_category)
+    optin = ShopSpeedTierOptIn.objects.filter(shop=shop, tier=tier).first()
+    if optin is not None and optin.target_hours:
+        return max(1, int(optin.target_hours))
+    standard = shop_standard_hours(shop, product_category=product_category)
+    derived = derived_turnaround_hours(tier.key, standard)
+    if derived:
+        return derived
+    return tier.target_hours_for(product_category)
 
 
 def _money(value: Any) -> Decimal:
@@ -85,9 +147,15 @@ def shop_window_available(*, shop, rule: TimeWindowRule) -> bool:
 
 def _window_matches(rule: TimeWindowRule, moment: datetime, *, holidays: set[date]) -> bool:
     local = local_time(moment)
-    if rule.covers_public_holidays and local.date() in holidays:
+    is_holiday = local.date() in holidays
+    if rule.covers_public_holidays and is_holiday:
         return True
     weekdays = rule.weekdays if isinstance(rule.weekdays, list) else []
+    has_day_rule = bool(weekdays) or rule.start_time is not None or rule.end_time is not None
+    # A rule that exists only to cover public holidays must never match an
+    # ordinary working day, or every job would be surcharged all year.
+    if rule.covers_public_holidays and not has_day_rule:
+        return False
     if weekdays and local.isoweekday() not in {int(day) for day in weekdays}:
         return False
     if rule.start_time is None or rule.end_time is None:
@@ -121,15 +189,9 @@ def applicable_window(*, moment: datetime, shop=None) -> TimeWindowRule | None:
     return max(candidates, key=lambda rule: (rule.multiplier, rule.id))
 
 
-def _target_hours(*, tier: SpeedTier, product_category: str | None) -> int | None:
-    return tier.target_hours_for(product_category)
-
-
-def _ready_at(*, start: datetime, tier: SpeedTier, target_hours: int) -> datetime:
-    if tier.key == STANDARD_TIER:
-        return add_working_hours(start, target_hours)
-    # Rush tiers may legitimately run through an evening, Sunday or holiday.
-    return start + timedelta(hours=target_hours)
+def _ready_at(*, shop, start: datetime, target_hours: int) -> datetime:
+    """Ready-by always rolls through the shop's business hours (law 20)."""
+    return add_working_hours(start, target_hours, **shop_business_hours(shop))
 
 
 def estimate_for_spec(
@@ -216,10 +278,10 @@ def build_speed_options(
     for tier in active_tiers():
         if not shop_tier_available(shop=shop, tier=tier):
             continue
-        target = _target_hours(tier=tier, product_category=product_category)
+        target = shop_tier_target_hours(shop=shop, tier=tier, product_category=product_category)
         if not target:
             continue
-        ready_at = _ready_at(start=start, tier=tier, target_hours=target)
+        ready_at = _ready_at(shop=shop, start=start, target_hours=target)
         matching = matching_windows(moment=ready_at)
         window = applicable_window(moment=ready_at, shop=shop)
         if matching and window is None:
@@ -227,7 +289,8 @@ def build_speed_options(
             # so the tier cannot actually be met and is not offered.
             continue
         window_multiplier = Decimal(str(window.multiplier)) if window else Decimal("1.00")
-        speed_multiplier = Decimal(str(tier.multiplier))
+        # Law 18: the surcharge percentage is configuration, not a DB value.
+        speed_multiplier = multiplier_for_tier(tier.key)
         multiplier = max(speed_multiplier, window_multiplier)
         production_total = _money(base * multiplier)
         uplift = _money(production_total - base)
@@ -252,6 +315,9 @@ def build_speed_options(
                     "multiplier": str(speed_multiplier),
                 },
                 "speed_multiplier": str(speed_multiplier),
+                "surcharge_percent": surcharge_percent_for_tier(tier.key),
+                "turnaround_hours": target,
+                "is_estimate": True,
                 "time_window": window_rule,
                 "applied_rule": rule,
                 "multiplier": str(multiplier),
@@ -346,8 +412,11 @@ def buyer_speed_payload(*, options: list[dict[str, Any]]) -> dict[str, Any]:
                 "label": option["tier"]["label"],
                 "price": option["production_total"],
                 "price_change_percent": int((Decimal(option["multiplier"]) - 1) * 100),
+                "surcharge_percent": int(option.get("surcharge_percent") or 0),
+                "turnaround_hours": option.get("turnaround_hours"),
                 "ready_by": option["ready_by"],
                 "ready_label": option["ready_label"],
+                "is_estimate": True,
                 "estimate_source": option["estimate"]["source"],
                 "surcharge_line": option["surcharge_line"],
             }

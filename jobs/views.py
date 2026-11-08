@@ -384,7 +384,8 @@ class JobTrackView(APIView):
     - An authenticated viewer entitled to the job (buyer, manager, printer or
       admin) gets the law 7.6 stage timeline projected to their role allowlist.
     - A signed-out (or non-entitled) lookup must supply the phone number on the
-      job and then receives status and dates only.
+      job and then receives the stage timeline (law 11): stages, their
+      timestamps and who has the ball, with no shop identity and no money.
     - An unknown code and a missing/wrong phone return the SAME generic error,
       so the endpoint cannot be used to probe which codes exist.
     """
@@ -501,12 +502,43 @@ class JobTrackView(APIView):
         return payload
 
     def _signed_out_payload(self, managed_job) -> dict[str, object]:
-        # Law 7.7: signed-out lookups see status and dates only. No timeline, no
-        # owners, no shop identity and no money.
+        """Law 11: stages, timestamps and who has the ball - nothing else.
+
+        Built from an explicit allowlist rather than from the role projection, so
+        the signed-out view cannot pick up shop identity, production cost or the
+        manager's margin even if a projection allowlist later grows. Stage owners
+        are the role labels (client / printy / printer), never a shop name or id.
+        """
+        events = getattr(managed_job, "job_events", None)
+        event_list = list(events.all()) if events is not None else []
+        timeline = stage_timeline(managed_job, events=event_list)
+        stages = [
+            {
+                "key": stage.get("key"),
+                "label": stage.get("label"),
+                "owner": stage.get("owner"),
+                "next_action": stage.get("next_action"),
+                "state": stage.get("state"),
+                "started_at": stage.get("started_at"),
+                "due_at": stage.get("due_at"),
+                "completed_at": stage.get("completed_at"),
+                "is_overdue": stage.get("is_overdue"),
+            }
+            for stage in timeline.get("stages") or []
+        ]
+        current_key = timeline.get("current_stage")
+        current = next((stage for stage in stages if stage["key"] == current_key), None) or {}
         return {
             "code": job_code(managed_job),
             "job_status": getattr(managed_job, "get_status_display", lambda: managed_job.status)(),
             "raw_status": managed_job.status,
+            "current_stage": current_key,
+            "current_stage_label": current.get("label"),
+            "who_has_the_ball": current.get("owner"),
+            "next_action": current.get("next_action"),
+            "due_date": timeline.get("due_date"),
+            "is_late": timeline.get("is_late"),
+            "stages": stages,
             "dates": {
                 "created_at": managed_job.created_at,
                 "accepted_at": managed_job.accepted_at,

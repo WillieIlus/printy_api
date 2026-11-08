@@ -52,6 +52,7 @@ class QuoteFinancialResult:
     applied_policy_version: str
     max_allowed_client_price: Decimal
     applied_markup_multiple: Decimal
+    fee_waived: bool = False
 
     @property
     def broker_client_price(self) -> Decimal:
@@ -95,6 +96,7 @@ class QuoteFinancialResult:
             "broker_payout": self.broker_payout,
             "max_allowed_client_price": self.max_allowed_client_price,
             "applied_markup_multiple": self.applied_markup_multiple,
+            "fee_waived": self.fee_waived,
         }
 
     def __getitem__(self, key: str) -> Any:
@@ -131,7 +133,7 @@ def _policy_value(policy: PlatformFeePolicy, field: str, default: str) -> Decima
     return Decimal(str(getattr(policy, field, Decimal(default))))
 
 
-def calculate_quote_financials(*, production_cost, manager_markup, policy: PlatformFeePolicy) -> QuoteFinancialResult:
+def calculate_quote_financials(*, production_cost, manager_markup, policy: PlatformFeePolicy, fee_waived: bool = False) -> QuoteFinancialResult:
     """The single rounding point for the client-facing money chain.
 
     M-Pesa STK Push only accepts whole shillings, so every amount that reaches
@@ -145,6 +147,13 @@ def calculate_quote_financials(*, production_cost, manager_markup, policy: Platf
     rounded, so ``shop_payout + manager_payout + printy_fee`` always equals
     ``client_total`` exactly. Rounding the three independently is the classic
     rounding-split bug where the parts are off by a shilling.
+
+    ``fee_waived`` (LAW 4-6) waives ONLY the manager-side Printy fee. The
+    client price (``client_total``), the printer's payout (``shop_payout``) and
+    the printer-side fee (``production_fee_component``) are bit-for-bit what
+    they would be without the waiver; the waived amount moves to
+    ``manager_payout``. The flag is decided once at quote time and passed in;
+    this function never derives it.
     """
     production_cost = to_decimal(production_cost)
     manager_markup = to_decimal(manager_markup)
@@ -196,8 +205,15 @@ def calculate_quote_financials(*, production_cost, manager_markup, policy: Platf
     gross_margin = whole_kes(broker_client_price - production_cost)
     shop_payout = whole_kes(production_cost * shop_floor_multiple)
     production_fee_component = whole_kes(shop_payout - production_cost)
-    manager_payout = whole_kes(min(manager_markup, whole_kes(gross_margin * manager_commission_cap_rate)))
-    # Residual: guarantees the three payout components sum to client_total.
+    if fee_waived:
+        # The manager keeps everything the printer is not paid. For tier A that is
+        # the whole markup; for tiers B/C the printer-side uplift still comes out
+        # of the markup first, exactly as it does when the fee is charged.
+        manager_payout = whole_kes(max(broker_client_price - shop_payout, Decimal("0.00")))
+    else:
+        manager_payout = whole_kes(min(manager_markup, whole_kes(gross_margin * manager_commission_cap_rate)))
+    # Residual: guarantees the three payout components sum to client_total. With the
+    # fee waived this is 0 whenever the markup covers the printer-side fee.
     printy_fee = whole_kes(broker_client_price - shop_payout - manager_payout)
     markup_fee_component = printy_fee
     client_total = broker_client_price
@@ -218,10 +234,11 @@ def calculate_quote_financials(*, production_cost, manager_markup, policy: Platf
         applied_policy_version=getattr(policy, "policy_version", "printy-fees-v1") or "printy-fees-v1",
         max_allowed_client_price=max_allowed_client_price,
         applied_markup_multiple=applied_markup_multiple,
+        fee_waived=bool(fee_waived),
     )
 
 
-def calculate_financial_split(*, production_cost, manager_markup=None, broker_client_price=None, policy=None) -> QuoteFinancialResult:
+def calculate_financial_split(*, production_cost, manager_markup=None, broker_client_price=None, policy=None, fee_waived: bool = False) -> QuoteFinancialResult:
     policy = policy or get_active_platform_fee_policy()
     if manager_markup is None:
         if broker_client_price is None:
@@ -235,6 +252,7 @@ def calculate_financial_split(*, production_cost, manager_markup=None, broker_cl
         production_cost=production_cost,
         manager_markup=manager_markup,
         policy=policy,
+        fee_waived=fee_waived,
     )
 
 
@@ -251,6 +269,7 @@ def _split_matches_result(split, result: QuoteFinancialResult) -> bool:
         "currency",
         "pricing_tier",
         "applied_policy_version",
+        "fee_waived",
     )
     return all(getattr(split, field) == getattr(result, field) for field in fields)
 
@@ -288,16 +307,28 @@ def create_quote_financial_split(
     production_option=None,
     policy=None,
     lock: bool | None = None,
+    fee_waived: bool | None = None,
 ):
     from quotes.models import QuoteFinancialSplit
 
+    existing = QuoteFinancialSplit.objects.select_for_update().filter(quote=quote).first()
+    if fee_waived is None:
+        # LAW 5: the stored decision is final. A split that already exists keeps the
+        # flag it was created with; only a brand-new split decides once, from the
+        # quote's own client/manager pair.
+        if existing is not None:
+            fee_waived = bool(existing.fee_waived)
+        else:
+            from pricing.services.fee_waiver import fee_waived_for_quote
+
+            fee_waived = fee_waived_for_quote(quote)
     result = calculate_financial_split(
         production_cost=production_cost,
         manager_markup=manager_markup,
         broker_client_price=broker_client_price,
         policy=policy,
+        fee_waived=bool(fee_waived),
     )
-    existing = QuoteFinancialSplit.objects.select_for_update().filter(quote=quote).first()
     should_lock = bool(lock) or getattr(quote, "status", "") == "accepted" or getattr(quote, "accepted_at", None) is not None
     if existing is not None:
         if existing.locked or getattr(quote, "status", "") == "accepted":
@@ -317,6 +348,7 @@ def create_quote_financial_split(
             "printer_side_fee": result.printer_side_fee,
             "broker_margin_fee": result.broker_margin_fee,
             "printy_fee": result.printy_fee,
+            "fee_waived": result.fee_waived,
             "shop_payout": result.shop_payout,
             "manager_payout": result.manager_payout,
             "broker_payout": result.broker_payout,
@@ -345,6 +377,7 @@ def create_quote_financial_split(
         printer_side_fee=result.printer_side_fee,
         broker_margin_fee=result.broker_margin_fee,
         printy_fee=result.printy_fee,
+        fee_waived=result.fee_waived,
         shop_payout=result.shop_payout,
         manager_payout=result.manager_payout,
         broker_payout=result.broker_payout,

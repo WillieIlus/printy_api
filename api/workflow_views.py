@@ -1,4 +1,5 @@
 import logging
+import random
 from decimal import Decimal
 
 from django.conf import settings
@@ -386,6 +387,23 @@ def _eligible_manager_candidate(user: User, *, current_user=None, product_type: 
     )
 
 
+def _client_manager_ids(user) -> list[int]:
+    """The client's own managers, in display order, for pinning (B1.3).
+
+    Only a signed-in client has them; a signed-out or manager caller gets an empty
+    list and the list keeps its normal order. Read-only and display-only.
+    """
+    if user is None or not getattr(user, "is_authenticated", False) or not is_client(user):
+        return []
+    from accounts.services.manager_relationships import managers_for_client
+
+    try:
+        rows = managers_for_client(user)
+    except Exception:  # the list must render even if the relationship read fails
+        return []
+    return [int(row["id"]) for row in rows if row.get("id") is not None]
+
+
 def _previous_manager_id_for_client(user) -> int | None:
     if not user or not getattr(user, "is_authenticated", False) or not is_client(user):
         return None
@@ -469,6 +487,11 @@ def _build_recommended_manager_payloads(*, request, current_user, product_type: 
         .select_related("profile")
     )
     previous_manager_id = _previous_manager_id_for_client(current_user)
+    # B1.3: a signed-in client's own managers (origin manager + managers with a paid
+    # job for them) are pinned to the top of the list. Derived, display-only - see
+    # accounts/services/manager_relationships.py; it never reaches a fee decision.
+    client_manager_ids = _client_manager_ids(current_user)
+    client_manager_id_set = set(client_manager_ids)
     eligible: list[User] = [
         candidate for candidate in candidates
         if _eligible_manager_candidate(candidate, current_user=current_user, product_type=product_type)
@@ -507,6 +530,11 @@ def _build_recommended_manager_payloads(*, request, current_user, product_type: 
             "on_time_rate": manager_on_time_rate,
             "distance_km": distance_km,
             "is_previous_manager": is_previous_manager,
+            # B1.3: "Your managers" - the client already works with this manager.
+            # Verified is a different, manual Printy decision; the UI must draw them
+            # differently and never show the client anything about fees.
+            "is_client_manager": manager.id in client_manager_id_set,
+            "is_verified": bool(getattr(getattr(manager, "profile", None), "manager_verified", False)),
             "badge": None,
             "recommendation_reason": (
                 "You have worked with this Print Manager before."
@@ -522,15 +550,27 @@ def _build_recommended_manager_payloads(*, request, current_user, product_type: 
         scored.append((score, manager, payload))
 
     scored.sort(key=lambda item: (item[0], int(item[2].get("completed_jobs") or 0), bool(item[2].get("avg_response_hours") is not None)), reverse=True)
+    # The server owns the order (law 7.5): the client's own managers first, in the
+    # derived order (origin manager first), then the previous manager, then score.
+    payload_by_id = {manager.id: payload for _score, manager, payload in scored}
     selected_payloads: list[dict[str, object]] = []
-    if previous_payload is not None:
-        selected_payloads.append(previous_payload)
-    for _score, manager, payload in scored:
-        if previous_user is not None and manager.id == previous_user.id:
-            continue
+    selected_ids: set[int] = set()
+
+    def _append(manager_id: int | None) -> None:
+        if manager_id is None or manager_id in selected_ids or len(selected_payloads) >= 3:
+            return
+        payload = payload_by_id.get(manager_id)
+        if payload is None:
+            return
         selected_payloads.append(payload)
-        if len(selected_payloads) >= 3:
-            break
+        selected_ids.add(manager_id)
+
+    for manager_id in client_manager_ids:
+        _append(manager_id)
+    if previous_payload is not None and previous_user is not None:
+        _append(previous_user.id)
+    for _score, manager, _payload in scored:
+        _append(manager.id)
     selected_payloads = selected_payloads[:3]
     for index in range(len(selected_payloads)):
         selected_payloads[index]["badge"] = _manager_badge(manager_payloads=selected_payloads, index=index)
@@ -1481,6 +1521,67 @@ class PublicRecommendedPrintManagerListView(APIView):
             row["brand_name"] = row["display_name"]
         payload["results"] = RecommendedPrintManagerSerializer(payload["results"], many=True).data
         return Response(payload)
+
+
+FEATURED_MANAGER_MINIMUM = 3
+
+
+def _featured_manager_rows() -> list[dict[str, object]]:
+    """LAW 14: only verified, opted-in managers with a complete public profile.
+
+    Route-level independence from the intake ranking above is deliberate: no score, no
+    job counts, no prices, no ratings, no shops or printers - four fields and nothing else.
+    """
+    from accounts.models import User as AccountsUser, UserProfile
+
+    profiles = (
+        UserProfile.objects.select_related("user")
+        .filter(
+            manager_verified=True,
+            manager_public_opt_in=True,
+            user__is_active=True,
+            user__role__in=[AccountsUser.Role.BROKER, AccountsUser.Role.PARTNER],
+        )
+        .exclude(avatar="")
+        .exclude(manager_speciality="")
+    )
+    rows: list[dict[str, object]] = []
+    for profile in profiles:
+        first_name = str(profile.user.first_name or "").strip()
+        if not first_name:
+            first_name = (str(profile.user.name or "").strip().split() or [""])[0]
+        photo = str(profile.avatar or "").strip()
+        speciality = str(profile.manager_speciality or "").strip()
+        if not first_name or not photo or not speciality:
+            continue
+        rows.append(
+            {
+                "first_name": first_name,
+                "photo": photo,
+                "speciality": speciality,
+                "verified": True,
+            }
+        )
+    return rows
+
+
+class PublicFeaturedManagersView(APIView):
+    """LAW 14-16: the homepage's featured managers.
+
+    Manually verified + opted in with a photo + public profile, four fields only, random
+    order on every request, and nothing at all below three qualifying managers.
+    """
+
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        rows = _featured_manager_rows()
+        if len(rows) < FEATURED_MANAGER_MINIMUM:
+            return Response({"results": [], "count": 0})
+        random.shuffle(rows)
+        response = Response({"results": rows, "count": len(rows)})
+        response["Cache-Control"] = "no-store"
+        return response
 
 
 class IntakeSubmitView(APIView):

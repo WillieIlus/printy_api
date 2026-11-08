@@ -189,6 +189,14 @@ class ManagedJob(TimeStampedModel):
     operational_priority_level = models.PositiveSmallIntegerField(default=1)
     client_total = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
     printy_fee = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
+    fee_waived = models.BooleanField(
+        default=False,
+        verbose_name=_("manager fee waived"),
+        help_text=_(
+            "Frozen at quote time: the manager-side Printy fee is waived because this "
+            "job's manager is the client's origin manager. Never recomputed."
+        ),
+    )
     broker_payout = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
     payout_hold = models.BooleanField(default=False)
     artwork_required = models.BooleanField(default=False)

@@ -93,12 +93,24 @@ class UserProfileAdmin(admin.ModelAdmin):
         "city",
         "country",
         "broker_profile_active",
+        "manager_verified",
+        "manager_public_opt_in",
+        "manager_speciality",
         "is_system_account",
         "default_markup_rate",
         "updated_at",
     ]
-    list_filter = ["broker_profile_active", "is_system_account", "country"]
+    list_filter = [
+        "broker_profile_active",
+        "manager_verified",
+        "manager_public_opt_in",
+        "is_system_account",
+        "country",
+    ]
     search_fields = ["user__email", "user__name", "phone", "city", "country"]
+    # LAW 2: a client's origin manager is set once when the client is created and
+    # is never editable afterwards, so the admin shows it read-only.
+    readonly_fields = ["origin_manager"]
     actions = ["activate_broker_profiles", "deactivate_broker_profiles"]
 
     @admin.action(description="Activate selected broker/partner profiles")

@@ -7,12 +7,15 @@ from clients.views import (
     ClientLinkOtpVerifyView,
     ClientLinkPaymentView,
     ClientLinkView,
+    ClientMyManagersView,
     ManagerCreateClientLinkView,
     ManagerCreateClientRequestView,
     ManagerRevokeClientLinkView,
 )
 
 urlpatterns = [
+    # Client account.
+    path("my-managers/", ClientMyManagersView.as_view(), name="client_my_managers"),
     # Manager (active role: partner).
     path("manager/quote-requests/", ManagerCreateClientRequestView.as_view(), name="client_manager_create_request"),
     path("manager/quote-requests/<int:pk>/link/", ManagerCreateClientLinkView.as_view(), name="client_manager_create_link"),

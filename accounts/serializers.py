@@ -409,6 +409,15 @@ class UserCreateSerializer(serializers.ModelSerializer):
             from accounts.services.phone import set_profile_phone
 
             set_profile_phone(user, phone, verified=False)
+            # LAW 12: signing up with a phone a manager already captured adopts that
+            # client record (same origin, same quotes/jobs/payments) instead of
+            # starting a second one.
+            from accounts.services.client_invites import link_client_identity
+
+            try:
+                link_client_identity(user, phone)
+            except Exception:  # linking is additive; never fail the sign-up for it
+                logger.exception("client_identity_link_failed user_id=%s", user.pk)
         self.claimed_guest_draft = None
         if session_key:
             from quotes.models import CalculatorDraft, CalculatorDraftContext, CalculatorDraftIntent

@@ -271,6 +271,31 @@ class ManagerRevokeClientLinkView(APIView):
         return Response({"detail": "Link revoked.", "link_id": link.id, "revoked_at": link.revoked_at.isoformat()})
 
 
+class ClientMyManagersView(APIView):
+    """Law 13: the managers this client is related to, derived - never stored.
+
+    Display only. The list is built from the client's origin manager plus every manager
+    with a paid job for them, and it is never consulted for a fee decision.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        if getattr(request.user, "role", "") != "client":
+            return Response(
+                {"detail": "Only client accounts have a manager list."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        from accounts.services.manager_relationships import managers_for_client
+
+        results = managers_for_client(request.user)
+        response = Response({"results": results, "count": len(results)})
+        # Per-client data: never cache it in a shared proxy.
+        response["Cache-Control"] = "private, no-store"
+        return response
+
+
 class ClientLinkView(APIView):
     """Law 10.6: view the one quote/job a link opens (buyer projection only)."""
 
@@ -468,43 +493,107 @@ class ClientLinkPaymentView(ClientLinkActionView):
         if error is not None:
             return error
 
-        from quotes.choices import QuoteStatus
+        from django.core.exceptions import ValidationError as DjangoValidationError
+
+        from payments.services import (
+            create_payment_for_quote,
+            initiate_stk_push,
+            normalize_mpesa_phone,
+        )
+        from quotes.acceptance import accept_quote_for_payment
+        from quotes.choices import QuoteOfferStatus, QuoteStatus
         from quotes.models import Quote
 
         quote_request = link.quote_request
+        phone = _link_client_phone(link)
         quote = (
             Quote.objects.filter(quote_request=quote_request, status=QuoteStatus.ACCEPTED)
             .order_by("-id")
             .first()
         )
+        accepted_now = False
+
         if quote is None:
-            return Response(
-                {"detail": "This request has no accepted quote to pay yet."},
-                status=status.HTTP_409_CONFLICT,
+            # LAW 10: a sent quote can be paid without an account. The signed single-job
+            # link plus the verified OTP on the phone on the job are the capability, so
+            # the acceptance is recorded with no acting account.
+            quote = (
+                Quote.objects.filter(
+                    quote_request=quote_request,
+                    status__in=[
+                        QuoteOfferStatus.SENT,
+                        QuoteOfferStatus.REVISED,
+                        QuoteOfferStatus.MODIFIED,
+                    ],
+                )
+                .order_by("-created_at", "-id")
+                .first()
             )
+            if quote is None:
+                return Response(
+                    {"detail": "This request has no sent quote to pay yet."},
+                    status=status.HTTP_409_CONFLICT,
+                )
+            try:
+                quote, payment = accept_quote_for_payment(
+                    quote=quote,
+                    accepted_by=None,
+                    payer_phone=phone,
+                    authorized=True,
+                )
+            except DjangoValidationError as exc:
+                return Response({"detail": "; ".join(exc.messages)}, status=status.HTTP_400_BAD_REQUEST)
+            accepted_now = True
+        else:
+            # The client usually has no account: the payer is the on_behalf_of account
+            # when one exists, never the manager who prepared the quote.
+            try:
+                payment = create_payment_for_quote(
+                    quote=quote,
+                    payer=quote_request.on_behalf_of,
+                    payer_phone=phone or quote_request.customer_phone or "",
+                )
+            except Exception as exc:  # surfaces service validation messages as a 400
+                return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
 
-        payer = quote_request.on_behalf_of or quote_request.created_by_manager or quote_request.created_by
-        if payer is None:
-            return Response({"detail": "No payer is linked to this request."}, status=status.HTTP_400_BAD_REQUEST)
+        # Push the STK to the phone on the job (LAW 10: M-Pesa, no account needed).
+        stk_request = None
+        payment_phone = phone or ""
+        if payment_phone:
+            try:
+                payment_phone = normalize_mpesa_phone(payment_phone)
+            except DjangoValidationError:
+                payment_phone = ""
+        stk_error = None
+        if payment_phone:
+            try:
+                stk_request = initiate_stk_push(payment=payment, phone_number=payment_phone)
+            except NotImplementedError as exc:
+                stk_error = str(exc)
+            except (DjangoValidationError, ValueError) as exc:
+                stk_error = "; ".join(getattr(exc, "messages", [str(exc)]))
+        payment.refresh_from_db()
 
-        from payments.services import create_payment_for_quote
-
-        try:
-            payment = create_payment_for_quote(
-                quote=quote,
-                payer=payer,
-                payer_phone=quote_request.customer_phone or "",
-            )
-        except Exception as exc:  # surfaces service validation messages as a 400
-            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
-
-        log_client_event(quote_request, event="client_payment_initiated", payment_id=payment.id, via="client_link")
+        log_client_event(
+            quote_request,
+            event="client_payment_initiated",
+            payment_id=payment.id,
+            accepted_now=accepted_now,
+            via="client_link",
+        )
         return Response(
             {
                 "detail": "Payment initiated.",
                 "payment_id": payment.id,
                 "status": payment.status,
                 "amount": str(payment.amount),
+                "quote_id": quote.id,
+                "quote_status": quote.status,
+                "accepted_now": accepted_now,
+                "checkout_request_id": stk_request.checkout_request_id if stk_request else None,
+                "merchant_request_id": stk_request.merchant_request_id if stk_request else None,
+                "stk_status": stk_request.status if stk_request else None,
+                "stk_error": stk_error,
             },
             status=status.HTTP_201_CREATED,
         )

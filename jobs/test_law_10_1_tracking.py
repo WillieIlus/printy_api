@@ -3,7 +3,8 @@
 Covers the required law 10.8 / 7.7 cases:
 - buyer timelines carry no printer identity;
 - printer timelines carry no money;
-- signed-out responses contain status and dates only;
+- signed-out responses carry the stages, their timestamps and who has the ball,
+  but never shop identity, costs or margin (law 11);
 - the quote reference (QR-...) and the job code resolve to the same page;
 - failed lookups are indistinguishable;
 - signed-out lookups are rate-limited per IP and per code.
@@ -144,18 +145,60 @@ class Law101TrackingTestCase(TestCase):
         self.assertEqual(keys & money_keys, set())
         self.assertNotIn("1500", response.content.decode())
 
-    # --- item 2: signed-out sees status and dates only -----------------------
-    def test_signed_out_response_is_status_and_dates_only(self):
+    # --- item 2: signed-out sees the stages, never identity or money ---------
+    def test_signed_out_response_is_stages_and_dates_without_shop_identity(self):
         response = self._get(QUOTE_REFERENCE, phone="0733444555")
         self.assertEqual(response.status_code, 200)
         body = response.json()
-        self.assertEqual(set(body), {"code", "job_status", "raw_status", "dates"})
+        # Law 11 replaced the status-and-dates-only payload: a signed-out client who
+        # proves the phone on the job now sees the stages, their timestamps and who
+        # has the ball - and still nothing about money or the shop.
+        self.assertEqual(
+            set(body),
+            {
+                "code",
+                "job_status",
+                "raw_status",
+                "dates",
+                "current_stage",
+                "current_stage_label",
+                "who_has_the_ball",
+                "next_action",
+                "due_date",
+                "is_late",
+                "stages",
+            },
+        )
+        self.assertTrue(body["stages"])
+        for stage in body["stages"]:
+            self.assertTrue(
+                {
+                    "key",
+                    "label",
+                    "owner",
+                    "next_action",
+                    "state",
+                    "started_at",
+                    "due_at",
+                    "completed_at",
+                    "is_overdue",
+                }
+                <= set(stage),
+                stage,
+            )
+        # Law 11 owners are role labels, never a shop id or name.
+        self.assertTrue(
+            body["who_has_the_ball"] in {"buyer", "printy", "printer"},
+            body["who_has_the_ball"],
+        )
         self.assertNotIn("timeline", body)
         self.assertNotIn("timing", body)
         self.assertNotIn("assigned_shop_name", body)
         self.assertNotIn("client_name", body)
         self.assertIn("created_at", body["dates"])
         self.assertIn("due_date", body["dates"])
+        for money_key in ("client_total", "printy_fee", "manager_margin", "production_cost", "payout"):
+            self.assertNotIn(money_key, body)
         self.assertNotIn(self.shop.name, response.content.decode())
 
     # --- item 2: failed lookups are indistinguishable ------------------------

@@ -49,7 +49,12 @@ def shop_rate_card_is_usable(shop: Shop) -> bool:
         machine__is_active=True,
         is_active=True,
     ).exists()
-    return has_paper_stock and has_print_rates
+    # LAW 17: a standard turnaround is part of a complete shop.
+    return has_paper_stock and has_print_rates and _has_standard_turnaround(shop)
+
+
+def _has_standard_turnaround(shop: Shop) -> bool:
+    return bool(getattr(shop, "standard_turnaround_hours", None))
 
 
 def rate_card_missing_steps(shop: Shop) -> list[dict[str, str]]:
@@ -89,6 +94,17 @@ def rate_card_missing_steps(shop: Shop) -> list[dict[str, str]]:
                 "code": "printing_rate",
                 "title": "Set a printing rate",
                 "hint": "Set your per-sheet price so jobs can be matched to you.",
+            }
+        )
+    if not _has_standard_turnaround(shop):
+        missing.append(
+            {
+                "code": "standard_turnaround",
+                "title": "Set your standard turnaround",
+                "hint": (
+                    "Tell buyers how many business hours a standard job takes; Faster and "
+                    "Fastest are calculated from it."
+                ),
             }
         )
     return missing

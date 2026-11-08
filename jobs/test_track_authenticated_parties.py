@@ -108,7 +108,29 @@ class AuthenticatedTrackLookupTests(TestCase):
         self.assertEqual(self._get(user=outsider).status_code, 404)
         matched = self._get(user=outsider, phone=CUSTOMER_PHONE)
         self.assertEqual(matched.status_code, 200, matched.content)
-        self.assertEqual(set(matched.json()), {"code", "job_status", "raw_status", "dates"})
+        # Law 11: a non-party who proves the phone on the job gets the stage
+        # view (stages, timestamps, who has the ball), never the role timeline.
+        body = matched.json()
+        self.assertEqual(
+            set(body),
+            {
+                "code",
+                "job_status",
+                "raw_status",
+                "dates",
+                "current_stage",
+                "current_stage_label",
+                "who_has_the_ball",
+                "next_action",
+                "due_date",
+                "is_late",
+                "stages",
+            },
+        )
+        self.assertTrue(body["stages"])
+        self.assertNotIn("timeline", body)
+        self.assertNotIn("assigned_shop_name", body)
+        self.assertNotIn("client_name", body)
 
     def test_signed_out_lookup_still_requires_phone(self):
         self.assertEqual(self._get().status_code, 404)

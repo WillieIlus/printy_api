@@ -26,9 +26,17 @@ def _can_accept(quote: Quote, user) -> bool:
 
 
 @transaction.atomic
-def accept_quote_for_payment(*, quote: Quote, accepted_by, payer_phone: str = ""):
+def accept_quote_for_payment(*, quote: Quote, accepted_by, payer_phone: str = "", authorized: bool = False):
+    """Accept a quote and create its custody payment.
+
+    ``authorized=True`` is the capability path: the caller is not a signed-in
+    account but has already proved possession of the single-job client link and
+    verified the phone on it with an OTP (clients.views.ClientLinkPaymentView).
+    LAW 10 requires exactly that - a client pays a sent quote without an account -
+    so the account check is skipped only when the caller passes this flag.
+    """
     quote = Quote.objects.select_for_update().select_related("quote_request").get(pk=quote.pk)
-    if not _can_accept(quote, accepted_by):
+    if not authorized and not _can_accept(quote, accepted_by):
         raise ValidationError("You cannot accept this quote.")
     if quote.is_expired:
         raise ValidationError("This quote has expired.")

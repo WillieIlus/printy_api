@@ -220,6 +220,8 @@ def create_managed_job_from_payment(*, payment: Payment) -> ManagedJob:
             # split by ensure_job_assignment_for_paid_job/dispatch_job_to_shop.
             broker_payout=split.broker_payout,
             printy_fee=split.printy_fee,
+            # LAW 5: take the fee decision the split froze at quote time.
+            fee_waived=bool(getattr(split, "fee_waived", False)),
             operational_snapshot={
                 "source": "payment_confirmed",
                 "quote_id": quote.id,

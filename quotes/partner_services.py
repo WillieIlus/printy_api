@@ -9,6 +9,7 @@ from django.db import transaction
 from django.utils import timezone
 
 from api.visibility import TOPOLOGY_MANAGED
+from pricing.services.fee_waiver import fee_waived_for_pair, fee_waived_for_quote_request
 from pricing.services.platform_fee_policy import calculate_financial_split, create_quote_financial_split
 from pricing.services.production_cost_calculator import calculate_client_price_with_waste_setup_and_quantity_tier
 from quotes.choices import QuoteStatus, QuoteOfferStatus
@@ -74,7 +75,17 @@ def _canonical_pricing_payload(*, pricing_snapshot: dict[str, Any], shop: Shop, 
     return calculate_client_price_with_waste_setup_and_quantity_tier(spec)
 
 
-def build_partner_quote_preview(*, pricing_snapshot: dict[str, Any], shop: Shop, partner_markup: Decimal) -> dict[str, Any]:
+def _product_category_for_speed(pricing_snapshot: dict[str, Any], shop_preview: dict[str, Any]) -> str:
+    """Best-effort product category used for per-category turnaround targets."""
+    for container in (shop_preview, _as_dict(shop_preview.get("preview")), pricing_snapshot):
+        for key in ("product_category", "category", "product_type"):
+            value = container.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip().lower()
+    return ""
+
+
+def build_partner_quote_preview(*, pricing_snapshot: dict[str, Any], shop: Shop, partner_markup: Decimal, fee_waived: bool = False) -> dict[str, Any]:
     shop_preview = _extract_shop_preview(pricing_snapshot, shop)
     raw_payload = _as_dict(shop_preview.get("preview")) or shop_preview
     broker_projection = project_broker_projection(raw_payload)
@@ -97,7 +108,11 @@ def build_partner_quote_preview(*, pricing_snapshot: dict[str, Any], shop: Shop,
         suggested_max = production_estimate + max(
             partner_markup, production_estimate * Decimal("0.35")
         )
-    split = _financial_split_payload(production_base_price=production_estimate, broker_client_price=broker_client_price)
+    split = _financial_split_payload(
+        production_base_price=production_estimate,
+        broker_client_price=broker_client_price,
+        fee_waived=fee_waived,
+    )
     broker_projection.update(
         {
             "production_estimate": str(production_estimate.quantize(Decimal("0.01"))),
@@ -107,6 +122,7 @@ def build_partner_quote_preview(*, pricing_snapshot: dict[str, Any], shop: Shop,
             },
             "gross_margin": str(split["gross_margin"]),
             "printy_fee": str(split["printy_fee"]),
+            "fee_waived": bool(split["fee_waived"]),
             "broker_client_price": str(split["broker_client_price"]),
             "client_price": str(split["client_total"]),
             "broker_payout": str(split["broker_payout"]),
@@ -124,6 +140,17 @@ def build_partner_quote_preview(*, pricing_snapshot: dict[str, Any], shop: Shop,
             ),
         }
     )
+    # LAW 17/20: every preview carries the speeds this printer can actually meet,
+    # priced off the standard production total, with an estimated ready-by.
+    from services.pricing.speed_tiers import build_speed_options, buyer_speed_payload
+
+    speed_options = build_speed_options(
+        shop=shop,
+        product_category=_product_category_for_speed(pricing_snapshot, shop_preview),
+        base_production_cost=production_estimate,
+    )
+    broker_projection["speed_options"] = buyer_speed_payload(options=speed_options)["options"]
+    broker_projection["standard_turnaround_hours"] = getattr(shop, "standard_turnaround_hours", None)
     return broker_projection
 
 
@@ -133,12 +160,13 @@ def validate_partner_markup(*, pricing_snapshot: dict[str, Any], shop: Shop, par
     validate_partner_markup_amount(base_price=production_estimate, markup_amount=partner_markup)
 
 
-def _financial_split_payload(*, production_base_price: Decimal, broker_client_price: Decimal | None = None, partner_markup: Decimal | None = None) -> dict[str, Decimal]:
+def _financial_split_payload(*, production_base_price: Decimal, broker_client_price: Decimal | None = None, partner_markup: Decimal | None = None, fee_waived: bool = False) -> dict[str, Decimal]:
     if broker_client_price is None:
         broker_client_price = production_base_price + (partner_markup or Decimal("0.00"))
     split = calculate_financial_split(
         production_cost=production_base_price,
         broker_client_price=broker_client_price,
+        fee_waived=fee_waived,
     )
     return {
         **split,
@@ -196,11 +224,12 @@ def _public_response_snapshot(*, pricing_snapshot: dict[str, Any], partner_brand
     }
 
 
-def _internal_pricing_snapshot(*, split: dict[str, Decimal]) -> dict[str, str]:
+def _internal_pricing_snapshot(*, split: dict[str, Decimal]) -> dict[str, Any]:
     return {
         "production_cost": str(split["production_cost"]),
         "gross_margin": str(split["gross_margin"]),
         "printy_fee": str(split["printy_fee"]),
+        "fee_waived": bool(split["fee_waived"]),
         "printer_side_fee": str(split["printer_side_fee"]),
         "broker_margin_fee": str(split["broker_margin_fee"]),
         "broker_payout": str(split["broker_payout"]),
@@ -219,6 +248,8 @@ def _persist_quote_split(*, quote, split: dict[str, Decimal]):
         production_cost=split["production_cost"],
         broker_client_price=split["broker_client_price"],
         policy=split["policy"],
+        # The preview just showed this decision; persist exactly that one.
+        fee_waived=bool(split["fee_waived"]),
     )
 
 
@@ -304,14 +335,21 @@ def create_partner_quote(
     save_as_draft: bool = False,
 ) -> dict[str, Any]:
     validate_partner_markup(pricing_snapshot=pricing_snapshot, shop=shop, partner_markup=partner_markup)
+    # LAW 4: this manager quoting their own client waives the manager-side fee.
+    fee_waived = fee_waived_for_pair(client=client_user, manager=partner_user)
     preview = build_partner_quote_preview(
         pricing_snapshot=pricing_snapshot,
         shop=shop,
         partner_markup=partner_markup,
+        fee_waived=fee_waived,
     )
     production_base_price = _money(preview.get("production_estimate"))
     broker_client_price = _money(preview.get("broker_client_price"), default=str(production_base_price + partner_markup))
-    split = _financial_split_payload(production_base_price=production_base_price, broker_client_price=broker_client_price)
+    split = _financial_split_payload(
+        production_base_price=production_base_price,
+        broker_client_price=broker_client_price,
+        fee_waived=fee_waived,
+    )
     partner_brand_name = getattr(partner_user, "name", "") or getattr(partner_user, "email", "") or "Partner"
     if client_name or client_email or client_phone:
         get_or_create_partner_customer(
@@ -425,14 +463,22 @@ def respond_to_assigned_quote_request(
     note: str = "",
 ) -> dict[str, Any]:
     validate_partner_markup(pricing_snapshot=pricing_snapshot, shop=shop, partner_markup=partner_markup)
+    # LAW 4-5: the decision belongs to this request's manager/client pair, and the
+    # preview, the sent quote and the persisted split all use this one value.
+    fee_waived = fee_waived_for_quote_request(quote_request)
     preview = build_partner_quote_preview(
         pricing_snapshot=pricing_snapshot,
         shop=shop,
         partner_markup=partner_markup,
+        fee_waived=fee_waived,
     )
     production_base_price = _money(preview.get("production_estimate"))
     broker_client_price = _money(preview.get("broker_client_price"), default=str(production_base_price + partner_markup))
-    split = _financial_split_payload(production_base_price=production_base_price, broker_client_price=broker_client_price)
+    split = _financial_split_payload(
+        production_base_price=production_base_price,
+        broker_client_price=broker_client_price,
+        fee_waived=fee_waived,
+    )
     partner_brand_name = getattr(partner_user, "name", "") or getattr(partner_user, "email", "") or "Print Manager"
 
     request_snapshot = _as_dict(quote_request.request_snapshot)

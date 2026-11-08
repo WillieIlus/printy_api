@@ -90,6 +90,15 @@ class Shop(AutoSlugMixin, models.Model):
         verbose_name=_("turnaround statement"),
         help_text=_("Short public-facing turnaround summary shown to buyers."),
     )
+    standard_turnaround_hours = models.PositiveSmallIntegerField(
+        null=True,
+        blank=True,
+        verbose_name=_("standard turnaround (business hours)"),
+        help_text=_(
+            "The shop's estimated standard turnaround in business hours. Required before "
+            "the shop counts as complete; Faster and Fastest are derived from it."
+        ),
+    )
     opening_hours_text = models.CharField(
         max_length=255,
         blank=True,

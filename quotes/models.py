@@ -623,6 +623,13 @@ class QuoteFinancialSplit(models.Model):
     printer_side_fee = models.DecimalField(max_digits=12, decimal_places=2)
     broker_margin_fee = models.DecimalField(max_digits=12, decimal_places=2)
     printy_fee = models.DecimalField(max_digits=12, decimal_places=2)
+    fee_waived = models.BooleanField(
+        default=False,
+        help_text=(
+            "Frozen at quote time: the manager-side Printy fee is waived because the "
+            "quote's manager is the client's origin manager. Never recomputed."
+        ),
+    )
     shop_payout = models.DecimalField(max_digits=12, decimal_places=2)
     manager_payout = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal("0.00"))
     broker_payout = models.DecimalField(max_digits=12, decimal_places=2)

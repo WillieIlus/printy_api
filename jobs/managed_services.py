@@ -288,6 +288,15 @@ def create_managed_job_from_accepted_quote(
     # never a payout, but it is recorded here so the job reconciles end to end.
     broker_payout = _split_money(financials, "broker_payout", customer_pricing)
     printy_fee = _split_money(financials, "printy_fee", customer_pricing)
+    # LAW 5: the split froze the waiver decision at quote time. Copy it; never
+    # re-evaluate it here, or a later change to either party would silently
+    # re-price an existing job.
+    if financials is not None:
+        fee_waived = bool(getattr(financials, "fee_waived", False))
+    else:
+        from pricing.services.fee_waiver import fee_waived_for_quote_request
+
+        fee_waived = fee_waived_for_quote_request(quote_request)
     initial_assigned_shop = quote.shop if broker is None else None
     initial_assignment_status = "assignment_pending" if initial_assigned_shop else "unassigned"
 
@@ -315,6 +324,7 @@ def create_managed_job_from_accepted_quote(
         client_total=client_total,
         broker_payout=broker_payout,
         printy_fee=printy_fee,
+        fee_waived=fee_waived,
         operational_snapshot=_build_operational_snapshot(
             quote_request=quote_request,
             quote=quote,

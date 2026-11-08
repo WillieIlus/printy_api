@@ -61,6 +61,7 @@ DEFAULT_SHOP_DETAILS = {
     "shop_name": "",
     "whatsapp_number": "",
     "location_area": "",
+    "standard_turnaround_hours": "",
 }
 
 
@@ -858,10 +859,24 @@ def _normalize_finishing_rows(
     return normalized
 
 
+def _normalize_standard_turnaround_hours(value: Any) -> str:
+    """Turnaround arrives as an int or a string; empty means 'not set yet'."""
+    if value in (None, ""):
+        return ""
+    try:
+        hours = int(Decimal(str(value)))
+    except (InvalidOperation, TypeError, ValueError):
+        return ""
+    return str(hours) if hours > 0 else ""
+
+
 def _normalize_shop_details(details: dict[str, Any] | None) -> dict[str, str]:
     payload = deepcopy(DEFAULT_SHOP_DETAILS)
     for key in payload:
         payload[key] = _normalize_text((details or {}).get(key))
+    payload["standard_turnaround_hours"] = _normalize_standard_turnaround_hours(
+        (details or {}).get("standard_turnaround_hours")
+    )
     return payload
 
 
@@ -1798,6 +1813,7 @@ def build_shop_rate_card_setup(shop, *, activate_defaults: bool = False) -> dict
         "shop_name": getattr(shop, "name", ""),
         "whatsapp_number": getattr(shop, "public_whatsapp_number", "") or getattr(shop, "phone_number", ""),
         "location_area": getattr(shop, "service_area", "") or getattr(shop, "city", ""),
+        "standard_turnaround_hours": getattr(shop, "standard_turnaround_hours", None) or "",
     }
     saved_shop_details = stored_setup.shop_details if stored_setup and stored_setup.shop_details else {}
     shop_details = _normalize_shop_details({**default_shop_details, **saved_shop_details})
@@ -1862,6 +1878,9 @@ def save_shop_rate_card_setup(
         shop.service_area = normalized_details["location_area"]
         if not _normalize_text(getattr(shop, "city", "")):
             shop.city = normalized_details["location_area"]
+    turnaround_text = normalized_details.get("standard_turnaround_hours") or ""
+    if turnaround_text:
+        shop.standard_turnaround_hours = int(turnaround_text)
 
     if completed is not None:
         completed_value = bool(completed)
@@ -1903,7 +1922,7 @@ def save_shop_rate_card_setup(
             is_confirmed = True
 
         shop.pricing_ready = refresh_shop_pricing_ready(shop)
-        shop.save(update_fields=["name", "public_whatsapp_number", "phone_number", "service_area", "city", "pricing_ready", "public_match_ready", "is_active", "is_public", "updated_at"])
+        shop.save(update_fields=["name", "public_whatsapp_number", "phone_number", "service_area", "city", "standard_turnaround_hours", "pricing_ready", "public_match_ready", "is_active", "is_public", "updated_at"])
         setup_record, _created = ShopRateCardSetup.objects.update_or_create(
             shop=shop,
             defaults={

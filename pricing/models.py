@@ -843,11 +843,23 @@ class PublicHoliday(models.Model):
 
 
 class ShopSpeedTierOptIn(models.Model):
-    """A printer opts into each speed tier it can actually meet."""
+    """A printer opts into each speed tier it can actually meet.
+
+    ``is_active`` is the printer's switch: switching a tier off removes it from
+    every response instead of greying it out. ``target_hours`` is an optional
+    per-shop override of the turnaround hours used for that tier; when it is
+    empty the hours are derived from the shop's standard turnaround.
+    """
 
     shop = models.ForeignKey(Shop, on_delete=models.CASCADE, related_name="speed_tier_optins")
     tier = models.ForeignKey(SpeedTier, on_delete=models.CASCADE, related_name="shop_optins")
     is_active = models.BooleanField(default=True)
+    target_hours = models.PositiveSmallIntegerField(
+        null=True,
+        blank=True,
+        verbose_name=_("turnaround override (business hours)"),
+        help_text=_("Optional override of this tier's turnaround. Empty derives it from the shop's standard."),
+    )
 
     class Meta:
         ordering = ["shop", "tier__sort_order"]

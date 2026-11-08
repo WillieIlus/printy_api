@@ -20,6 +20,7 @@ from accounts.models import ClientInvite, User, UserProfile
 from accounts.services.phone import (
     normalize_phone,
     phone_is_linked_elsewhere,
+    set_origin_manager,
     set_profile_phone,
 )
 
@@ -132,8 +133,11 @@ def create_client_invite(
             phone_normalized=normalized,
             token=secrets.token_urlsafe(24),
         )
-
-    invite.created_by = created_by
+    elif invite.created_by_id is None:
+        invite.created_by = created_by
+    # LAW 3 (first touch wins): a pending invite keeps the manager who first
+    # captured this number. A second manager may refresh the details, but never
+    # becomes the client's origin manager.
     invite.name = str(name or "").strip() or invite.name
     invite.email = str(email or "").strip().lower() or None
     invite.phone = str(phone or "").strip() or invite.phone
@@ -213,6 +217,11 @@ def claim_client_invite(*, token: str, password: str, name: str = ""):
             phone_verified=True,
         )
 
+        # LAW 1-3: the manager whose invite created this account is the client's
+        # origin manager, fixed from here on. A client who already existed could
+        # never reach this branch (checked above), so nothing is ever re-originated.
+        set_origin_manager(user, invite.created_by)
+
         if invite.email:
             from allauth.account.models import EmailAddress
 
@@ -227,7 +236,9 @@ def claim_client_invite(*, token: str, password: str, name: str = ""):
         invite.claimed_at = timezone.now()
         invite.save(update_fields=["status", "client_user", "claimed_at", "updated_at"])
 
-        link_pending_quotes_for_client(user, normalized)
+        # Links the quotes for this phone and the jobs/payments already made under it;
+        # the invite is already claimed here, so only the linking branches run.
+        link_client_identity(user, normalized)
     return invite, user
 
 
@@ -265,6 +276,83 @@ def link_pending_quotes_for_client(user, phone_normalized: str) -> int:
         quote_request.on_behalf_of = user
         quote_request.save(update_fields=["on_behalf_of", "updated_at"])
         linked += 1
+    return linked
+
+
+def _link_jobs_and_payments_for_client(user, phone_normalized: str) -> int:
+    """Point the jobs and payments already made for this phone at the account.
+
+    LAW 12: quotes, jobs and payments made under the phone before the client had
+    an account belong to the same client record once they sign up. Only empty
+    links are filled - an existing payer or job client is never overwritten.
+    """
+    if not phone_normalized:
+        return 0
+    from jobs.models import ManagedJob
+    from payments.models import Payment
+    from quotes.models import QuoteRequest
+
+    requests = QuoteRequest.objects.filter(on_behalf_of=user)
+    linked = 0
+    jobs = ManagedJob.objects.filter(
+        source_quote_request__in=requests, client__isnull=True
+    )
+    for job in jobs:
+        job.client = user
+        job.save(update_fields=["client", "updated_at"])
+        linked += 1
+    payments = Payment.objects.filter(
+        quote__quote_request__in=requests, payer__isnull=True
+    ).select_related("quote")
+    for payment in payments:
+        payment.payer = user
+        payment.save(update_fields=["payer", "updated_at"])
+        linked += 1
+    return linked
+
+
+@transaction.atomic
+def link_client_identity(user, phone) -> int:
+    """LAW 12: bind a new account to the client record already held for its phone.
+
+    Called when a client signs up with the phone a manager captured. It never
+    creates a second client record: it reuses the pending invite, stamps the
+    same ``origin_manager`` the invite already carried, marks that invite claimed
+    by this account and attaches the quotes, jobs and payments already made under
+    the phone. Returns the number of quote requests linked.
+    """
+    from accounts.models import ClientInvite, User
+
+    normalized = _safe_normalize(phone)
+    if not normalized or user is None or getattr(user, "pk", None) is None:
+        return 0
+    if getattr(user, "role", "") != User.Role.CLIENT:
+        return 0
+
+    # The phone may already belong to another client account. That account is the
+    # client record; this second, unverified sign-up must not be merged into it.
+    owner = find_account_by_phone(normalized)
+    if owner is not None and owner.pk != user.pk:
+        return 0
+
+    invite = (
+        ClientInvite.objects.select_for_update()
+        .filter(phone_normalized=normalized)
+        .order_by("created_at", "id")
+        .first()
+    )
+    if invite is not None:
+        # First touch wins: the invite's creator is the origin, whether the client
+        # claimed the invitation or simply signed up with the same phone.
+        set_origin_manager(user, invite.created_by)
+        if invite.status != ClientInvite.Status.CLAIMED and invite.client_user_id is None:
+            invite.status = ClientInvite.Status.CLAIMED
+            invite.client_user = user
+            invite.claimed_at = timezone.now()
+            invite.save(update_fields=["status", "client_user", "claimed_at", "updated_at"])
+
+    linked = link_pending_quotes_for_client(user, normalized)
+    _link_jobs_and_payments_for_client(user, normalized)
     return linked
 
 

@@ -6,6 +6,7 @@ from decimal import Decimal
 
 from django.conf import settings
 from django.contrib.auth.models import AbstractUser, BaseUserManager
+from django.core.exceptions import ValidationError
 from django.db import models
 from django.db.models import Q
 from django.utils import timezone
@@ -169,9 +170,40 @@ class UserProfile(TimeStampedModel):
     country = models.CharField(max_length=100, blank=True, default="")
     postal_code = models.CharField(max_length=20, blank=True, default="")
     is_system_account = models.BooleanField(default=False)
+    # LAW: client origin. A manager who creates a client owns that relationship from
+    # then on; NULL means the client came through the marketplace (no manager).
+    origin_manager = models.ForeignKey(
+        User,
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="originated_client_profiles",
+        verbose_name="origin manager",
+        help_text=(
+            "The manager who created this client. Set once at creation and never "
+            "changed; empty means the client is marketplace-sourced."
+        ),
+    )
     broker_profile_active = models.BooleanField(
         default=True,
         help_text="Manual admin flag for whether this profile can act as an active broker/partner.",
+    )
+    # LAW 14: the homepage shows a manager only when Printy has manually verified them,
+    # they opted in with a photo, and their public profile is complete. These are the
+    # missing public-listing fields; they never affect fee decisions.
+    manager_verified = models.BooleanField(
+        default=False,
+        help_text="Manually verified by Printy staff. Required before a manager can appear on the public homepage.",
+    )
+    manager_public_opt_in = models.BooleanField(
+        default=False,
+        help_text="The manager agreed to be shown publicly. Ignored unless a photo and a speciality line are set.",
+    )
+    manager_speciality = models.CharField(
+        max_length=120,
+        blank=True,
+        default="",
+        help_text="One-line speciality shown on the public homepage, e.g. 'Same-day booklets in Nairobi CBD'.",
     )
     default_markup_rate = models.DecimalField(max_digits=5, decimal_places=4, default=Decimal("0.0000"))
 
@@ -188,6 +220,56 @@ class UserProfile(TimeStampedModel):
 
     def __str__(self):
         return f"Profile for {self.user.email or self.phone or self.user_id}"
+
+    def save(self, *args, **kwargs):
+        """Refuse any change to an already-set origin manager.
+
+        LAW 2: origin_manager is immutable after creation. That covers both
+        re-originating to another manager and clearing it back to NULL, so a job's
+        stored fee decision can never be contradicted later. Setting it the first
+        time (NULL -> manager) is the one allowed transition: that is the moment
+        the manager creates the client.
+        """
+        update_fields = kwargs.get("update_fields")
+        guards_field = update_fields is None or "origin_manager" in update_fields
+        if guards_field and self.pk and not self._state.adding:
+            stored = (
+                type(self)
+                .objects.filter(pk=self.pk)
+                .values_list("origin_manager_id", flat=True)
+                .first()
+            )
+            if stored is not None and stored != self.origin_manager_id:
+                raise ValidationError(
+                    {
+                        "origin_manager": (
+                            "A client's origin manager is set once when the client is "
+                            "created and cannot be changed or cleared."
+                        )
+                    }
+                )
+        super().save(*args, **kwargs)
+
+    @property
+    def is_public_profile(self) -> bool:
+        """LAW 14: opt-in plus a photo plus a one-line speciality make the profile public.
+
+        Derived rather than stored: a separate boolean could drift out of sync with the
+        fields it is supposed to describe, and a half-filled public profile is worse for
+        the homepage than no profile at all.
+        """
+        return bool(
+            self.manager_public_opt_in
+            and str(self.avatar or "").strip()
+            and str(self.manager_speciality or "").strip()
+        )
+
+    def is_originated_by(self, manager) -> bool:
+        """True when ``manager`` is this client's origin manager (LAW 4)."""
+        manager_id = getattr(manager, "pk", None)
+        if manager_id is None or self.origin_manager_id is None:
+            return False
+        return self.origin_manager_id == manager_id
 
 
 class ClientInvite(TimeStampedModel):
