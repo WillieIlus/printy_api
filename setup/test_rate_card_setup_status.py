@@ -40,6 +40,8 @@ class RateCardSetupStatusTests(TestCase):
             slug=slug,
             is_active=True,
             is_public=True,
+            # LAW 17: a complete shop also declares its standard turnaround.
+            standard_turnaround_hours=48 if (paper and rate) else None,
         )
         # Every shop is auto-created with a default machine (shops/signals.py),
         # so the machine step is done unless we explicitly deactivate it.

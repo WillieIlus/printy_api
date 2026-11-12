@@ -787,6 +787,21 @@ def project_public_marketplace_response(payload: dict[str, Any] | None) -> dict[
     # Production summary (safe). Law 1.3: no imposition/sheet counts to anonymous.
     production_preview = project_production_intelligence(response.get("production_preview"), role=ROLE_ANONYMOUS)
 
+    # Buyer-facing speed choices with their server-priced totals. Only the
+    # presentation fields cross the public boundary; the internal tier table and
+    # its pricing inputs stay server-side.
+    speed_options = [
+        {
+            "key": option.get("key"),
+            "label": option.get("label"),
+            "multiplier": option.get("multiplier"),
+            "total": option.get("total"),
+            "turnaround_hours": option.get("turnaround_hours"),
+        }
+        for option in _as_list(response.get("speed_options"))
+        if isinstance(option, dict)
+    ]
+
     result = {
         "mode": response.get("mode"),
         "can_calculate": response.get("can_calculate"),
@@ -810,6 +825,7 @@ def project_public_marketplace_response(payload: dict[str, Any] | None) -> dict[
         "source_label": source_label,
         "market_range": market_range,
         "currency": currency,
+        "speed_options": speed_options,
         "production_preview": production_preview,
         "production_summary": production_preview,
         "pricing_breakdown": None,

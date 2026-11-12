@@ -36,6 +36,8 @@ class ReportRateCardReadinessTests(TestCase):
             city="Nairobi",
             service_area="Westlands",
             public_whatsapp_number="+254712345678",
+            # LAW 17: completeness now includes the standard turnaround.
+            standard_turnaround_hours=48 if with_pricing else None,
         )
         if with_pricing:
             machine = Machine.objects.create(

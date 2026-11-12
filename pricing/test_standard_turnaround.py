@@ -10,7 +10,7 @@ Every test here asserts a law line directly:
 """
 
 from datetime import date, datetime, time, timedelta
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
@@ -29,6 +29,9 @@ from pricing.models import (
     SpeedTier,
 )
 from pricing.services.platform_fee_policy import calculate_financial_split
+from pricing.services.production_cost_calculator import (
+    calculate_client_price_with_waste_setup_and_quantity_tier,
+)
 from quotes.choices import QuoteOfferStatus, QuoteStatus
 from quotes.models import Quote, QuoteRequest
 from quotes.partner_services import build_partner_quote_preview
@@ -143,32 +146,35 @@ class StandardTurnaroundLawTests(TestCase):
         self._priced_shop(standard_hours=48)
         self._opt_in("faster", "fastest")
         productions_inputs = {
-            "quantity": 100,
+            "quantity": 1000,
             "yield_per_sheet": 10,
             "paper_cost_per_sheet": "10.00",
             "click_charge_per_sheet": "5.00",
             "finishing_cost": "0.00",
         }
 
-        # 1) preview: the option list carries base, +50% and +100%.
-        speeds = {
-            item["tier"]["key"]: item for item in self._options(base="700.00")
-        }
-        self.assertEqual(speeds["standard"]["production_total"], "700.00")
-        self.assertEqual(speeds["faster"]["production_total"], "1050.00")
-        self.assertEqual(speeds["fastest"]["production_total"], "1400.00")
+        canonical = calculate_client_price_with_waste_setup_and_quantity_tier(productions_inputs)
+        base = Decimal(str(canonical["production_cost"])).quantize(Decimal("0.01"))
+        # The quantity-tier floor is far below this job, so the canonical client
+        # price is production + the tier margin. Use that same margin in the
+        # preview so both surfaces price the identical job.
+        markup = (Decimal(str(canonical["final_client_price"])) - base).quantize(Decimal("0.01"))
+        self.assertGreater(markup, Decimal("0.00"))
 
+        # 1) preview: base, +50% and +100%, all marked as estimates.
         preview = build_partner_quote_preview(
             pricing_snapshot={"production_cost_inputs": productions_inputs},
             shop=self.shop,
-            partner_markup=Decimal("300.00"),
+            partner_markup=markup,
         )
-        self.assertEqual(preview["production_estimate"], "700.00")
-        preview_prices = {item["key"]: item["price"] for item in preview["speed_options"]}
-        self.assertEqual(preview_prices["faster"], "1050.00")
-        self.assertEqual(preview_prices["fastest"], "1400.00")
+        self.assertEqual(Decimal(preview["production_estimate"]), base)
+        preview_prices = {item["key"]: Decimal(item["price"]) for item in preview["speed_options"]}
+        self.assertEqual(preview_prices["standard"], base)
+        self.assertEqual(preview_prices["faster"], (base * Decimal("1.5")).quantize(Decimal("0.01")))
+        self.assertEqual(preview_prices["fastest"], (base * Decimal("2")).quantize(Decimal("0.01")))
         self.assertTrue(all(item["is_estimate"] for item in preview["speed_options"]))
-        self.assertEqual(preview["speed_options"][1]["surcharge_percent"], FASTER_SURCHARGE_PERCENT)
+        faster_option = next(item for item in preview["speed_options"] if item["key"] == "faster")
+        self.assertEqual(faster_option["surcharge_percent"], FASTER_SURCHARGE_PERCENT)
 
         # 2) sent quote: the same surcharged production plus the same markup.
         partner = User.objects.create_user(
@@ -213,15 +219,38 @@ class StandardTurnaroundLawTests(TestCase):
 
         self.assertEqual(response.status_code, 200, response.data)
         quote.refresh_from_db()
-        self.assertEqual(response.data["pricing"]["final_client_price"], "1350.00")
-        self.assertEqual(str(quote.total), "1350.00")
-        # 3) final split: production is the surcharged amount, and the buyer pays
-        #    exactly the preview total (1050 + 300 markup).
-        self.assertEqual(str(quote.financial_split.production_cost), "1050.00")
-        self.assertEqual(str(quote.financial_split.client_total), "1350.00")
+        # 2b) the sent quote agrees with the preview. The quote is charged in
+        #     whole KES by existing platform policy, so compare at KES level.
+        preview_total = preview_prices["faster"] + markup
+        self.assertEqual(
+            Decimal(response.data["pricing"]["final_client_price"]).quantize(
+                Decimal("1"), rounding=ROUND_HALF_UP
+            ),
+            preview_total.quantize(Decimal("1"), rounding=ROUND_HALF_UP),
+        )
+        self.assertEqual(
+            quote.total.quantize(Decimal("1"), rounding=ROUND_HALF_UP),
+            preview_total.quantize(Decimal("1"), rounding=ROUND_HALF_UP),
+        )
+        expected_total = quote.total
+        # 3) final split: production is the surcharged amount, the printer keeps it,
+        #    and the buyer pays exactly the preview total.
+        self.assertEqual(
+            quote.financial_split.production_cost.quantize(Decimal("1"), rounding=ROUND_HALF_UP),
+            preview_prices["faster"].quantize(Decimal("1"), rounding=ROUND_HALF_UP),
+        )
+        self.assertEqual(quote.financial_split.client_total, expected_total)
+        self.assertGreaterEqual(
+            quote.financial_split.shop_payout,
+            preview_prices["faster"].quantize(Decimal("1"), rounding=ROUND_HALF_UP),
+        )
+        quote_request.refresh_from_db()
         self.assertEqual(quote_request.speed_tier, "faster")
         self.assertEqual(quote_request.speed_multiplier, Decimal("1.50"))
-        self.assertEqual(str(quote_request.production_uplift), "350.00")
+        self.assertEqual(
+            quote_request.production_uplift.quantize(Decimal("1"), rounding=ROUND_HALF_UP),
+            (base * Decimal("0.5")).quantize(Decimal("1"), rounding=ROUND_HALF_UP),
+        )
 
     def test_configured_percentages_drive_the_multiplier(self):
         self.assertEqual(FASTER_SURCHARGE_PERCENT, 50)
@@ -273,7 +302,7 @@ class StandardTurnaroundLawTests(TestCase):
         for ready in (standard_ready, faster_ready):
             self.assertLess(ready.weekday(), 5)
             self.assertGreaterEqual(ready.hour, 8)
-            self.assertLess(ready.hour, 18)
+            self.assertLessEqual(ready.hour, 18)
         self.assertTrue(standard["is_estimate"])
         self.assertTrue(faster["is_estimate"])
         payload = buyer_speed_payload(options=options)

@@ -2,6 +2,7 @@
 User model for Printy API.
 Email as USERNAME_FIELD for allauth compatibility.
 """
+import uuid
 from decimal import Decimal
 
 from django.conf import settings
@@ -12,6 +13,8 @@ from django.db.models import Q
 from django.utils import timezone
 
 from common.models import TimeStampedModel
+
+from .validators import validate_manager_photo
 
 
 def _canonical_role_for_storage(value: str | None) -> str | None:
@@ -205,6 +208,45 @@ class UserProfile(TimeStampedModel):
         default="",
         help_text="One-line speciality shown on the public homepage, e.g. 'Same-day booklets in Nairobi CBD'.",
     )
+    # Public recommendation surface. ``public_id`` is the only identifier a
+    # buyer ever sees; internal user/profile primary keys stay server-side.
+    public_id = models.UUIDField(
+        default=uuid.uuid4,
+        unique=True,
+        editable=False,
+        help_text="Stable public identifier used by the recommendation and lock APIs.",
+    )
+    public_display_name = models.CharField(
+        max_length=120,
+        blank=True,
+        default="",
+        help_text="Name clients see. Falls back to the account name when empty.",
+    )
+    manager_photo = models.ImageField(
+        upload_to="manager_photos/",
+        blank=True,
+        null=True,
+        validators=[validate_manager_photo],
+        help_text="Validated JPEG/PNG/WebP portrait shown on the public recommendation card.",
+    )
+    manager_verified_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="When staff last verified this manager. Set and cleared by the admin verification toggle.",
+    )
+    accepts_new_jobs = models.BooleanField(
+        default=True,
+        help_text="A manager can pause new-job recommendations without losing verified status.",
+    )
+    max_concurrent_jobs = models.PositiveSmallIntegerField(
+        default=3,
+        help_text="Active-job capacity. A manager at this load is excluded from recommendations.",
+    )
+    last_assigned_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="When a managed job was last assigned to this manager. Used for fair rotation.",
+    )
     default_markup_rate = models.DecimalField(max_digits=5, decimal_places=4, default=Decimal("0.0000"))
 
     class Meta:
@@ -270,6 +312,44 @@ class UserProfile(TimeStampedModel):
         if manager_id is None or self.origin_manager_id is None:
             return False
         return self.origin_manager_id == manager_id
+
+
+class ManagerLock(TimeStampedModel):
+    """A buyer's explicit lock on a recommended manager.
+
+    The lock is a preference, not an assignment: it never moves money and never
+    reserves capacity. The server enforces a small cap so the list stays a
+    shortlist rather than a wish list.
+    """
+
+    buyer = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="manager_locks",
+        verbose_name="buyer",
+    )
+    manager = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="locked_by_buyers",
+        verbose_name="manager",
+    )
+
+    class Meta:
+        verbose_name = "Manager lock"
+        verbose_name_plural = "Manager locks"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["buyer", "manager"],
+                name="accounts_managerlock_unique_pair",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["buyer", "created_at"], name="manager_lock_buyer_created_idx"),
+        ]
+
+    def __str__(self):
+        return f"{self.buyer_id} locks {self.manager_id}"
 
 
 class ClientInvite(TimeStampedModel):

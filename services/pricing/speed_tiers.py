@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import statistics
 from datetime import date, datetime, time, timedelta
+from zoneinfo import ZoneInfo
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Any
 
@@ -22,7 +23,7 @@ from django.utils import timezone
 
 from jobs.completion_actuals import COMPLETION_ACTUALS_EVENT
 from jobs.models import JobEvent
-from jobs.timing import add_working_hours
+from jobs.timing import add_working_hours, is_working_day
 from pricing.models import (
     EstimatePolicy,
     PublicHoliday,
@@ -194,6 +195,21 @@ def _ready_at(*, shop, start: datetime, target_hours: int) -> datetime:
     return add_working_hours(start, target_hours, **shop_business_hours(shop))
 
 
+def _within_shop_business_hours(shop, moment: datetime) -> bool:
+    """True when ``moment`` is inside the shop's open working time.
+
+    Law 20 computes every ready-by inside business hours, so a ready time that
+    falls inside the shop's own hours can never be an odd-hours promise. The
+    window rules stay available for shops that trade later than a window starts.
+    """
+    hours = shop_business_hours(shop)
+    local = moment.astimezone(ZoneInfo(hours["timezone_name"]))
+    if not is_working_day(local.date()):
+        return False
+    clock = local.timetz().replace(tzinfo=None)
+    return hours["day_start"] <= clock <= hours["day_end"]
+
+
 def estimate_for_spec(
     *,
     product_category: str | None,
@@ -282,8 +298,12 @@ def build_speed_options(
         if not target:
             continue
         ready_at = _ready_at(shop=shop, start=start, target_hours=target)
-        matching = matching_windows(moment=ready_at)
-        window = applicable_window(moment=ready_at, shop=shop)
+        if _within_shop_business_hours(shop, ready_at):
+            matching: list[TimeWindowRule] = []
+            window = None
+        else:
+            matching = matching_windows(moment=ready_at)
+            window = applicable_window(moment=ready_at, shop=shop)
         if matching and window is None:
             # The ready time lands in odd hours this printer has not accepted,
             # so the tier cannot actually be met and is not offered.

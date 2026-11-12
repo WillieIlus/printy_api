@@ -241,6 +241,15 @@ def create_managed_job_from_payment(*, payment: Payment) -> ManagedJob:
         from jobs.timing_services import sync_job_timing
 
         sync_job_timing(managed_job, due=quote_request.due_date)
+        if managed_job.broker_id:
+            # Fair-rotation stamp for the public recommendation surface. The
+            # recommendation service also falls back to job timestamps, so a
+            # missing stamp can never hide a manager.
+            from accounts.models import UserProfile
+
+            UserProfile.objects.filter(user_id=managed_job.broker_id).update(
+                last_assigned_at=timezone.now()
+            )
         import_legacy_files_to_managed_job(
             managed_job=managed_job,
             quote_request=quote_request,

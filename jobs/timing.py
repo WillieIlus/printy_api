@@ -356,14 +356,19 @@ def attribute_delay(*, managed_job: "ManagedJob", stage_key: str | None = None) 
 
 
 # --- reliability (law 6.7) -------------------------------------------------
-def on_time_rate(*, completed_jobs: Iterable["ManagedJob"]) -> float | None:
-    """On-time % for a completed-job set, or None below MIN_JOBS_FOR_PUBLIC_SCORE.
+def on_time_rate(
+    *, completed_jobs: Iterable["ManagedJob"], minimum: int | None = None
+) -> float | None:
+    """On-time % for a completed-job set, or None below the public threshold.
 
     A score is only ever a real computed number. Below the threshold the caller
-    must show nothing (never a dash or a sample figure).
+    must show nothing (never a dash or a sample figure). Callers that need a
+    different public threshold (the recommendation surface does) pass
+    ``minimum``; the default stays the platform score threshold.
     """
+    threshold = MIN_JOBS_FOR_PUBLIC_SCORE if minimum is None else int(minimum)
     jobs = [job for job in completed_jobs if getattr(job, "due_date", None) is not None]
-    if len(jobs) < MIN_JOBS_FOR_PUBLIC_SCORE:
+    if len(jobs) < threshold:
         return None
     on_time = sum(1 for job in jobs if not getattr(job, "is_late", False))
     return round(on_time / len(jobs) * 100, 1)

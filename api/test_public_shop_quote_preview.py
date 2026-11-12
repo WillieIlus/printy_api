@@ -11,6 +11,7 @@ from pricing.services.platform_fee_policy import calculate_financial_split
 from quotes.choices import CalculatorDraftContext, CalculatorDraftIntent
 from quotes.models import CalculatorDraft
 from services.production_matching import price_single_shop_for_submission
+from services.pricing.calculator_preview import build_public_calculator_preview
 from shops.models import Shop
 
 
@@ -327,3 +328,166 @@ class PublicCalculatorMarketRangeTestCase(TestCase):
             self.assertNotIn(shop.owner.email, payload_text)
         forbidden_keys = {"shop_id", "shop_name", "shop_slug", "production_cost", "shop_payout", "printy_fee"}
         self.assertTrue(forbidden_keys.isdisjoint(set(self._walk_keys(payload))))
+
+    def _set_up_market_range(self, prefix):
+        PlatformFeePolicy.objects.update(is_active=False)
+        PlatformFeePolicy.objects.create(
+            name=f"Market range verification policy {prefix}",
+            is_active=True,
+            printer_fee_rate=Decimal("0.05"),
+            broker_margin_fee_rate=Decimal("0.15"),
+            add_platform_fee_on_top=False,
+        )
+        return [
+            self._create_shop_with_sheet_total(f"{prefix}-{index}", per_sheet_total)
+            for index, per_sheet_total in enumerate(["274.29", "308.57", "365.71"], start=1)
+        ]
+
+    def _market_range_payload(self):
+        return {
+            "product_type": "business_card",
+            "quantity": 100,
+            "finished_size": "90x55mm",
+            "requested_paper_category": "gloss",
+            "requested_gsm": 300,
+            "print_sides": "SIMPLEX",
+            "color_mode": "COLOR",
+        }
+
+    def test_public_calculator_prices_design_speed_tiers(self):
+        self._set_up_market_range("design-speed")
+        payload = self._market_range_payload()
+        # Median shop client total is 4320.00. Design speed tiers reuse the
+        # backend speed ramp: standard x1, faster +50%, fastest +100%.
+        expected_medians = {
+            "standard": "4320.00",
+            "faster": "6480.00",
+            "fastest": "8640.00",
+        }
+
+        for tier, expected_median in expected_medians.items():
+            response = APIClient().post(
+                "/api/calculator/public-preview/",
+                {**payload, "speed_tier": tier},
+                format="json",
+            )
+            self.assertEqual(response.status_code, 200)
+            result = response.json()
+            self.assertEqual(result["estimate_median"], expected_median, tier)
+            self.assertEqual(result["market_range"]["median"], expected_median, tier)
+            self.assertEqual(result["total"], expected_median, tier)
+
+        faster = APIClient().post(
+            "/api/calculator/public-preview/",
+            {**payload, "speed_tier": "faster"},
+            format="json",
+        ).json()
+        self.assertEqual(faster["market_range"]["min"], "5760.00")
+        self.assertEqual(faster["market_range"]["max"], "7680.00")
+
+        get_response = APIClient().get(
+            "/api/calculator/public-preview/",
+            {**payload, "speed_tier": "faster"},
+        )
+        self.assertEqual(get_response.status_code, 200)
+        self.assertEqual(get_response.json()["estimate_median"], "6480.00")
+
+    def test_public_calculator_urgency_ramp_survives_without_speed_tier_and_yields_to_it(self):
+        self._set_up_market_range("design-speed-urgency")
+        payload = self._market_range_payload()
+
+        urgency = APIClient().post(
+            "/api/calculator/public-preview/",
+            {**payload, "urgency_type": "express"},
+            format="json",
+        )
+        self.assertEqual(urgency.status_code, 200)
+        # Existing buyer contract: express is x1.20 on the 4320.00 median.
+        self.assertEqual(urgency.json()["estimate_median"], "5184.00")
+
+        design_override = APIClient().post(
+            "/api/calculator/public-preview/",
+            {**payload, "speed_tier": "faster", "urgency_type": "express"},
+            format="json",
+        )
+        self.assertEqual(design_override.status_code, 200)
+        # A design speed tier is the buyer's chosen price ramp; it wins over the
+        # urgency fallback instead of stacking on top of it.
+        self.assertEqual(design_override.json()["estimate_median"], "6480.00")
+
+        rejected = APIClient().post(
+            "/api/calculator/public-preview/",
+            {**payload, "speed_tier": "overnight"},
+            format="json",
+        )
+        self.assertEqual(rejected.status_code, 400)
+        self.assertIn("speed_tier", rejected.json()["field_errors"])
+
+    def test_public_calculator_design_speed_tiers_carry_labels_and_derived_ready_hours(self):
+        self._set_up_market_range("design-speed-hours")
+        result = build_public_calculator_preview(
+            {
+                **self._market_range_payload(),
+                "speed_tier": "faster",
+                "turnaround_hours": 8,
+            }
+        )
+
+        tiers = result["turnaround_tiers"]
+        self.assertEqual(list(tiers), ["standard", "faster", "fastest"])
+        self.assertEqual(tiers["standard"]["label"], "Standard")
+        self.assertEqual(tiers["faster"]["label"], "Faster +50%")
+        self.assertEqual(tiers["fastest"]["label"], "Fastest +100%")
+        self.assertEqual(tiers["standard"]["total"], "4320.00")
+        self.assertEqual(tiers["faster"]["total"], "6480.00")
+        self.assertEqual(tiers["fastest"]["total"], "8640.00")
+        self.assertEqual(tiers["standard"]["turnaround_hours"], 8)
+        self.assertEqual(tiers["faster"]["turnaround_hours"], 4)
+        self.assertEqual(tiers["fastest"]["turnaround_hours"], 2)
+        self.assertEqual(result["public_pricing"]["selected_turnaround"], "faster")
+        self.assertEqual(result["estimate_median"], "6480.00")
+
+    def test_public_calculator_exposes_all_three_server_priced_speed_options(self):
+        self._set_up_market_range("design-speed-options")
+        payload = self._market_range_payload()
+
+        # The buyer sees the three design speed choices priced even before they
+        # pick one: the options are always built from the same standard total.
+        response = APIClient().post("/api/calculator/public-preview/", payload, format="json")
+        self.assertEqual(response.status_code, 200)
+        options = response.json()["speed_options"]
+        self.assertEqual([option["key"] for option in options], ["standard", "faster", "fastest"])
+        self.assertEqual(
+            [option["label"] for option in options],
+            ["Standard", "Faster +50%", "Fastest +100%"],
+        )
+        self.assertEqual([option["total"] for option in options], ["4320.00", "6480.00", "8640.00"])
+        self.assertEqual([option["multiplier"] for option in options], ["1.00", "1.50", "2.00"])
+        self.assertEqual([option["turnaround_hours"] for option in options], [None, None, None])
+
+        faster = APIClient().post(
+            "/api/calculator/public-preview/",
+            {**payload, "speed_tier": "faster", "turnaround_hours": 8},
+            format="json",
+        ).json()
+        self.assertEqual(
+            [option["total"] for option in faster["speed_options"]],
+            ["4320.00", "6480.00", "8640.00"],
+        )
+        self.assertEqual([option["turnaround_hours"] for option in faster["speed_options"]], [8, 4, 2])
+
+        # The marketing speed strip prices the calculator's default spec, which
+        # requests no specific paper — shops use their default stock.
+        default_spec = APIClient().post(
+            "/api/calculator/public-preview/",
+            {
+                "product_type": "business_card",
+                "quantity": 100,
+                "finished_size": "90x55mm",
+                "print_sides": "DUPLEX",
+                "color_mode": "COLOR",
+            },
+            format="json",
+        )
+        self.assertEqual(default_spec.status_code, 200)
+        self.assertEqual(len(default_spec.json()["speed_options"]), 3)

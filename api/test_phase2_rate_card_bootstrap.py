@@ -48,6 +48,8 @@ class RateCardBootstrapAPITestCase(TestCase):
                 "shop_name": "Bootstrap Print Shop",
                 "whatsapp_number": "+254700000000",
                 "location_area": "Nairobi",
+                # LAW 17: a shop is incomplete without a standard turnaround.
+                "standard_turnaround_hours": 48,
             },
         }
 

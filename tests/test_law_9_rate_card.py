@@ -157,6 +157,8 @@ class Law9EngineConsistencyTests(TestCase):
         self.shop = Shop.objects.create(
             owner=self.owner, name="Law9 Press", slug="law9-press",
             is_active=True, is_public=True, city="Nairobi", service_area="Westlands",
+            # LAW 17: confirmation requires a declared standard turnaround.
+            standard_turnaround_hours=48,
         )
         self.machine = Machine.objects.create(
             shop=self.shop, name="Law9 Machine", max_width_mm=320, max_height_mm=450, is_active=True
@@ -392,6 +394,8 @@ class Law9ConfirmationGateTests(TestCase):
         self.shop = Shop.objects.create(
             owner=self.owner, name="Law95 Press", slug="law95-press",
             is_active=True, is_public=True, city="Nairobi", service_area="Westlands",
+            # LAW 17: confirmation requires a declared standard turnaround.
+            standard_turnaround_hours=48,
         )
         self.machine = Machine.objects.create(
             shop=self.shop, name="Law95 Machine", max_width_mm=320, max_height_mm=450, is_active=True

@@ -48,6 +48,8 @@ class PricingSetupMigrationTests(TestCase):
             slug="canonical-pricing-shop",
             is_active=True,
             is_public=True,
+            # LAW 17: the standard turnaround is part of a complete shop.
+            standard_turnaround_hours=48,
         )
 
     def _create_canonical_rate_card(self, shop=None, *, base_price="35.00"):

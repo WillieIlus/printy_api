@@ -7,6 +7,7 @@ import uuid
 
 from django.shortcuts import get_object_or_404
 from django.http import HttpResponse
+from django.core.exceptions import ValidationError
 from django.core.files.storage import default_storage
 from django.db.models import Q
 
@@ -25,6 +26,7 @@ from accounts.models import User, UserProfile
 from accounts.serializers import UserSerializer
 from accounts.services.roles import CANONICAL_PARTNER_ROLE, resolve_user_roles
 from accounts.services.roles import promote_to_shop_owner
+from accounts.validators import validate_manager_photo
 from catalog.models import Product
 from inventory.models import Machine, Paper
 from pricing.models import FinishingRate, PrintingRate, VolumeDiscount
@@ -476,20 +478,38 @@ class ProfileMeView(APIView):
 
 
 class ProfileAvatarUploadView(APIView):
-    """POST /api/profiles/me/avatar/ - upload the signed-in user's avatar image."""
+    """POST /api/profiles/me/avatar/ - upload the signed-in user's profile image.
+
+    Accepts ``avatar`` for the legacy dashboard avatar and ``manager_photo``
+    for the validated public manager portrait. A manager photo goes through the
+    same JPEG/PNG/WebP, size and minimum-dimension validator as the staff admin.
+    """
 
     permission_classes = [IsAuthenticated]
     parser_classes = [MultiPartParser, FormParser]
 
     def post(self, request):
         profile, _ = UserProfile.objects.get_or_create(user=request.user)
-        uploaded_file = request.FILES.get("avatar")
+        manager_photo = request.FILES.get("manager_photo")
+        uploaded_file = manager_photo or request.FILES.get("avatar")
 
         if not uploaded_file:
             return Response(
                 {"avatar": ["Choose an image to upload."]},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+
+        if manager_photo is not None:
+            try:
+                validate_manager_photo(manager_photo)
+            except ValidationError as exc:
+                return Response(
+                    {"manager_photo": list(exc.messages)},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            profile.manager_photo = manager_photo
+            profile.save(update_fields=["manager_photo", "updated_at"])
+            return Response(ProfileSerializer(profile).data, status=status.HTTP_200_OK)
 
         content_type = getattr(uploaded_file, "content_type", "") or ""
         if content_type and not content_type.startswith("image/"):

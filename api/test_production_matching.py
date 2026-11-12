@@ -77,6 +77,8 @@ class ProductionMatchingPhaseD1TestCase(TestCase):
             is_active=True,
             city="Nairobi",
             service_area="Westlands",
+            # LAW 17: the standard turnaround is part of a complete shop.
+            standard_turnaround_hours=48,
         )
         machine = Machine.objects.create(
             shop=shop,
@@ -273,6 +275,8 @@ class ProductionMatchingPhaseD1TestCase(TestCase):
             is_active=True,
             city="Nairobi",
             service_area="Westlands",
+            # LAW 17: the standard turnaround is part of a complete shop.
+            standard_turnaround_hours=48,
         )
         machine = Machine.objects.create(
             shop=shop,

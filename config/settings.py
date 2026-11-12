@@ -171,6 +171,9 @@ REST_FRAMEWORK = {
         "client_link_view": "60/hour",
         "client_otp_request": "5/hour",
         "client_otp_verify": "20/hour",
+        # Public recommendation preview: payload-keyed and cheap, but still
+        # capped so it cannot be used to scrape the manager roster.
+        "recommended_managers": "120/hour",
     },
 }
 
@@ -551,6 +554,24 @@ MIN_SHOPS_FOR_PUBLIC_RANGE = int(
 PRODUCTION_ANALYTICS_MIN_SAMPLE = int(_get_env("PRODUCTION_ANALYTICS_MIN_SAMPLE", default="5"))
 PARTNER_MARKUP_WARNING = Decimal(str(_get_env("PARTNER_MARKUP_WARNING", default="1.00")))
 PRINTY_MANAGER_USER_ID = _get_env_int("PRINTY_MANAGER_USER_ID")
+# Public recommendation surface. On-time scores stay hidden until this many
+# completed jobs exist, so a new manager never inherits a misleading figure.
+PRINTY_MANAGER_ON_TIME_MIN_JOBS = int(
+    _get_env("PRINTY_MANAGER_ON_TIME_MIN_JOBS", default="10")
+)
+# Upload limits for the manager portrait. Enforced by accounts.validators on
+# both the staff admin form and the manager's own profile upload.
+PRINTY_MANAGER_PHOTO_MAX_BYTES = int(
+    _get_env("PRINTY_MANAGER_PHOTO_MAX_BYTES", default=str(5 * 1024 * 1024))
+)
+PRINTY_MANAGER_PHOTO_MIN_DIMENSION = int(
+    _get_env("PRINTY_MANAGER_PHOTO_MIN_DIMENSION", default="400")
+)
+# The public recommendation response is anonymous and payload-keyed; a short
+# cache keeps the homepage snappy without hiding a manager who just went free.
+PRINTY_RECOMMENDED_MANAGERS_CACHE_SECONDS = int(
+    _get_env("PRINTY_RECOMMENDED_MANAGERS_CACHE_SECONDS", default="20")
+)
 
 if MPESA_ENV == "production":
     parsed_callback = MPESA_CALLBACK_URL.lower()

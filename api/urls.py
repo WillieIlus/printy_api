@@ -4,7 +4,7 @@ API URL configuration with DRF routers.
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 
-from . import account_admin_views, dashboard_views, payment_views, pricing_views, public_matching_views, quote_views, speed_views, views, workflow_views
+from . import account_admin_views, dashboard_views, manager_views, payment_views, pricing_views, public_matching_views, quote_views, speed_views, views, workflow_views
 from .workflow_views import GuestQuoteRequestView
 from .seo_views import (
     SEOProductDetailView,
@@ -102,6 +102,9 @@ urlpatterns = [
     path("calculator/public-preview/", workflow_views.CalculatorConfigPreviewView.as_view(), name="calculator-public-preview"),
     path("public/print-managers/recommended/", workflow_views.PublicRecommendedPrintManagerListView.as_view(), name="public-print-managers-recommended"),
     path("public/print-managers/featured/", workflow_views.PublicFeaturedManagersView.as_view(), name="public-print-managers-featured"),
+    path("public/recommended-managers/", manager_views.PublicRecommendedManagersView.as_view(), name="public-recommended-managers"),
+    path("buyer/locked-managers/", manager_views.BuyerLockedManagerListView.as_view(), name="buyer-locked-managers"),
+    path("buyer/locked-managers/<uuid:public_id>/", manager_views.BuyerLockedManagerDetailView.as_view(), name="buyer-locked-manager-detail"),
     path("public/price-range/", PublicPriceRangeView.as_view(), name="public-price-range"),
     path("intake/recommended-managers/", workflow_views.RecommendedPrintManagerListView.as_view(), name="intake-recommended-managers"),
     path("intake/submit/", workflow_views.IntakeSubmitView.as_view(), name="intake-submit"),

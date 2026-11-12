@@ -40,6 +40,24 @@ TURNAROUND_FACTOR_BY_TIER: dict[str, Decimal] = {
     FASTEST_TIER: FASTEST_TURNAROUND_FACTOR,
 }
 
+#: Buyer-facing design speed tiers (design adoption): Standard, Faster (+50%) and
+#: Fastest (+100%). Same keys as the paid speed tiers, same ramp, different buyer
+#: vocabulary — the design calculator surfaces these labels directly.
+DESIGN_SPEED_TIER_LABELS: dict[str, str] = {
+    STANDARD_TIER: "Standard",
+    FASTER_TIER: "Faster +50%",
+    FASTEST_TIER: "Fastest +100%",
+}
+
+#: Design speed tier keys the buyer may choose from (design adoption).
+DESIGN_SPEED_TIER_KEYS: tuple[str, ...] = (STANDARD_TIER, FASTER_TIER, FASTEST_TIER)
+
+#: Optional platform baseline (working hours) used to derive design speed
+#: ready-by times when the buyer payload carries no turnaround target. Zero
+#: disables the claim: the price tier still applies, but no ready-by figure is
+#: invented.
+DESIGN_STANDARD_TURNAROUND_HOURS = int(getattr(settings, "PRINTY_DESIGN_STANDARD_TURNAROUND_HOURS", 0))
+
 
 def multiplier_for_tier(tier_key: str) -> Decimal:
     """The price multiplier implied by the configured surcharge percentage."""
@@ -73,6 +91,9 @@ __all__ = [
     "MIN_TURNAROUND_HOURS",
     "SURCHARGE_PERCENT_BY_TIER",
     "TURNAROUND_FACTOR_BY_TIER",
+    "DESIGN_SPEED_TIER_LABELS",
+    "DESIGN_SPEED_TIER_KEYS",
+    "DESIGN_STANDARD_TURNAROUND_HOURS",
     "multiplier_for_tier",
     "surcharge_percent_for_tier",
     "derived_turnaround_hours",

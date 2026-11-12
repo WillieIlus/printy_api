@@ -44,6 +44,8 @@ class ExplicitRateCardConfirmationTests(TestCase):
             is_public=True,
             city="Nairobi",
             service_area="Westlands",
+            # LAW 17: a priced shop is still incomplete without a standard turnaround.
+            standard_turnaround_hours=48 if with_pricing else None,
         )
         if with_pricing:
             machine = Machine.objects.create(

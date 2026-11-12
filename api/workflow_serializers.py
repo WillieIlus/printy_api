@@ -291,6 +291,12 @@ class CalculatorConfigPreviewSerializer(serializers.Serializer):
         required=False,
         default="standard",
     )
+    speed_tier = serializers.ChoiceField(
+        choices=["standard", "faster", "fastest"],
+        required=False,
+        allow_null=True,
+        help_text="Design buyer speed tier: standard (x1), faster (+50%), fastest (+100%). Omit to use urgency_type.",
+    )
     requested_deadline = serializers.DateTimeField(required=False, allow_null=True)
     requested_delivery_time = serializers.DateTimeField(required=False, allow_null=True)
 

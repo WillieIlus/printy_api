@@ -2,6 +2,7 @@ from django.contrib import admin
 from django.contrib.auth.admin import UserAdmin
 from django.contrib.auth.models import Group
 from django.contrib.sites.models import Site
+from django.utils import timezone
 
 try:
     from allauth.account.models import EmailAddress
@@ -14,7 +15,7 @@ try:
 except Exception:
     BlacklistedToken = OutstandingToken = None
 
-from .models import User, UserProfile
+from .models import ManagerLock, User, UserProfile
 
 
 for model in [
@@ -89,11 +90,15 @@ class UserAdmin(UserAdmin):
 class UserProfileAdmin(admin.ModelAdmin):
     list_display = [
         "user",
+        "public_display_name",
         "phone",
         "city",
         "country",
         "broker_profile_active",
         "manager_verified",
+        "manager_verified_at",
+        "accepts_new_jobs",
+        "max_concurrent_jobs",
         "manager_public_opt_in",
         "manager_speciality",
         "is_system_account",
@@ -103,15 +108,26 @@ class UserProfileAdmin(admin.ModelAdmin):
     list_filter = [
         "broker_profile_active",
         "manager_verified",
+        "accepts_new_jobs",
         "manager_public_opt_in",
         "is_system_account",
         "country",
     ]
-    search_fields = ["user__email", "user__name", "phone", "city", "country"]
+    search_fields = ["user__email", "user__name", "public_display_name", "phone", "city", "country"]
     # LAW 2: a client's origin manager is set once when the client is created and
-    # is never editable afterwards, so the admin shows it read-only.
-    readonly_fields = ["origin_manager"]
+    # is never editable afterwards, so the admin shows it read-only. The public
+    # id, verification timestamp and rotation stamp are derived/staff-only.
+    readonly_fields = ["origin_manager", "public_id", "manager_verified_at", "last_assigned_at"]
     actions = ["activate_broker_profiles", "deactivate_broker_profiles"]
+
+    def save_model(self, request, obj, form, change):
+        """Keep the verification timestamp in step with the staff toggle."""
+        if obj.manager_verified:
+            if obj.manager_verified_at is None:
+                obj.manager_verified_at = timezone.now()
+        else:
+            obj.manager_verified_at = None
+        super().save_model(request, obj, form, change)
 
     @admin.action(description="Activate selected broker/partner profiles")
     def activate_broker_profiles(self, request, queryset):
@@ -120,3 +136,12 @@ class UserProfileAdmin(admin.ModelAdmin):
     @admin.action(description="Deactivate selected broker/partner profiles")
     def deactivate_broker_profiles(self, request, queryset):
         queryset.update(broker_profile_active=False)
+
+
+@admin.register(ManagerLock)
+class ManagerLockAdmin(admin.ModelAdmin):
+    list_display = ["buyer", "manager", "created_at"]
+    list_filter = ["created_at"]
+    search_fields = ["buyer__email", "buyer__name", "manager__email", "manager__name"]
+    autocomplete_fields = ["buyer", "manager"]
+    readonly_fields = ["created_at", "updated_at"]

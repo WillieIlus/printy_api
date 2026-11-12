@@ -12,6 +12,7 @@ logger = logging.getLogger(__name__)
 
 from api.spec_choice_fields import ColorModeField, PrintSidesField
 from accounts.models import User, UserProfile
+from accounts.validators import validate_manager_photo
 from catalog.choices import PricingMode, ProductStatus
 from catalog.models import Product, ProductCategory, ProductFinishingOption, ProductImage
 from inventory.models import Machine, Paper
@@ -1828,14 +1829,25 @@ class ProfileSerializer(serializers.ModelSerializer):
     """Persisted dashboard profile representation."""
 
     user = serializers.IntegerField(source="user_id", read_only=True)
+    manager_photo = serializers.ImageField(
+        required=False,
+        allow_null=True,
+        validators=[validate_manager_photo],
+    )
 
     class Meta:
         model = UserProfile
         fields = [
             "id",
             "user",
+            "public_id",
             "bio",
             "avatar",
+            "manager_photo",
+            "public_display_name",
+            "manager_public_opt_in",
+            "manager_speciality",
+            "accepts_new_jobs",
             "phone",
             "address",
             "city",
@@ -1845,11 +1857,13 @@ class ProfileSerializer(serializers.ModelSerializer):
             "created_at",
             "updated_at",
         ]
-        read_only_fields = ["id", "user", "created_at", "updated_at"]
+        read_only_fields = ["id", "user", "public_id", "created_at", "updated_at"]
 
     def update(self, instance, validated_data):
         for attr, value in validated_data.items():
-            setattr(instance, attr, value or "")
+            if isinstance(value, str):
+                value = value or ""
+            setattr(instance, attr, value)
         instance.save()
 
         return instance

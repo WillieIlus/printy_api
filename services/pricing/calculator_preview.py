@@ -11,6 +11,13 @@ from services.public_matching import get_booklet_marketplace_matches, get_market
 
 from .calculator_config import get_product_definition, resolve_request_finished_size, resolve_stock_option
 from .finishing_normalization import is_empty_finishing, normalize_finishing_slug
+from .speed_config import (
+    DESIGN_SPEED_TIER_KEYS,
+    DESIGN_SPEED_TIER_LABELS,
+    DESIGN_STANDARD_TURNAROUND_HOURS,
+    derived_turnaround_hours,
+    multiplier_for_tier,
+)
 from .urgency import apply_priority_pricing
 
 MONEY_QUANTIZER = Decimal("0.01")
@@ -371,6 +378,49 @@ def _format_display_price_text(*, minimum: Decimal, maximum: Decimal, currency: 
     return f"From {minimum_text} to {maximum_text}"
 
 
+def _design_standard_turnaround_hours(payload: dict[str, Any]) -> int | None:
+    """Baseline working hours for design speed ready-by derivation.
+
+    Prefer the buyer's submitted turnaround target; otherwise fall back to the
+    platform baseline setting. When neither exists, no ready-by figure is
+    invented — the price tiers still apply.
+    """
+    try:
+        requested = int(payload.get("turnaround_hours") or 0)
+    except (TypeError, ValueError):
+        requested = 0
+    if requested > 0:
+        return requested
+    baseline = int(DESIGN_STANDARD_TURNAROUND_HOURS or 0)
+    return baseline if baseline > 0 else None
+
+
+def _design_speed_options(payload: dict[str, Any], standard_total: Decimal) -> list[dict[str, Any]]:
+    """Server-priced buyer speed choices (design adoption).
+
+    Every public preview carries all three design tiers priced off the same
+    standard total, so the buyer can compare Standard / Faster / Fastest side by
+    side even when they have not chosen one yet. The multiplier and the derived
+    ready-by hours come from the backend speed config; the browser never prices.
+    """
+    standard_hours = _design_standard_turnaround_hours(payload)
+    options: list[dict[str, Any]] = []
+    for key in DESIGN_SPEED_TIER_KEYS:
+        multiplier = multiplier_for_tier(key)
+        options.append(
+            {
+                "key": key,
+                "label": DESIGN_SPEED_TIER_LABELS[key],
+                "multiplier": str(multiplier),
+                "total": _stringify_money(
+                    (standard_total * multiplier).quantize(MONEY_QUANTIZER, rounding=ROUND_HALF_UP)
+                ),
+                "turnaround_hours": derived_turnaround_hours(key, standard_hours),
+            }
+        )
+    return options
+
+
 def _attach_public_estimate(response: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
     updated = deepcopy(response)
     median_production_cost = compute_eligible_shop_median(_as_list(updated.get("matches")))
@@ -384,6 +434,7 @@ def _attach_public_estimate(response: dict[str, Any], payload: dict[str, Any]) -
             updated["display_mode"] = None
             updated["confidence_label"] = "low"
             updated["source_label"] = "Estimated from market median (no live shop data)"
+            updated["speed_options"] = []
             return updated
 
         estimate_min = estimate["estimate_min"]
@@ -402,6 +453,7 @@ def _attach_public_estimate(response: dict[str, Any], payload: dict[str, Any]) -
         )
         updated["confidence_label"] = estimate["confidence_label"]
         updated["source_label"] = "Estimated from market median (no live shop data)"
+        updated["speed_options"] = []
         return updated
 
     # Do not use accepted quote history for public estimates. Mixing stale
@@ -412,17 +464,34 @@ def _attach_public_estimate(response: dict[str, Any], payload: dict[str, Any]) -
         broker_client_price=broker_client_price,
     )
     standard_total = split["client_total"].quantize(MONEY_QUANTIZER, rounding=ROUND_HALF_UP)
-    tiers = {
-        key: {
-            "multiplier": str(multiplier.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)),
-            "total": _stringify_money((standard_total * multiplier).quantize(MONEY_QUANTIZER, rounding=ROUND_HALF_UP)),
-            "label": TURNAROUND_TIER_LABELS[key],
+    speed_options = _design_speed_options(payload, standard_total)
+    updated["speed_options"] = speed_options
+    design_tier = _normalize_text(payload.get("speed_tier") or "").replace("-", "_")
+    if design_tier in DESIGN_SPEED_TIER_KEYS:
+        tiers = {
+            option["key"]: {
+                "multiplier": option["multiplier"],
+                "total": option["total"],
+                "label": option["label"],
+                "turnaround_hours": option["turnaround_hours"],
+            }
+            for option in speed_options
         }
-        for key, multiplier in TURNAROUND_TIER_MULTIPLIERS.items()
-    }
-    requested_tier = _normalize_text(payload.get("urgency_type") or "standard").replace("-", "_")
-    if requested_tier not in tiers:
-        requested_tier = "standard"
+        requested_tier = design_tier
+        band_multiplier = multiplier_for_tier(design_tier)
+    else:
+        tiers = {
+            key: {
+                "multiplier": str(multiplier.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)),
+                "total": _stringify_money((standard_total * multiplier).quantize(MONEY_QUANTIZER, rounding=ROUND_HALF_UP)),
+                "label": TURNAROUND_TIER_LABELS[key],
+            }
+            for key, multiplier in TURNAROUND_TIER_MULTIPLIERS.items()
+        }
+        requested_tier = _normalize_text(payload.get("urgency_type") or "standard").replace("-", "_")
+        if requested_tier not in tiers:
+            requested_tier = "standard"
+        band_multiplier = Decimal("1.00")
     selected_total = _money(tiers[requested_tier]["total"])
     if selected_total is None:
         updated["estimate_min"] = None
@@ -431,6 +500,7 @@ def _attach_public_estimate(response: dict[str, Any], payload: dict[str, Any]) -
         updated["display_mode"] = None
         updated["confidence_label"] = "low"
         updated["source_label"] = "Estimated Printy price range"
+        updated["speed_options"] = []
         return updated
 
     currency = updated.get("currency") or "KES"
@@ -438,6 +508,9 @@ def _attach_public_estimate(response: dict[str, Any], payload: dict[str, Any]) -
     band_estimate = _build_shop_band_estimate(updated)
     range_min = band_estimate["estimate_min"] if band_estimate else selected_total
     range_max = band_estimate["estimate_max"] if band_estimate else selected_total
+    if band_multiplier != Decimal("1.00"):
+        range_min = (range_min * band_multiplier).quantize(MONEY_QUANTIZER, rounding=ROUND_HALF_UP)
+        range_max = (range_max * band_multiplier).quantize(MONEY_QUANTIZER, rounding=ROUND_HALF_UP)
     if range_max < range_min:
         range_min, range_max = range_max, range_min
     updated["total"] = selected_total_text
@@ -638,6 +711,7 @@ def _build_missing_response(product_type: str, missing_fields: list[str]) -> dic
         "display_mode": None,
         "confidence_label": "low",
         "source_label": "Estimated Printy price range",
+        "speed_options": [],
     }
 
 
@@ -1032,6 +1106,9 @@ def _attach_canonical_public_price(response: dict[str, Any], payload: dict[str, 
     updated["source_label"] = "Configured Printy pricing policy"
     updated["exact_or_estimated"] = True
     updated["pricing_breakdown"] = None
+    # A canonical production-cost price replaces the market estimate; the design
+    # speed options were derived from that estimate, so they must not linger.
+    updated["speed_options"] = []
     return updated
 
 
@@ -1068,6 +1145,7 @@ def build_public_calculator_preview(payload: dict[str, Any]) -> dict[str, Any]:
             "display_mode": None,
             "confidence_label": "low",
             "source_label": "Estimated Printy price range",
+            "speed_options": [],
         }
 
     missing_fields = _required_missing(payload, definition)
