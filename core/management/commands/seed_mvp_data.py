@@ -2,7 +2,9 @@ from decimal import Decimal
 
 from django.contrib.auth import get_user_model
 from django.core.management.base import BaseCommand
+from django.utils import timezone
 
+from accounts.models import UserProfile
 from catalog.choices import PricingMode, ProductKind, ProductStatus
 from catalog.models import Product, ProductCategory, ProductFinishingOption
 from inventory.choices import MachineType, PaperCategory, PaperType, SheetSize
@@ -49,8 +51,27 @@ class Command(BaseCommand):
             name="Printy Manager",
             role=User.Role.BROKER,
             is_staff=True,
+            partner_profile_enabled=True,
             capability_overrides={"can_source_jobs": True, "can_manage_quotes": True},
         )
+        # The demo manager is a real seeded account. Treat them as publicly
+        # listed for local development so the homepage recommendation surface
+        # has data to show; production managers still opt in explicitly and
+        # still need admin verification.
+        manager_profile, _ = UserProfile.objects.get_or_create(user=manager)
+        manager_profile.public_display_name = (
+            manager_profile.public_display_name or manager.name
+        )
+        manager_profile.manager_verified = True
+        manager_profile.manager_verified_at = (
+            manager_profile.manager_verified_at or timezone.now()
+        )
+        manager_profile.manager_public_opt_in = True
+        manager_profile.accepts_new_jobs = True
+        manager_profile.max_concurrent_jobs = max(
+            int(manager_profile.max_concurrent_jobs or 0), 3
+        )
+        manager_profile.save()
         client = self._user(
             User,
             email="client@printy.local",
