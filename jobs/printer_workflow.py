@@ -541,7 +541,7 @@ def advance_printer_job(
     _require_printer(assignment, actor)
     job = ManagedJob.objects.select_for_update().get(pk=assignment.managed_job_id)
     assignment = (
-        JobAssignment.objects.select_for_update()
+        JobAssignment.objects.select_for_update(of=("self",))
         .select_related("managed_job", "assigned_shop")
         .get(pk=assignment.pk)
     )
@@ -720,7 +720,7 @@ def undo_printer_advance(*, assignment: JobAssignment, actor) -> tuple[JobAssign
     _require_printer(assignment, actor)
     job = ManagedJob.objects.select_for_update().get(pk=assignment.managed_job_id)
     assignment = (
-        JobAssignment.objects.select_for_update()
+        JobAssignment.objects.select_for_update(of=("self",))
         .select_related("managed_job", "assigned_shop")
         .get(pk=assignment.pk)
     )
