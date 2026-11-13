@@ -101,6 +101,100 @@ class BuyerTrackedJobsTestCase(TestCase):
         row = self._get().json()["results"][0]
         self.assertEqual(row["job_code"], "QR-TRACK-0001")
 
+    def test_dashboard_job_code_opens_the_public_full_timeline(self):
+        quote_request = QuoteRequest.objects.create(
+            created_by=self.buyer,
+            customer_name="Tracked Buyer",
+            customer_email="buyer-tracked@example.com",
+            customer_phone="+254700111222",
+            request_reference="QR-TRACK-0002",
+        )
+        self._job(source_quote_request=quote_request)
+        row = self._get().json()["results"][0]
+        self.assertEqual(row["job_code"], "QR-TRACK-0002")
+
+        # What the dashboard's "Full timeline" NuxtLink does: /track/{job_code}
+        # becomes a public-tracking request with the code lowercased.
+        response = self.api_client.get(
+            f"/api/public/managed-jobs/track/{row['job_code'].lower()}/"
+        )
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["code"], row["job_code"])
+        self.assertIn("stages", body["timeline"])
+
+    def test_full_timeline_detail_loads_for_the_owning_buyer(self):
+        job = self._job()
+        self.api_client.force_authenticate(self.buyer)
+        response = self.api_client.get(f"/api/dashboard/client/tracked-jobs/{job.id}/")
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["job"]["id"], job.id)
+        self.assertEqual(body["job"]["job_code"], job.managed_reference)
+        self.assertEqual(body["tracking_reference"], job.managed_reference)
+        self.assertNotIn("_due_sort", body["job"])
+        self.assertNotIn("_delivered_sort", body["job"])
+        self.assertNotIn("_job_id", body["job"])
+        self.assertTrue(body["timeline"]["stages"])
+        self.assertIn("current_stage", body["timeline"])
+        # The signed-in view gets stage names and clocks, not the public
+        # tracker's internal owner/next-action fields.
+        first_stage = body["timeline"]["stages"][0]
+        self.assertNotIn("owner", first_stage)
+        self.assertNotIn("next_action", first_stage)
+        # The same buyer projection as the dashboard: no shop, cost or margin.
+        content = response.content.decode()
+        self.assertNotIn(self.shop.name, content)
+        self.assertNotIn(self.manager.email, content)
+        self.assertNotIn("client_total", content)
+        self.assertNotIn("production_cost", content)
+
+    def test_full_timeline_detail_uses_the_buyer_visible_job_code(self):
+        quote_request = QuoteRequest.objects.create(
+            created_by=self.buyer,
+            customer_name="Tracked Buyer",
+            customer_email="buyer-tracked@example.com",
+            customer_phone="+254700111222",
+            request_reference="QR-TRACK-0003",
+        )
+        job = self._job(source_quote_request=quote_request)
+        self.api_client.force_authenticate(self.buyer)
+        response = self.api_client.get(f"/api/dashboard/client/tracked-jobs/{job.id}/")
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["job"]["job_code"], "QR-TRACK-0003")
+        self.assertEqual(body["tracking_reference"], "QR-TRACK-0003")
+        self.assertTrue(body["tracking_url"].endswith("/track/QR-TRACK-0003"))
+
+    def test_full_timeline_detail_is_scoped_to_the_owner(self):
+        job = self._job()
+        self.api_client.force_authenticate(self.other_buyer)
+        response = self.api_client.get(f"/api/dashboard/client/tracked-jobs/{job.id}/")
+        self.assertEqual(response.status_code, 404)
+
+    def test_full_timeline_detail_rejects_non_buyer_roles(self):
+        job = self._job()
+        for user in (self.manager, self.printer):
+            self.api_client.force_authenticate(user)
+            response = self.api_client.get(f"/api/dashboard/client/tracked-jobs/{job.id}/")
+            self.assertEqual(response.status_code, 403)
+
+    def test_full_timeline_detail_hides_unpaid_jobs(self):
+        job = self._job(payment_status=ManagedJobPaymentStatus.PENDING)
+        self.api_client.force_authenticate(self.buyer)
+        response = self.api_client.get(f"/api/dashboard/client/tracked-jobs/{job.id}/")
+        self.assertEqual(response.status_code, 404)
+
+    def test_full_timeline_works_without_a_quote_reference(self):
+        job = self._job()
+        self.api_client.force_authenticate(self.buyer)
+        response = self.api_client.get(f"/api/dashboard/client/tracked-jobs/{job.id}/")
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["job"]["job_code"], job.managed_reference)
+        self.assertTrue(body["tracking_url"].endswith(f"/track/{job.managed_reference}"))
+        self.assertTrue(body["timeline"]["stages"])
+
     def test_unpaid_job_is_not_returned(self):
         self._job(payment_status=ManagedJobPaymentStatus.PENDING)
         response = self._get()

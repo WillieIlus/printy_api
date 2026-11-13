@@ -309,9 +309,10 @@ class PublicManagedJobTrackingView(APIView):
         return self._queryset().filter(tracking_token=token).first()
 
     def _by_reference(self, token):
-        if not token:
-            return None
-        return self._queryset().filter(managed_reference__iexact=token).first()
+        # Law 10.1: the buyer's job_code is the source quote reference
+        # (QR-...), so the public track link must resolve that identity too,
+        # not just the managed reference (MJ-...).
+        return _resolve_managed_job_by_code(self._queryset(), token)
 
     def _viewer_is_entitled(self, request, managed_job):
         user = getattr(request, "user", None)
@@ -428,32 +429,9 @@ class JobTrackView(APIView):
         )
 
     def _resolve(self, code):
-        code = str(code or "").strip()
-        if not code:
-            return None
         # The managed reference (MJ-...) and the quote reference (QR-...) are
         # both accepted and resolve to the same job (law 10.1).
-        by_managed = self._queryset().filter(managed_reference__iexact=code).order_by("-id").first()
-        if by_managed is not None:
-            return by_managed
-        by_reference = (
-            self._queryset()
-            .filter(source_quote_request__request_reference__iexact=code)
-            .order_by("-id")
-            .first()
-        )
-        if by_reference is not None:
-            return by_reference
-        # A quote request with no stored reference falls back to QR-<id>.
-        normalized = code.upper()
-        if normalized.startswith("QR-") and normalized[3:].isdigit():
-            return (
-                self._queryset()
-                .filter(source_quote_request_id=int(normalized[3:]))
-                .order_by("-id")
-                .first()
-            )
-        return None
+        return _resolve_managed_job_by_code(self._queryset(), code)
 
     def _phone_matches_request(self, request, managed_job) -> bool:
         provided = str(request.query_params.get("phone") or "").strip()
@@ -550,6 +528,37 @@ class JobTrackView(APIView):
                 "due_date": getattr(managed_job, "due_date", None),
             },
         }
+
+
+def _resolve_managed_job_by_code(queryset, code):
+    """Law 10.1: one identity for the quote reference and the job code.
+
+    The managed reference (MJ-...) and the source quote reference (QR-...) both
+    resolve to the same job. A quote request with no stored reference falls back
+    to QR-<id>. Shared by the public tracking endpoints so a buyer's
+    ``/track/{job_code}`` link never points at a code one endpoint rejects.
+    """
+    code = str(code or "").strip()
+    if not code:
+        return None
+    by_managed = queryset.filter(managed_reference__iexact=code).order_by("-id").first()
+    if by_managed is not None:
+        return by_managed
+    by_reference = (
+        queryset.filter(source_quote_request__request_reference__iexact=code)
+        .order_by("-id")
+        .first()
+    )
+    if by_reference is not None:
+        return by_reference
+    normalized = code.upper()
+    if normalized.startswith("QR-") and normalized[3:].isdigit():
+        return (
+            queryset.filter(source_quote_request_id=int(normalized[3:]))
+            .order_by("-id")
+            .first()
+        )
+    return None
 
 
 def _looks_like_uuid(value: str) -> bool:

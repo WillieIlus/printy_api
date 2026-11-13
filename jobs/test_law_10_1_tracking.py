@@ -112,6 +112,60 @@ class Law101TrackingTestCase(TestCase):
         self.assertEqual(by_quote.json()["code"], self.managed_job.__class__.objects.get(pk=self.managed_job.id).source_quote_request.request_reference)
         self.assertEqual(by_quote.json()["code"], by_quote.json()["from_quote_ref"])
 
+    # --- item 1: public tracking resolves the same identities ----------------
+    def test_public_tracking_link_resolves_the_buyer_job_code(self):
+        # The buyer dashboard links to /track/{job_code}, where job_code is the
+        # source quote reference (law 10.1). The public endpoint behind that
+        # page must resolve it exactly like /api/track/.
+        self.api_client.force_authenticate(self.client_user)
+        response = self.api_client.get(
+            f"/api/public/managed-jobs/track/{QUOTE_REFERENCE.lower()}/"
+        )
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["code"], QUOTE_REFERENCE)
+        self.assertEqual(body["tracking_reference"], self.managed_job.managed_reference)
+        self.assertIn("stages", body["timeline"])
+
+    def test_public_tracking_link_still_resolves_the_managed_reference(self):
+        self.api_client.force_authenticate(self.client_user)
+        response = self.api_client.get(
+            f"/api/public/managed-jobs/track/{self.managed_job.managed_reference}/"
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["code"], QUOTE_REFERENCE)
+
+    def test_public_tracking_link_resolves_the_quote_fallback_code(self):
+        quote_request = QuoteRequest.objects.create(
+            created_by=self.client_user,
+            customer_name="Law 101 fallback",
+            status=QuoteStatus.CLOSED,
+            request_reference="",
+        )
+        job = ManagedJob.objects.create(
+            title="Law 101 fallback job",
+            source_quote_request=quote_request,
+            client=self.client_user,
+            broker=self.manager,
+            created_by=self.client_user,
+            status=ManagedJobStatus.PAYMENT_CONFIRMED,
+            payment_status=ManagedJobPaymentStatus.CONFIRMED,
+        )
+        self.api_client.force_authenticate(self.client_user)
+        response = self.api_client.get(f"/api/public/managed-jobs/track/QR-{quote_request.id}/")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["code"], f"QR-{quote_request.id}")
+        self.assertEqual(response.json()["tracking_reference"], job.managed_reference)
+
+    def test_signed_out_quote_reference_lookup_still_requires_contact(self):
+        self.api_client.force_authenticate(user=None)
+        path = f"/api/public/managed-jobs/track/{QUOTE_REFERENCE}/"
+        self.assertEqual(self.api_client.get(path).status_code, 400)
+        self.assertEqual(
+            self.api_client.get(path, {"phone": "0733444555"}).status_code,
+            200,
+        )
+
     # --- item 2: buyer timeline has no printer identity ----------------------
     def test_buyer_timeline_contains_no_printer_identity(self):
         response = self._get(QUOTE_REFERENCE, user=self.client_user)

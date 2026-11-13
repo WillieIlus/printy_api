@@ -33,7 +33,7 @@ from api.visibility import project_shop_identity, projection_role_for_request, s
 from jobs.choices import JobAssignmentStatus, ManagedJobAssignmentStatus, ManagedJobPaymentStatus, ManagedJobStatus
 from jobs.artwork_confirmation import get_artwork_confirmation_payload
 from jobs.artwork_workflow import artwork_payment_block_reason, get_artwork_workflow_payload
-from jobs.buyer_tracking import buyer_tracked_jobs
+from jobs.buyer_tracking import build_tracked_job, buyer_tracked_jobs, tracked_jobs_queryset
 from jobs.models import JobAssignment, ManagedJob
 from jobs.visibility import partner_managed_job_filter
 from inventory.models import Paper
@@ -60,7 +60,7 @@ from services.production_matching import (
     build_partner_production_matches,
     confirmed_printer_shop_queryset,
 )
-from jobs.timing import timing_fields
+from jobs.timing import stage_timeline, timing_fields
 from jobs.job_codes import job_code, job_from_quote_ref, job_tracking_url, tracking_url
 from jobs.listing import job_flags, order_jobs, order_quotes, quote_flags
 from jobs.read_state import (
@@ -1136,6 +1136,58 @@ class ClientJobDetailView(BaseRoleDetailView):
                 "job": self._job_row(job, role=CANONICAL_CLIENT_ROLE, viewer_read_at=read_at),
                 "settlement": None,
                 **read_fields(read_at),
+            }
+        )
+
+
+class ClientTrackedJobDetailView(BaseRoleDetailView):
+    """The signed-in buyer's full timeline for one of their paid jobs.
+
+    Resolved by the secure job id, not a shareable tracking code. The ownership
+    filter is the same one behind the buyer's tracked-jobs list, so a buyer can
+    never open another buyer's job (or an unpaid one), and the payload is the
+    same buyer projection used on the dashboard plus the canonical stage
+    timeline. No manager, shop, cost or margin fields are added here.
+    """
+
+    dashboard_role = "client"
+    allowed_roles = (CANONICAL_CLIENT_ROLE,)
+
+    # The public tracker may expose who currently holds a stage. The signed-in
+    # buyer view keeps the same buyer projection as the dashboard, so remove
+    # internal ownership and next-action notes from the canonical timeline.
+    _BUYER_TIMELINE_FIELDS = (
+        "key",
+        "label",
+        "started_at",
+        "due_at",
+        "completed_at",
+        "time_taken_minutes",
+        "time_remaining_minutes",
+        "is_overdue",
+        "state",
+    )
+
+    def get(self, request, pk):
+        job = get_object_or_404(tracked_jobs_queryset(user=request.user), pk=pk)
+        events = list(job.job_events.all())
+        timeline = stage_timeline(job, events=events)
+        timeline["stages"] = [
+            {field: stage.get(field) for field in self._BUYER_TIMELINE_FIELDS}
+            for stage in timeline.get("stages", [])
+        ]
+        job_payload = build_tracked_job(job)
+        # build_tracked_job leaves private sort helpers on the row for the
+        # dashboard list; the detail payload is not a list item, so drop them.
+        for internal in ("_due_sort", "_delivered_sort", "_job_id"):
+            job_payload.pop(internal, None)
+        return Response(
+            {
+                "role": "client",
+                "job": job_payload,
+                "timeline": timeline,
+                "tracking_reference": job_code(job),
+                "tracking_url": job_tracking_url(job),
             }
         )
 

@@ -165,6 +165,7 @@ urlpatterns = [
     path("dashboard/client/jobs/<int:pk>/", dashboard_views.ClientJobDetailView.as_view(), name="dashboard-client-job-detail"),
     path("dashboard/client/tracked-jobs/", dashboard_views.ClientTrackedJobsView.as_view(), name="dashboard-client-tracked-jobs"),
     path("dashboard/client/jobs/tracked/", dashboard_views.ClientTrackedJobsView.as_view(), name="dashboard-client-jobs-tracked"),
+    path("dashboard/client/tracked-jobs/<int:pk>/", dashboard_views.ClientTrackedJobDetailView.as_view(), name="dashboard-client-tracked-job-detail"),
     path("client/tracked-jobs/", dashboard_views.ClientTrackedJobsView.as_view(), name="client-tracked-jobs"),
     path("client/jobs/tracked/", dashboard_views.ClientTrackedJobsView.as_view(), name="client-jobs-tracked"),
     path("jobs/tracked/", dashboard_views.ClientTrackedJobsView.as_view(), name="client-tracked-jobs-compat"),
