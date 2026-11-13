@@ -41,13 +41,17 @@ class Command(BaseCommand):
         password = options["password"]
         User = get_user_model()
 
+        # Demo managers and shops are workspace users, not Django staff. Staff
+        # status also grants the canonical super_admin role, which would send
+        # them to the admin dashboard after sign-in.
         broker = self._user(
             User,
             email="manager@printy.local",
             password=password,
             name="Printy Test Manager",
             role=User.Role.BROKER,
-            is_staff=True,
+            is_staff=False,
+            is_superuser=False,
             partner_profile_enabled=True,
             capability_overrides={"can_source_jobs": True, "can_manage_clients": True},
         )
@@ -57,7 +61,8 @@ class Command(BaseCommand):
             password=password,
             name="Nairobi Print House Owner",
             role=User.Role.PRODUCTION,
-            is_staff=True,
+            is_staff=False,
+            is_superuser=False,
         )
 
         policy, _ = PlatformFeePolicy.objects.update_or_create(

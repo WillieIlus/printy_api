@@ -44,13 +44,17 @@ class Command(BaseCommand):
             is_staff=True,
             is_superuser=True,
         )
+        # Demo managers and shops are workspace users, not Django staff. Staff
+        # status also grants the canonical super_admin role, which would send
+        # them to the admin dashboard after sign-in.
         manager = self._user(
             User,
             email="manager@printy.local",
             password=password,
             name="Printy Manager",
             role=User.Role.BROKER,
-            is_staff=True,
+            is_staff=False,
+            is_superuser=False,
             partner_profile_enabled=True,
             capability_overrides={"can_source_jobs": True, "can_manage_quotes": True},
         )
@@ -85,7 +89,8 @@ class Command(BaseCommand):
             password=password,
             name="Printy Production Shop",
             role=User.Role.PRODUCTION,
-            is_staff=True,
+            is_staff=False,
+            is_superuser=False,
         )
 
         policy, _ = PlatformFeePolicy.objects.update_or_create(
