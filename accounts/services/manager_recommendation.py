@@ -45,10 +45,12 @@ MONEY_QUANTIZER = Decimal("0.01")
 STATUS_AVAILABLE_NOW = "available_now"
 STATUS_FREE_THIS_WEEK = "free_this_week"
 STATUS_IN_QUEUE = "in_queue"
+STATUS_AT_CAPACITY = "at_capacity"
 AVAILABILITY_RANK = {
     STATUS_AVAILABLE_NOW: 0,
     STATUS_FREE_THIS_WEEK: 1,
     STATUS_IN_QUEUE: 2,
+    STATUS_AT_CAPACITY: 3,
 }
 
 TERMINAL_JOB_STATUSES = {
@@ -158,27 +160,29 @@ def _earliest_start(*, active_jobs: list[ManagedJob], now: datetime) -> datetime
     return cursor
 
 
-def _queue_label(count: int) -> str:
-    number = _NUMBER_WORDS.get(count, str(count))
-    return f"{number} job{'s' if count != 1 else ''} in the queue"
+def _active_jobs_label(count: int) -> str:
+    word = _NUMBER_WORDS.get(count, str(count))
+    return f"{word} active job{'s' if count != 1 else ''}"
 
 
-def _availability(*, active_count: int, earliest_start: datetime, now: datetime) -> dict[str, Any]:
+def _availability(*, active_count: int, at_capacity: bool) -> dict[str, Any]:
+    if at_capacity:
+        return {
+            "status": STATUS_AT_CAPACITY,
+            "label": "At capacity",
+            "active_jobs": active_count,
+        }
     if active_count == 0:
         return {
             "status": STATUS_AVAILABLE_NOW,
             "label": "Available now",
             "active_jobs": active_count,
         }
-    if earliest_start <= now + timedelta(days=7):
-        return {
-            "status": STATUS_FREE_THIS_WEEK,
-            "label": "Free this week",
-            "active_jobs": active_count,
-        }
+    # Spare capacity means a free slot now, even when the manager already holds
+    # jobs. The active-job count is context, not an availability blocker.
     return {
-        "status": STATUS_IN_QUEUE,
-        "label": _queue_label(active_count),
+        "status": STATUS_AVAILABLE_NOW,
+        "label": f"Available now · {_active_jobs_label(active_count)}",
         "active_jobs": active_count,
     }
 
@@ -302,7 +306,8 @@ def _manager_snapshot(
     )
     active_count = len(active_jobs)
     capacity = int(profile.max_concurrent_jobs or 0)
-    if enforce_capacity and (capacity <= 0 or active_count >= capacity):
+    at_capacity = capacity <= 0 or active_count >= capacity
+    if enforce_capacity and at_capacity:
         return None
 
     completed_jobs = list(
@@ -311,6 +316,12 @@ def _manager_snapshot(
     )
     threshold = int(getattr(settings, "PRINTY_MANAGER_ON_TIME_MIN_JOBS", 10))
     earliest_start = _earliest_start(active_jobs=active_jobs, now=now)
+    # ``max_concurrent_jobs`` is parallel capacity, not a serial queue. A
+    # manager with fewer active jobs than slots can start a new job now; the
+    # remaining stage hours of the jobs they already hold are a workload
+    # backlog, not a block on the free slot. Using the serial estimate here made
+    # one active job hide a manager from every speed tier, including Standard.
+    next_free_start = earliest_start if at_capacity else now
 
     latest_assigned = profile.last_assigned_at
     for job in [*active_jobs, *completed_jobs]:
@@ -335,10 +346,11 @@ def _manager_snapshot(
         "profile": profile,
         "display_name": display_name,
         "active_jobs": active_count,
-        "at_capacity": capacity <= 0 or active_count >= capacity,
+        "at_capacity": at_capacity,
         "earliest_start": earliest_start,
+        "next_free_start": next_free_start,
         "availability": _availability(
-            active_count=active_count, earliest_start=earliest_start, now=now
+            active_count=active_count, at_capacity=at_capacity
         ),
         "on_time_pct": on_time_rate(completed_jobs=completed_jobs, minimum=threshold),
         "completed_jobs": len(completed_jobs),
@@ -436,7 +448,7 @@ def recommend_managers(
             qualifies_time = True
             if tier_hours:
                 manager_ready_by = add_working_hours(
-                    snapshot["earliest_start"], production_hours
+                    snapshot["next_free_start"], production_hours
                 )
                 qualifies_time = bool(
                     tier_ready_by is not None and manager_ready_by <= tier_ready_by
@@ -521,6 +533,7 @@ def recommend_managers(
 
 __all__ = [
     "STATUS_AVAILABLE_NOW",
+    "STATUS_AT_CAPACITY",
     "STATUS_FREE_THIS_WEEK",
     "STATUS_IN_QUEUE",
     "TERMINAL_JOB_STATUSES",

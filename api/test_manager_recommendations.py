@@ -194,13 +194,11 @@ class ManagerRecommendationTestCase(TestCase):
         self.assertTrue(standard[0]["recommended"])
         self.assertFalse(standard[1]["recommended"])
         self.assertEqual(standard[0]["availability"]["status"], "available_now")
-        self.assertIn(
-            standard[1]["availability"]["status"],
-            {"free_this_week", "in_queue"},
-        )
+        self.assertEqual(standard[1]["availability"]["status"], "available_now")
+        self.assertIn("active job", standard[1]["availability"]["label"])
         self.assertEqual(standard[1]["availability"]["active_jobs"], 1)
 
-    def test_manager_who_cannot_meet_fastest_still_appears_in_standard(self):
+    def test_manager_with_spare_capacity_appears_in_every_tier(self):
         free_user, _ = self._manager(email="tier-free@test.com", name="Tier Free")
         busy_user, _ = self._manager(email="tier-busy@test.com", name="Tier Busy")
         self._active_job(busy_user)
@@ -210,12 +208,28 @@ class ManagerRecommendationTestCase(TestCase):
         faster_names = {row["display_name"] for row in self._tier_managers(response, "faster")}
         fastest_names = {row["display_name"] for row in self._tier_managers(response, "fastest")}
 
+        # One active job with three slots is spare capacity, not a full queue:
+        # the manager can start a new job now and must stay recommendable for
+        # every speed. This is the regression that produced "No manager is free".
         self.assertIn("Tier Busy", standard_names)
-        self.assertNotIn("Tier Busy", faster_names)
-        self.assertNotIn("Tier Busy", fastest_names)
+        self.assertIn("Tier Busy", faster_names)
+        self.assertIn("Tier Busy", fastest_names)
         self.assertIn("Tier Free", standard_names)
         self.assertIn("Tier Free", faster_names)
         self.assertIn("Tier Free", fastest_names)
+
+    def test_manager_with_one_active_job_appears_without_turnaround_target(self):
+        busy_user, _ = self._manager(email="no-target-busy@test.com", name="No Target Busy")
+        self._active_job(busy_user)
+        payload = self._payload()
+        payload.pop("turnaround_hours")
+
+        response = self._recommend(payload=payload)
+
+        for tier_key in ("standard", "faster", "fastest"):
+            names = {row["display_name"] for row in self._tier_managers(response, tier_key)}
+            self.assertIn("No Target Busy", names, tier_key)
+            self.assertTrue(self._tier_managers(response, tier_key)[0]["ready_label"], tier_key)
 
     def test_missing_turnaround_uses_stage_sla_fallback_for_ready_by(self):
         self._manager(email="fallback@test.com", name="Fallback Manager")
