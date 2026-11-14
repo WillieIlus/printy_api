@@ -370,7 +370,10 @@ def check_email_delivery_config(app_configs=None, **kwargs):
         host_password=EMAIL_HOST_PASSWORD,
     )
 
-FRONTEND_URL = os.environ.get("FRONTEND_URL", "http://localhost:3000").rstrip("/")
+# Public frontend origin used in every email link (confirmation, password
+# reset, client invites). Production is the default so a deployment cannot
+# silently email localhost links; local developers may override it in .env.
+FRONTEND_URL = os.environ.get("FRONTEND_URL", "https://printy.ke").rstrip("/")
 
 # Lifetime of a manager-created, phone-first client invite (law-neutral helper
 # for manager-assisted onboarding; the claim link is single-use).

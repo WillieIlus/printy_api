@@ -92,6 +92,26 @@ class RateCardTableEditorTests(TestCase):
     def _row_preview(self, payload, key="300gsm_matte_art_card"):
         return next(row for row in payload["rows"] if row["key"] == key)
 
+    def test_setup_accepts_blank_standard_turnaround_hours_round_trip(self):
+        setup = self._setup()
+        self.assertEqual(setup["shop_details"]["standard_turnaround_hours"], "")
+
+        payload = self._payload()
+        payload["shop_details"]["standard_turnaround_hours"] = ""
+        response = self.client.patch("/api/shops/rate-card/setup/", payload, format="json")
+        self.assertEqual(response.status_code, 200, response.content)
+        self.assertEqual(response.json()["shop_details"]["standard_turnaround_hours"], "")
+
+    def test_setup_persists_standard_turnaround_hours_from_numeric_string(self):
+        payload = self._payload()
+        payload["shop_details"]["standard_turnaround_hours"] = "48"
+        response = self.client.patch("/api/shops/rate-card/setup/", payload, format="json")
+        self.assertEqual(response.status_code, 200, response.content)
+        self.assertEqual(response.json()["shop_details"]["standard_turnaround_hours"], "48")
+
+        self.shop.refresh_from_db()
+        self.assertEqual(self.shop.standard_turnaround_hours, 48)
+
     def test_setup_returns_canonical_table_preview_for_default_product(self):
         response = self.client.patch("/api/shops/rate-card/setup/", self._payload(), format="json")
         self.assertEqual(response.status_code, 200, response.content)

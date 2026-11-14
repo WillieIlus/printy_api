@@ -36,6 +36,12 @@ def _mask_email_for_log(email: str) -> str:
     keep = local[:1] if len(local) <= 2 else local[:2]
     return f"{keep}***@{domain}"
 
+
+def _mask_phone_for_log(phone: str) -> str:
+    """Return a non-identifying tail of a normalised phone for log lines."""
+    value = str(phone or "").strip()
+    return f"{value[:4]}****{value[-2:]}" if len(value) > 6 else "***"
+
 PROFILE_FIELDS = (
     "bio",
     "avatar",
@@ -396,10 +402,12 @@ class UserCreateSerializer(serializers.ModelSerializer):
             primary=True,
             verified=verified,
         )
+        self.activation_email_sent = False
         if not verified:
             request = self.context.get("request")
             try:
                 email_address.send_confirmation(request, signup=True)
+                self.activation_email_sent = True
             except Exception:
                 logger.exception(
                     "registration_activation_email_failed user_id=%s",
@@ -469,14 +477,57 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
         normalized = normalize_phone(phone)
         if not normalized:
             raise serializers.ValidationError({"phone": "Enter a valid phone number."})
-        profile = (
+
+        verified_profile = (
             UserProfile.objects.select_related("user")
             .filter(phone_normalized=normalized, phone_verified_at__isnull=False)
             .first()
         )
-        if profile is None or not profile.user.check_password(password):
+        if verified_profile is not None:
+            if verified_profile.user.check_password(password):
+                return verified_profile.user
+            return None
+
+        # Self-signup stores the phone without verifying it. The number can
+        # still identify the account when that account already has a trusted
+        # email identity, so phone and email sign-in resolve to the same user.
+        # Ambiguous matches are never resolved by guesswork.
+        candidates = list(
+            UserProfile.objects.select_related("user")
+            .filter(phone_normalized=normalized, phone_verified_at__isnull=True)
+            .exclude(user__email__isnull=True)
+            .exclude(user__email="")
+        )
+        if len(candidates) != 1:
+            if len(candidates) > 1:
+                logger.warning(
+                    "login_phone_collision phone=%s matches=%s",
+                    _mask_phone_for_log(normalized),
+                    len(candidates),
+                )
+            return None
+        profile = candidates[0]
+        if not self._unverified_phone_login_allowed(profile.user):
+            return None
+        if not profile.user.check_password(password):
             return None
         return profile.user
+
+    @staticmethod
+    def _unverified_phone_login_allowed(user) -> bool:
+        """Let an unverified phone resolve an account with a trusted email.
+
+        When email verification is mandatory the account's primary email must
+        already be verified. When it is disabled the email is trusted by
+        configuration, matching how email sign-in is treated.
+        """
+        from allauth.account.models import EmailAddress
+        from django.conf import settings as django_settings
+
+        if getattr(django_settings, "ACCOUNT_EMAIL_VERIFICATION", "none") != "mandatory":
+            return True
+        email_obj = EmailAddress.objects.filter(user=user, primary=True).first()
+        return bool(email_obj and email_obj.verified)
 
     def validate(self, attrs):
         email = (attrs.get("email") or "").strip().lower()

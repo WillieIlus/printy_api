@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+from decimal import Decimal
+
 from django.test import SimpleTestCase
 
 from services.pricing.role_projection import (
     ANONYMOUS_FORBIDDEN_FIELDS,
     BUYER_FORBIDDEN_FIELDS,
+    CALCULATOR_MANAGER_FIELDS,
+    CALCULATOR_PRINTER_FIELDS,
     CANONICAL_FIELDS,
     ROLE_ALLOWLISTS,
     ROLE_ANONYMOUS,
@@ -16,7 +20,9 @@ from services.pricing.role_projection import (
     ROLES,
     allowlist_for,
     assert_projection_is_clean,
+    build_calculator_economics,
     build_canonical_result,
+    project_calculator_economics,
     project_canonical,
 )
 
@@ -138,3 +144,119 @@ class AllowlistTests(SimpleTestCase):
         with self.assertRaises(ValueError):
             assert_projection_is_clean({"price": 1, "good_sheets": 10}, ROLE_ANONYMOUS)
         assert_projection_is_clean({"price": 1}, ROLE_ANONYMOUS)
+
+
+class CalculatorEconomicsTests(SimpleTestCase):
+    """The one calculator split: production + markup + Printy fee."""
+
+    def _economics(self, **overrides):
+        defaults = {
+            "cost_lines": [
+                {"label": "Printing 300gsm", "total_kes": "50.00"},
+                {"label": "Matt lamination", "total_kes": "10.00"},
+            ],
+            "production_total": "60.00",
+            "manager_markup": "45.00",
+            "client_total": "120.00",
+            "printy_fee": "15.00",
+            "printer_payout": "54.00",
+        }
+        defaults.update(overrides)
+        return build_calculator_economics(**defaults)
+
+    def test_economics_reconcile_the_split_once(self):
+        economics = self._economics()
+        self.assertEqual(economics["production_total"], Decimal("60.00"))
+        self.assertEqual(economics["markup_total"], Decimal("45.00"))
+        self.assertEqual(economics["manager_total"], Decimal("105.00"))
+        self.assertEqual(economics["markup_percent"], Decimal("75.00"))
+        self.assertEqual(economics["client_total_inclusive"], Decimal("120.00"))
+        self.assertEqual(economics["printy_fee"], Decimal("15.00"))
+        self.assertEqual(economics["printer_payout"], Decimal("54.00"))
+
+    def test_manager_projection_is_cost_plus_markup_on_every_line(self):
+        manager = project_calculator_economics(self._economics(), ROLE_MANAGER)
+
+        self.assertEqual(manager["role"], "manager")
+        self.assertLessEqual(set(manager), CALCULATOR_MANAGER_FIELDS)
+        self.assertEqual(manager["production_total"], "60.00")
+        self.assertEqual(manager["markup_total"], "45.00")
+        self.assertEqual(manager["manager_total"], "105.00")
+        self.assertEqual(manager["client_total_inclusive"], "120.00")
+
+        # The requested example: 50 -> 87.50 and 10 -> 17.50 at 75% markup.
+        printing, lamination = manager["lines"]
+        self.assertEqual(printing["rate"], "87.50")
+        self.assertEqual(printing["production_rate"], "50.00")
+        self.assertEqual(printing["markup_amount"], "37.50")
+        self.assertEqual(lamination["rate"], "17.50")
+        self.assertEqual(lamination["production_total"], "10.00")
+        self.assertEqual(lamination["markup_amount"], "7.50")
+        for line in manager["lines"]:
+            self.assertEqual(
+                Decimal(line["total"]),
+                Decimal(line["production_total"]) + Decimal(line["markup_amount"]),
+            )
+
+    def test_printer_projection_is_raw_production_and_own_payout(self):
+        printer = project_calculator_economics(self._economics(), ROLE_PRINTER)
+
+        self.assertEqual(printer["role"], "printer")
+        self.assertLessEqual(set(printer), CALCULATOR_PRINTER_FIELDS)
+        self.assertEqual(printer["production_total"], "60.00")
+        self.assertEqual(printer["printer_payout"], "54.00")
+        self.assertEqual(
+            [line["rate"] for line in printer["lines"]],
+            ["50.00", "10.00"],
+        )
+        for line in printer["lines"]:
+            self.assertNotIn("markup_amount", line)
+            self.assertNotIn("production_rate", line)
+        for forbidden in (
+            "markup_percent",
+            "markup_total",
+            "manager_total",
+            "printy_fee",
+            "client_total_inclusive",
+        ):
+            self.assertNotIn(forbidden, printer, forbidden)
+
+    def test_buyers_and_anonymous_get_no_economics(self):
+        economics = self._economics()
+        for role in (ROLE_BUYER, ROLE_ANONYMOUS, None, "nope"):
+            self.assertIsNone(project_calculator_economics(economics, role), role)
+
+    def test_line_residual_rides_on_the_last_line(self):
+        economics = build_calculator_economics(
+            cost_lines=[
+                {"label": "Printing", "total_kes": "30.00"},
+                {"label": "Finishing", "total_kes": "29.00"},
+            ],
+            production_total="60.00",
+            manager_markup="45.00",
+            client_total="105.00",
+            printy_fee="0.00",
+            printer_payout="60.00",
+        )
+        lines = economics["lines"]
+        self.assertEqual(
+            sum(line["production_total"] for line in lines),
+            Decimal("60.00"),
+        )
+        self.assertEqual(
+            sum(line["billed_total"] for line in lines),
+            Decimal("105.00"),
+        )
+        self.assertEqual(lines[-1]["production_total"], Decimal("30.00"))
+
+    def test_no_production_cost_yields_no_economics(self):
+        self.assertIsNone(
+            build_calculator_economics(
+                cost_lines=[],
+                production_total="0.00",
+                manager_markup="0.00",
+                client_total="0.00",
+                printy_fee="0.00",
+                printer_payout="0.00",
+            )
+        )

@@ -51,6 +51,7 @@ class RegistrationEmailActivationFlowTestCase(TestCase):
         self.assertEqual(response.status_code, 201)
         self.assertEqual(response.json()["verification_required"], True)
         self.assertEqual(response.json()["resend_available"], True)
+        self.assertEqual(response.json()["activation_email_sent"], True)
         self.assertEqual(len(mail.outbox), 1)
 
         msg = mail.outbox[0]
@@ -65,6 +66,7 @@ class RegistrationEmailActivationFlowTestCase(TestCase):
         self.assertEqual(parsed.scheme, "https")
         self.assertEqual(parsed.netloc, "printy.ke")
         self.assertEqual(parsed.path, "/auth/confirm-email")
+        self.assertEqual(parse_qs(parsed.query)["email"][0], self.email)
 
     def test_login_blocked_until_email_confirmed(self):
         self._register()

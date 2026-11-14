@@ -1,4 +1,4 @@
-{% load i18n %}{% autoescape off %}Hello from Printy!
+{% load i18n account %}{% autoescape off %}{% user_display user as user_display %}Hello from Printy!
 
 {% blocktranslate with user_display=user_display %}Hi {{ user_display }},{% endblocktranslate %}
 

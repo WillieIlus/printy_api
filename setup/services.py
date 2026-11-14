@@ -333,6 +333,12 @@ RATE_CARD_STEP_DEFINITIONS = [
     ("machine", "Add your first machine", "Tell us which press you print on so we can price jobs.", "/app/printer/shop"),
     ("paper", "Add priced paper stock", "Add at least one paper with a selling price so we can quote jobs.", "/app/printer/shop"),
     ("printing_rate", "Set a printing rate", "Set your per-sheet price so jobs can be matched to you.", "/app/printer/rates"),
+    (
+        "standard_turnaround",
+        "Set your standard turnaround",
+        "Set how many business hours a standard job takes; Faster and Fastest are calculated from it.",
+        "/app/printer/rates#shop-profile",
+    ),
     ("confirm", "Confirm and go live", "Confirm your rate card so managers can find and pick your shop.", "/app/printer/rates"),
 ]
 
@@ -359,6 +365,8 @@ def build_rate_card_setup_status(shop: Shop | None) -> dict:
     has_printing_rate = PrintingRate.objects.filter(
         machine__shop=shop, machine__is_active=True, is_active=True
     ).exists()
+    # LAW 17: a standard turnaround is part of a complete, usable rate card.
+    has_standard_turnaround = bool(getattr(shop, "standard_turnaround_hours", None))
     setup = ShopRateCardSetup.objects.filter(shop=shop).only("is_confirmed").first()
     is_confirmed = bool(setup.is_confirmed) if setup else False
 
@@ -366,10 +374,11 @@ def build_rate_card_setup_status(shop: Shop | None) -> dict:
         "machine": has_machine,
         "paper": has_priced_paper,
         "printing_rate": has_printing_rate,
+        "standard_turnaround": has_standard_turnaround,
         "confirm": is_confirmed,
     }
     is_ready_to_confirm = bool(
-        has_machine and has_priced_paper and has_printing_rate
+        has_machine and has_priced_paper and has_printing_rate and has_standard_turnaround
     ) and not is_confirmed
 
     steps = []

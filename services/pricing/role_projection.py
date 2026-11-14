@@ -15,9 +15,12 @@ No view or serializer may hand-pick pricing fields; they must call
 
 from __future__ import annotations
 
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from typing import Any, Mapping
 
 from services.pricing.breakdown_projection import line_items_from_preview
+
+_MONEY_QUANTIZER = Decimal("0.01")
 
 ROLE_BUYER = "buyer"
 ROLE_MANAGER = "manager"
@@ -364,6 +367,243 @@ def _build_method(payload: Mapping[str, Any]) -> Any:
     return {"pricing_mode": payload.get("pricing_mode")}
 
 
+# --- calculator role economics --------------------------------------------
+# The public calculator prices one canonical market estimate. The same split
+# (production cost + manager markup + Printy fee) is exposed to each role as a
+# projection, never recomputed in the UI:
+#   printer -> raw production lines + own payout
+#   manager -> lines with the manager's markup + client-inclusive total
+#   buyer/anonymous -> no lines at all (the inclusive price is the whole story)
+CALCULATOR_MANAGER_FIELDS = frozenset(
+    {
+        "role",
+        "currency",
+        "markup_percent",
+        "lines",
+        "production_total",
+        "markup_total",
+        "manager_total",
+        "printy_fee",
+        "client_total_inclusive",
+    }
+)
+CALCULATOR_PRINTER_FIELDS = frozenset(
+    {
+        "role",
+        "currency",
+        "lines",
+        "production_total",
+        "printer_payout",
+    }
+)
+
+
+def _decimal(value: Any) -> Decimal | None:
+    if value in (None, ""):
+        return None
+    try:
+        return Decimal(str(value))
+    except (ArithmeticError, InvalidOperation, TypeError, ValueError):
+        return None
+
+
+def _quantize(value: Decimal) -> Decimal:
+    return value.quantize(_MONEY_QUANTIZER, rounding=ROUND_HALF_UP)
+
+
+def _money_text(value: Any) -> str:
+    amount = _decimal(value)
+    return str(_quantize(amount)) if amount is not None else "0.00"
+
+
+def _line_value(line: Mapping[str, Any], keys: tuple[str, ...]) -> Any:
+    for key in keys:
+        value = line.get(key)
+        if value not in (None, ""):
+            return value
+    return None
+
+
+def _quantity_payload(value: Decimal | None) -> int | str | None:
+    if value is None:
+        return None
+    if value == value.to_integral_value():
+        return int(value)
+    return str(value.normalize())
+
+
+def build_calculator_economics(
+    *,
+    cost_lines: Any,
+    production_total: Any,
+    manager_markup: Any,
+    client_total: Any,
+    printy_fee: Any,
+    printer_payout: Any,
+    currency: Any = "KES",
+) -> dict[str, Any] | None:
+    """Build the one canonical cost/markup/fee result for the calculator.
+
+    The buyer estimate, the manager's billed lines and the printer's production
+    lines all read from this object. Manager billed amounts are distributed
+    across the production lines pro-rata so the lines still sum to the split.
+    """
+    production = _decimal(production_total)
+    if production is None or production <= 0:
+        return None
+    production = _quantize(production)
+    markup = _quantize(_decimal(manager_markup) or Decimal("0.00"))
+    manager_total = _quantize(production + markup)
+
+    normalized: list[dict[str, Any]] = []
+    for line in cost_lines or []:
+        if not isinstance(line, Mapping):
+            continue
+        total = _decimal(_line_value(line, ("total_kes", "total")))
+        if total is None:
+            continue
+        total = _quantize(total)
+        quantity = _decimal(_line_value(line, ("quantity", "qty")))
+        rate = _decimal(_line_value(line, ("unit_price_kes", "unit_price", "rate")))
+        if rate is None:
+            rate = _quantize(total / quantity) if quantity and quantity > 0 else total
+        normalized.append(
+            {
+                "label": str(line.get("label") or line.get("component") or "Production"),
+                "spec": str(line.get("spec") or ""),
+                "quantity": quantity,
+                "unit": str(line.get("unit") or ""),
+                "rate": _quantize(rate),
+                "production_total": total,
+            }
+        )
+
+    if not normalized:
+        normalized.append(
+            {
+                "label": "Production",
+                "spec": "",
+                "quantity": None,
+                "unit": "",
+                "rate": production,
+                "production_total": production,
+            }
+        )
+
+    # The engine's item lines must reconcile with the split's production cost.
+    # Any residual (rounding, a total component the line builder did not itemise)
+    # rides on the final line rather than inventing an unexplained extra line.
+    line_sum = sum((line["production_total"] for line in normalized), Decimal("0.00"))
+    if line_sum != production:
+        normalized[-1]["production_total"] = _quantize(
+            normalized[-1]["production_total"] + (production - line_sum)
+        )
+
+    ratio = manager_total / production
+    billed_sum = Decimal("0.00")
+    for line in normalized:
+        billed = _quantize(line["production_total"] * ratio)
+        line["billed_total"] = billed
+        billed_sum += billed
+    if billed_sum != manager_total:
+        normalized[-1]["billed_total"] = _quantize(
+            normalized[-1]["billed_total"] + (manager_total - billed_sum)
+        )
+    for line in normalized:
+        line["markup_amount"] = _quantize(line["billed_total"] - line["production_total"])
+
+    markup_percent = (
+        _quantize(markup / production * Decimal("100")) if production > 0 else Decimal("0.00")
+    )
+    return {
+        "currency": str(currency or "KES"),
+        "markup_percent": markup_percent,
+        "lines": normalized,
+        "production_total": production,
+        "markup_total": markup,
+        "manager_total": manager_total,
+        "printy_fee": _quantize(_decimal(printy_fee) or Decimal("0.00")),
+        "client_total_inclusive": _quantize(
+            _decimal(client_total) if _decimal(client_total) is not None else manager_total
+        ),
+        "printer_payout": (
+            _quantize(_decimal(printer_payout))
+            if _decimal(printer_payout) is not None
+            else None
+        ),
+    }
+
+
+def project_calculator_economics(economics: Mapping[str, Any] | None, role: str | None) -> dict[str, Any] | None:
+    """Project the canonical calculator economics onto a role's allowlist."""
+    if role not in {ROLE_MANAGER, ROLE_PRINTER}:
+        return None
+    payload = economics or {}
+    if not isinstance(payload, Mapping):
+        return None
+    production = _decimal(payload.get("production_total"))
+    if production is None or production <= 0:
+        return None
+    lines = [line for line in (payload.get("lines") or []) if isinstance(line, Mapping)]
+    if not lines:
+        return None
+
+    if role == ROLE_MANAGER:
+        manager_lines = [
+            {
+                "label": line.get("label"),
+                "spec": line.get("spec") or "",
+                "quantity": _quantity_payload(_decimal(line.get("quantity"))),
+                "unit": line.get("unit") or "",
+                # Billed figures: what the manager charges, including markup.
+                "rate": _money_text(
+                    (_decimal(line.get("billed_total")) or Decimal("0.00"))
+                    / (_decimal(line.get("quantity")) or Decimal("1.00"))
+                ),
+                "total": _money_text(line.get("billed_total")),
+                # Production figures: what the printer charges.
+                "production_rate": _money_text(line.get("rate")),
+                "production_total": _money_text(line.get("production_total")),
+                "markup_amount": _money_text(line.get("markup_amount")),
+            }
+            for line in lines
+        ]
+        result = {
+            "role": ROLE_MANAGER,
+            "currency": payload.get("currency") or "KES",
+            "markup_percent": _money_text(payload.get("markup_percent")),
+            "lines": manager_lines,
+            "production_total": _money_text(payload.get("production_total")),
+            "markup_total": _money_text(payload.get("markup_total")),
+            "manager_total": _money_text(payload.get("manager_total")),
+            "printy_fee": _money_text(payload.get("printy_fee")),
+            "client_total_inclusive": _money_text(payload.get("client_total_inclusive")),
+        }
+        return {key: result[key] for key in result if key in CALCULATOR_MANAGER_FIELDS}
+
+    printer_lines = [
+        {
+            "label": line.get("label"),
+            "spec": line.get("spec") or "",
+            "quantity": _quantity_payload(_decimal(line.get("quantity"))),
+            "unit": line.get("unit") or "",
+            "rate": _money_text(line.get("rate")),
+            "total": _money_text(line.get("production_total")),
+        }
+        for line in lines
+    ]
+    result = {
+        "role": ROLE_PRINTER,
+        "currency": payload.get("currency") or "KES",
+        "lines": printer_lines,
+        "production_total": _money_text(payload.get("production_total")),
+    }
+    payout = _decimal(payload.get("printer_payout"))
+    if payout is not None:
+        result["printer_payout"] = _money_text(payout)
+    return {key: result[key] for key in result if key in CALCULATOR_PRINTER_FIELDS}
+
+
 def build_canonical_result(
     engine_payload: Mapping[str, Any],
     *,
@@ -457,5 +697,9 @@ __all__ = [
     "project_canonical",
     "assert_projection_is_clean",
     "build_canonical_result",
+    "build_calculator_economics",
+    "project_calculator_economics",
+    "CALCULATOR_MANAGER_FIELDS",
+    "CALCULATOR_PRINTER_FIELDS",
     "projection_role_for_actor",
 ]

@@ -7,6 +7,8 @@ from typing import Any
 from pricing.services.platform_fee_policy import calculate_financial_split
 from pricing.services.production_cost_calculator import calculate_client_price_with_waste_setup_and_quantity_tier
 from quotes.models import Quote
+from services.pricing.breakdown_projection import line_items_from_preview
+from services.pricing.role_projection import build_calculator_economics
 from services.public_matching import get_booklet_marketplace_matches, get_marketplace_matches
 
 from .calculator_config import get_product_definition, resolve_request_finished_size, resolve_stock_option
@@ -370,6 +372,42 @@ def compute_eligible_shop_median(matches: list) -> Decimal | None:
     return ((ordered[middle - 1] + ordered[middle]) / Decimal("2")).quantize(MONEY_QUANTIZER, rounding=ROUND_HALF_UP)
 
 
+def _production_total_for_match(match: dict[str, Any]) -> Decimal | None:
+    preview = _as_dict(match.get("preview"))
+    totals = _as_dict(preview.get("totals"))
+    return (
+        _money(match.get("shop_total"))
+        or _money(totals.get("shop_total"))
+        or _money(totals.get("production_cost"))
+        or _money(match.get("production_cost"))
+    )
+
+
+def _median_production_lines(matches: list[Any], median: Decimal | None) -> list[dict[str, Any]]:
+    """Itemised production lines behind the median that priced the estimate.
+
+    The role breakdown must come from the same match whose production cost is
+    the canonical median, so printer lines sum to the number the buyer's
+    inclusive estimate was built on.
+    """
+    fallback: list[dict[str, Any]] = []
+    for match in _as_list(matches):
+        row = _as_dict(match)
+        preview = _as_dict(row.get("preview"))
+        if not preview:
+            continue
+        lines = row.get("cost_lines")
+        if not isinstance(lines, list) or not lines:
+            lines = line_items_from_preview(preview)
+        if not lines:
+            continue
+        if not fallback:
+            fallback = lines
+        if median is not None and _production_total_for_match(row) == median:
+            return lines
+    return fallback
+
+
 def _format_display_price_text(*, minimum: Decimal, maximum: Decimal, currency: str, display_mode: str) -> str:
     if display_mode == "exact_estimate":
         return _format_display_amount(minimum, currency)
@@ -464,6 +502,27 @@ def _attach_public_estimate(response: dict[str, Any], payload: dict[str, Any]) -
         broker_client_price=broker_client_price,
     )
     standard_total = split["client_total"].quantize(MONEY_QUANTIZER, rounding=ROUND_HALF_UP)
+    markup_percent = (
+        (split["manager_markup"] / split["production_cost"] * Decimal("100")).quantize(
+            MONEY_QUANTIZER, rounding=ROUND_HALF_UP
+        )
+        if split["production_cost"]
+        else Decimal("0.00")
+    )
+    # ONE canonical cost/markup/fee object for the calculator. Every role view
+    # (printer production lines, manager billed lines, buyer inclusive price)
+    # is a projection of this split; nothing is re-added in the frontend.
+    role_economics = build_calculator_economics(
+        cost_lines=_median_production_lines(_as_list(updated.get("matches")), median_production_cost),
+        production_total=split["production_cost"],
+        manager_markup=split["manager_markup"],
+        client_total=split["client_total"],
+        printy_fee=split["printy_fee"],
+        printer_payout=split["shop_payout"],
+        currency=updated.get("currency") or "KES",
+    )
+    if role_economics:
+        updated["role_economics"] = role_economics
     speed_options = _design_speed_options(payload, standard_total)
     updated["speed_options"] = speed_options
     design_tier = _normalize_text(payload.get("speed_tier") or "").replace("-", "_")
@@ -533,7 +592,7 @@ def _attach_public_estimate(response: dict[str, Any], payload: dict[str, Any]) -
     updated["turnaround_tiers"] = tiers
     updated["public_pricing"] = {
         "production_cost": _stringify_money(median_production_cost),
-        "manager_markup_percent": "75.00",
+        "manager_markup_percent": _stringify_money(markup_percent),
         "broker_client_price": _stringify_money(broker_client_price),
         "printy_fee": _stringify_money(split["printy_fee"]),
         "standard_total": _stringify_money(standard_total),

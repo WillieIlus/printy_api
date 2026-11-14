@@ -42,6 +42,7 @@ class RegistrationSurvivesActivationEmailFailureTestCase(TestCase):
         body = response.json()
         self.assertEqual(body["email"], self.email)
         self.assertTrue(body["verification_required"])
+        self.assertFalse(body["activation_email_sent"])
         self.assertIn("registration_activation_email_failed", logs.output[0])
 
         user = User.objects.get(email=self.email)

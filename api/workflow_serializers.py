@@ -1987,6 +1987,16 @@ class MvpRateCardShopDetailsSerializer(serializers.Serializer):
         max_value=2000,
     )
 
+    def to_internal_value(self, data):
+        # The setup response represents "not configured yet" as "". That value
+        # is read back into the editor and sent on the next save, so accept it
+        # here instead of failing IntegerField validation.
+        if isinstance(data, dict):
+            value = data.get("standard_turnaround_hours")
+            if isinstance(value, str) and not value.strip():
+                data = {**data, "standard_turnaround_hours": None}
+        return super().to_internal_value(data)
+
 
 class MvpRateCardPublicShopSerializer(serializers.Serializer):
     name = serializers.CharField(required=False, allow_blank=True, default="")

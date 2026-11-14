@@ -15,6 +15,7 @@ from services.pricing.role_projection import (
     ROLE_BUYER,
     ROLE_MANAGER,
     ROLE_PRINTER,
+    project_calculator_economics,
     projection_role_for_actor,
 )
 
@@ -847,6 +848,69 @@ def project_public_marketplace_response(payload: dict[str, Any] | None) -> dict[
     # buyer callers. One recursive scrub (not per-field picking) guarantees no
     # imposition/sheet/cost/margin/payout key survives anywhere in the tree.
     return scrub_response_for_role(result, ROLE_ANONYMOUS)
+
+
+def project_calculator_preview_for_role(
+    payload: dict[str, Any] | None,
+    *,
+    role: str = ROLE_ANONYMOUS,
+) -> dict[str, Any]:
+    """The public calculator shape, enriched with role-safe economics.
+
+    Buyers and anonymous visitors keep exactly the public marketplace shape, so
+    their calculator is unchanged. Managers and printers additionally receive
+    the canonical cost lines projected for their role, plus the production
+    detail their desk already uses. A printer never receives the buyer total or
+    client price range; their calculator shows the production total instead.
+    """
+    response = _as_dict(payload)
+    projected = project_public_marketplace_response(response)
+    if role not in {ROLE_MANAGER, ROLE_PRINTER}:
+        return projected
+
+    economics = project_calculator_economics(response.get("role_economics"), role=role)
+    if economics:
+        projected["role_economics"] = economics
+
+    production_preview = project_production_intelligence(
+        response.get("production_preview"), role=role
+    )
+    if production_preview:
+        projected["production_preview"] = production_preview
+        projected["production_summary"] = production_preview
+
+    raw_matches = _as_list(response.get("matches"))
+    for index, match in enumerate(projected.get("matches") or []):
+        source = _as_dict(raw_matches[index]) if index < len(raw_matches) else {}
+        detail = project_production_intelligence(source.get("production_preview"), role=role)
+        if detail:
+            match["production_preview"] = detail
+
+    if role == ROLE_PRINTER:
+        # Law 1.3: a printer sees production and their own payout, not the
+        # buyer's total, client range, or buyer speed prices.
+        for key in (
+            "total",
+            "min_price",
+            "max_price",
+            "estimate_min",
+            "estimate_max",
+            "estimate_median",
+            "median_price",
+            "display_price_text",
+            "display_mode",
+            "market_range",
+            "speed_options",
+        ):
+            projected.pop(key, None)
+
+    projected["visibility"] = {
+        "actor": "partner" if role == ROLE_MANAGER else "shop",
+        "exposes_shop_identity": False,
+        "exposes_internal_economics": True,
+        "topology_mode": "managed",
+    }
+    return projected
 
 
 def project_request_snapshot_for_client(payload: dict[str, Any] | None) -> dict[str, Any] | None:

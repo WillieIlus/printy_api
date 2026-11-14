@@ -24,7 +24,7 @@ from setup.services import (
 )
 from shops.models import Shop
 
-STEP_CODES = {"machine", "paper", "printing_rate", "confirm"}
+STEP_CODES = {"machine", "paper", "printing_rate", "standard_turnaround", "confirm"}
 
 
 class RateCardSetupStatusTests(TestCase):
@@ -76,7 +76,7 @@ class RateCardSetupStatusTests(TestCase):
 
         self.assertFalse(status["is_confirmed"])
         self.assertFalse(status["is_ready_to_confirm"])
-        self.assertEqual(status["total_steps"], 4)
+        self.assertEqual(status["total_steps"], 5)
         self.assertEqual(status["completed_steps"], 1)  # machine auto-created
         self.assertIsNotNone(status["next_step"])
         self.assertIn(status["next_step"]["code"], STEP_CODES)
@@ -100,8 +100,24 @@ class RateCardSetupStatusTests(TestCase):
 
         self.assertTrue(status["is_ready_to_confirm"])
         self.assertFalse(status["is_confirmed"])
-        self.assertEqual(status["completed_steps"], 3)
+        self.assertEqual(status["completed_steps"], 4)
         self.assertEqual(status["next_step"]["code"], "confirm")
+
+    def test_shop_with_pricing_but_no_standard_turnaround_is_not_ready(self):
+        shop = self._shop("b-status-no-turnaround", paper=True, rate=True)
+        Shop.objects.filter(pk=shop.pk).update(standard_turnaround_hours=None)
+        shop.refresh_from_db()
+
+        status = get_setup_status_for_shop(shop)["setup_status"]
+
+        self.assertFalse(status["is_ready_to_confirm"])
+        self.assertEqual(status["completed_steps"], 3)
+        self.assertEqual(status["next_step"]["code"], "standard_turnaround")
+        turnaround_step = next(
+            step for step in status["steps"] if step["code"] == "standard_turnaround"
+        )
+        self.assertFalse(turnaround_step["done"])
+        self.assertTrue(turnaround_step["route"].startswith("/app/printer/rates"))
 
     def test_confirmed_shop_reports_confirmed(self):
         shop = self._shop("b-status-confirmed", paper=True, rate=True)
@@ -111,7 +127,7 @@ class RateCardSetupStatusTests(TestCase):
         self.assertTrue(status["is_confirmed"])
         # Already live: there is nothing left to confirm.
         self.assertFalse(status["is_ready_to_confirm"])
-        self.assertEqual(status["completed_steps"], 4)
+        self.assertEqual(status["completed_steps"], 5)
         self.assertIsNone(status["next_step"])
 
     def test_confirmed_shop_that_became_unusable_still_reports_confirmed(self):

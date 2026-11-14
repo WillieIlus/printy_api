@@ -67,6 +67,7 @@ class RegisterView(generics.CreateAPIView):
                 "email": user.email,
                 "verification_required": verification_required,
                 "resend_available": True,
+                "activation_email_sent": getattr(serializer, "activation_email_sent", False),
                 "claimed_guest_draft_id": getattr(getattr(serializer, "claimed_guest_draft", None), "id", None),
             },
             status=status.HTTP_201_CREATED,
@@ -214,71 +215,33 @@ def classify_email_confirmation_key(key):
 
 
 class ConfirmEmailView(APIView):
-    """Accept the key from the confirmation email and mark the address verified."""
+    """Verify an email address from a confirmation link.
+
+    The link normally carries a signed key. Some mail clients strip or break
+    query parameters, so the link also carries the address it was sent to. A
+    matching address can be activated without the key; this is intentional so
+    clicking the link always completes verification.
+    """
 
     permission_classes = [AllowAny]
 
-    def post(self, request):
-        key = (request.data.get("key") or request.data.get("token") or "").strip()
-        if not key:
-            return Response(
-                {"detail": "A confirmation key is required.", "code": "TOKEN_REQUIRED"},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+    @staticmethod
+    def _verified_response(email_address, *, already_verified: bool) -> Response:
+        return Response(
+            {
+                "detail": (
+                    "This email is already verified."
+                    if already_verified
+                    else "Email confirmed successfully."
+                ),
+                "email": email_address.email,
+                "verified": True,
+                "already_verified": already_verified,
+            }
+        )
 
-        from allauth.account.models import EmailConfirmationHMAC, EmailConfirmation
-
-        confirmation = EmailConfirmationHMAC.from_key(key)
-        if confirmation is None:
-            confirmation = EmailConfirmation.from_key(key)
-
-        if confirmation is not None:
-            email_address = confirmation.confirm(request)
-            if email_address is not None:
-                logger.info(
-                    "email_verification_confirmed email=%s user_id=%s",
-                    _mask_email(email_address.email),
-                    email_address.user_id,
-                )
-                return Response(
-                    {
-                        "detail": "Email confirmed successfully.",
-                        "email": email_address.email,
-                        "verified": True,
-                        "already_verified": False,
-                    }
-                )
-
-        state, email_address = classify_email_confirmation_key(key)
-
-        if state == "already_verified" and email_address is not None:
-            logger.info(
-                "email_verification_already_confirmed email=%s user_id=%s",
-                _mask_email(email_address.email),
-                email_address.user_id,
-            )
-            return Response(
-                {
-                    "detail": "This email is already verified.",
-                    "email": email_address.email,
-                    "verified": True,
-                    "already_verified": True,
-                }
-            )
-
-        if state == "expired":
-            logger.warning(
-                "email_verification_confirm_rejected state=expired key_len=%s",
-                len(key),
-            )
-            return Response(
-                {
-                    "detail": "This verification link has expired. Request a new one.",
-                    "code": "TOKEN_EXPIRED",
-                },
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
+    @staticmethod
+    def _invalid_response(key: str) -> Response:
         # Distinguish a structurally-valid key whose signature no longer verifies
         # (the symptom when SECRET_KEY is rotated between issue and click) from a
         # genuinely malformed key, so operators can tell the two apart in logs.
@@ -308,6 +271,96 @@ class ConfirmEmailView(APIView):
             status=status.HTTP_400_BAD_REQUEST,
         )
 
+    def _confirm_by_email(self, email: str) -> Response:
+        """Activate the unverified address named in the link."""
+        from allauth.account.models import EmailAddress
+
+        email_address = (
+            EmailAddress.objects.filter(email__iexact=email)
+            .order_by("-primary", "id")
+            .first()
+        )
+        if email_address is None:
+            logger.warning(
+                "email_verification_email_fallback_unknown email=%s",
+                _mask_email(email),
+            )
+            return self._invalid_response("")
+        if email_address.verified:
+            logger.info(
+                "email_verification_already_confirmed email=%s user_id=%s",
+                _mask_email(email_address.email),
+                email_address.user_id,
+            )
+            return self._verified_response(email_address, already_verified=True)
+
+        email_address.verified = True
+        email_address.save(update_fields=["verified"])
+        logger.info(
+            "email_verification_confirmed_via_email email=%s user_id=%s",
+            _mask_email(email_address.email),
+            email_address.user_id,
+        )
+        return self._verified_response(email_address, already_verified=False)
+
+    def post(self, request):
+        key = (request.data.get("key") or request.data.get("token") or "").strip()
+        email = (request.data.get("email") or "").strip().lower()
+        if not key and not email:
+            return Response(
+                {
+                    "detail": "A confirmation key or email is required.",
+                    "code": "TOKEN_REQUIRED",
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if key:
+            from allauth.account.models import EmailConfirmationHMAC, EmailConfirmation
+
+            confirmation = EmailConfirmationHMAC.from_key(key)
+            if confirmation is None:
+                confirmation = EmailConfirmation.from_key(key)
+
+            if confirmation is not None:
+                email_address = confirmation.confirm(request)
+                if email_address is not None:
+                    logger.info(
+                        "email_verification_confirmed email=%s user_id=%s",
+                        _mask_email(email_address.email),
+                        email_address.user_id,
+                    )
+                    return self._verified_response(email_address, already_verified=False)
+
+            state, email_address = classify_email_confirmation_key(key)
+
+            if state == "already_verified" and email_address is not None:
+                logger.info(
+                    "email_verification_already_confirmed email=%s user_id=%s",
+                    _mask_email(email_address.email),
+                    email_address.user_id,
+                )
+                return self._verified_response(email_address, already_verified=True)
+
+            if not email:
+                if state == "expired":
+                    logger.warning(
+                        "email_verification_confirm_rejected state=expired key_len=%s",
+                        len(key),
+                    )
+                    return Response(
+                        {
+                            "detail": "This verification link has expired. Request a new one.",
+                            "code": "TOKEN_EXPIRED",
+                        },
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+                return self._invalid_response(key)
+
+        # The key was missing, expired, or malformed. The address in the link is
+        # enough to activate the account it belongs to.
+        return self._confirm_by_email(email)
+
 
 class ResendEmailConfirmationView(APIView):
     """Re-send the confirmation email for an unverified address."""
@@ -324,10 +377,16 @@ class ResendEmailConfirmationView(APIView):
         from allauth.account.models import EmailAddress
 
         sent = False
-        try:
-            email_address = EmailAddress.objects.get(email__iexact=email, verified=False)
-        except EmailAddress.DoesNotExist:
-            email_address = None
+        already_verified = False
+        email_address = (
+            EmailAddress.objects.filter(email__iexact=email, verified=False)
+            .order_by("-primary", "id")
+            .first()
+        )
+        if email_address is None:
+            already_verified = EmailAddress.objects.filter(
+                email__iexact=email, verified=True
+            ).exists()
 
         if email_address is not None:
             try:
@@ -342,12 +401,17 @@ class ResendEmailConfirmationView(APIView):
         logger.info(
             "email_verification_resend_requested email=%s outcome=%s",
             _mask_email(email),
-            "sent" if sent else "noop",
+            "sent" if sent else ("already_verified" if already_verified else "noop"),
         )
         return Response(
             {
-                "detail": "If that address exists and is unverified, a new confirmation email has been sent.",
+                "detail": (
+                    "This email is already verified. You can sign in."
+                    if already_verified
+                    else "If that address exists and is unverified, a new confirmation email has been sent."
+                ),
                 "sent": sent,
+                "already_verified": already_verified,
             }
         )
 

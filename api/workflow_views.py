@@ -31,9 +31,9 @@ from jobs.read_state import (
 from .visibility import (
     CLIENT_ACTOR,
     TOPOLOGY_MANAGED,
+    project_calculator_preview_for_role,
     project_identity,
     projection_role_for_request,
-    project_public_marketplace_response,
     project_public_pricing_response,
 )
 from notifications.models import Notification
@@ -1125,7 +1125,8 @@ class CalculatorConfigPreviewView(APIView):
         serializer = CalculatorConfigPreviewSerializer(data=request.query_params.dict())
         serializer.is_valid(raise_exception=True)
         response = build_public_calculator_preview(serializer.validated_data)
-        return Response(project_public_marketplace_response(response))
+        role = projection_role_for_request(request)
+        return Response(project_calculator_preview_for_role(response, role=role))
 
     def post(self, request):
         """
@@ -1146,7 +1147,8 @@ class CalculatorConfigPreviewView(APIView):
         serializer = CalculatorConfigPreviewSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         response = build_public_calculator_preview(serializer.validated_data)
-        return Response(project_public_marketplace_response(response))
+        role = projection_role_for_request(request)
+        return Response(project_calculator_preview_for_role(response, role=role))
 
 
 class BookletCalculatorPreviewView(APIView):
