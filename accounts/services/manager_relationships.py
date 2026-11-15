@@ -1,8 +1,11 @@
 """Derived manager relationships for a client (LAW 13).
 
-A client's managers are never stored as a list. They are computed from two facts:
+A client's managers are never stored as a list. They are computed from facts
+the platform already owns:
 
-  * the client's ``UserProfile.origin_manager`` - the manager who created them, and
+  * the client's ``UserProfile.origin_manager`` - the manager who created them,
+  * every manager the client explicitly locked on the public shortlist,
+  * every manager assigned to one of the client's quote requests, and
   * every manager who has a PAID ``ManagedJob`` for that client.
 
 This module is display-only. It reads and never writes, so it cannot reach a fee decision:
@@ -26,7 +29,19 @@ PAID_PAYMENT_STATUSES = (
 )
 
 SOURCE_ORIGIN = "origin"
+SOURCE_QUOTE_REQUEST = "quote_request"
+SOURCE_LOCKED = "locked"
 SOURCE_PAID_JOB = "paid_job"
+
+# Canonical source order: the client's account manager, then active work, their
+# shortlist, and finally completed paid work. The panel renders this order.
+SOURCE_ORDER = (
+    SOURCE_ORIGIN,
+    SOURCE_QUOTE_REQUEST,
+    SOURCE_LOCKED,
+    SOURCE_PAID_JOB,
+)
+SOURCE_PRIORITY = {source: index for index, source in enumerate(SOURCE_ORDER)}
 
 
 def _manager_photo(profile) -> str:
@@ -49,22 +64,33 @@ def _manager_row(user, profile) -> dict[str, object]:
         "photo": _manager_photo(profile),
         "speciality": str(getattr(profile, "manager_speciality", "") or "").strip(),
         "verified": bool(getattr(profile, "manager_verified", False)),
+        "is_printy": bool(getattr(profile, "is_system_account", False)),
     }
 
 
-def managers_for_client(client_user) -> list[dict[str, object]]:
-    """The managers a client is related to, origin first then most recent paid work.
+def _relationship_priority(sources: set[str]) -> int:
+    return min(SOURCE_PRIORITY[source] for source in sources)
 
-    A manager who is both the origin manager and has paid jobs appears once, with both
-    sources listed. Origin always sorts first.
+
+def managers_for_client(client_user) -> list[dict[str, object]]:
+    """The managers a client is related to, origin first then active work.
+
+    A manager related for more than one reason appears once, with every source
+    listed. Origin always sorts first; managers working on a current quote sort
+    next, then the client's locked shortlist, then paid work.
     """
-    from accounts.models import UserProfile
+    from accounts.models import ManagerLock, UserProfile
     from jobs.models import ManagedJob
+    from quotes.models import QuoteRequest
 
     if client_user is None or getattr(client_user, "pk", None) is None:
         return []
 
-    rows: dict[int, dict[str, object]] = {}
+    sources: dict[int, set[str]] = {}
+    quote_request_counts: dict[int, int] = {}
+    last_quote_request_at: dict[int, object] = {}
+    paid_job_counts: dict[int, int] = {}
+    last_paid_job_at: dict[int, object] = {}
 
     profile = (
         UserProfile.objects.select_related("origin_manager", "origin_manager__profile")
@@ -73,12 +99,31 @@ def managers_for_client(client_user) -> list[dict[str, object]]:
     )
     origin_manager = getattr(profile, "origin_manager", None) if profile is not None else None
     if origin_manager is not None and origin_manager.is_active:
-        origin_profile = getattr(origin_manager, "profile", None)
-        row = _manager_row(origin_manager, origin_profile)
-        row["sources"] = [SOURCE_ORIGIN]
-        row["paid_jobs"] = 0
-        row["last_paid_job_at"] = None
-        rows[origin_manager.id] = row
+        sources.setdefault(origin_manager.id, set()).add(SOURCE_ORIGIN)
+
+    # The shortlist a buyer explicitly built on the public manager cards. It is
+    # a preference, not an assignment, but it is exactly the relationship the
+    # dashboard should reflect before any paid work exists.
+    for manager_id in (
+        ManagerLock.objects.filter(buyer=client_user)
+        .order_by("created_at", "id")
+        .values_list("manager_id", flat=True)
+    ):
+        sources.setdefault(manager_id, set()).add(SOURCE_LOCKED)
+
+    # Every manager already assigned to one of the buyer's quote requests. This
+    # is what makes a freshly submitted request show its manager immediately,
+    # with no paid job required.
+    assigned_requests = (
+        QuoteRequest.objects.filter(created_by=client_user, assigned_manager__isnull=False)
+        .values("assigned_manager_id")
+        .annotate(total=Count("id"), last=Max("created_at"))
+    )
+    for aggregate in assigned_requests:
+        manager_id = aggregate["assigned_manager_id"]
+        sources.setdefault(manager_id, set()).add(SOURCE_QUOTE_REQUEST)
+        quote_request_counts[manager_id] = aggregate["total"]
+        last_quote_request_at[manager_id] = aggregate["last"]
 
     paid_jobs = (
         ManagedJob.objects.filter(
@@ -92,38 +137,44 @@ def managers_for_client(client_user) -> list[dict[str, object]]:
     )
     for aggregate in paid_jobs:
         manager_id = aggregate["broker_id"]
-        existing = rows.get(manager_id)
-        if existing is not None:
-            existing["sources"] = [SOURCE_ORIGIN, SOURCE_PAID_JOB]
-            existing["paid_jobs"] = aggregate["paid_jobs"]
-            existing["last_paid_job_at"] = aggregate["last_paid_job_at"]
+        sources.setdefault(manager_id, set()).add(SOURCE_PAID_JOB)
+        paid_job_counts[manager_id] = aggregate["paid_jobs"]
+        last_paid_job_at[manager_id] = aggregate["last_paid_job_at"]
+
+    if not sources:
+        return []
+
+    profiles = {
+        row.user_id: row
+        for row in UserProfile.objects.filter(user_id__in=sources).select_related("user")
+    }
+
+    from accounts.models import User
+
+    rows: list[dict[str, object]] = []
+    for manager_user in User.objects.filter(pk__in=sources, is_active=True):
+        manager_profile = profiles.get(manager_user.id)
+        manager_sources = sources[manager_user.id]
+        is_printy = bool(getattr(manager_profile, "is_system_account", False))
+        # Printy is the fallback manager the platform assigns, not a person a
+        # client works with. Keep it out of the panel unless it is the manager
+        # actually holding the client's request.
+        if is_printy and SOURCE_QUOTE_REQUEST not in manager_sources:
             continue
-        manager = (
-            UserProfile.objects.select_related("user")
-            .filter(user_id=manager_id)
-            .first()
-        )
-        if manager is None:
-            # A broker without a profile row still counts as a manager.
-            from accounts.models import User
+        row = _manager_row(manager_user, manager_profile)
+        row["sources"] = [source for source in SOURCE_ORDER if source in manager_sources]
+        row["paid_jobs"] = paid_job_counts.get(manager_user.id, 0)
+        row["last_paid_job_at"] = last_paid_job_at.get(manager_user.id)
+        row["quote_requests"] = quote_request_counts.get(manager_user.id, 0)
+        row["last_quote_request_at"] = last_quote_request_at.get(manager_user.id)
+        rows.append(row)
 
-            manager_user = User.objects.filter(pk=manager_id).first()
-            if manager_user is None:
-                continue
-            row = _manager_row(manager_user, None)
-        else:
-            row = _manager_row(manager.user, manager)
-        row["sources"] = [SOURCE_PAID_JOB]
-        row["paid_jobs"] = aggregate["paid_jobs"]
-        row["last_paid_job_at"] = aggregate["last_paid_job_at"]
-        rows[manager_id] = row
-
-    ordered = sorted(
-        rows.values(),
+    rows.sort(
         key=lambda row: (
-            0 if SOURCE_ORIGIN in row["sources"] else 1,
+            _relationship_priority(set(row["sources"])),
+            -(row["quote_requests"] or 0),
             -(row["paid_jobs"] or 0),
             str(row["name"]).lower(),
-        ),
+        )
     )
-    return ordered
+    return rows

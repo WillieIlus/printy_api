@@ -152,6 +152,23 @@ class EmailConfirmationStatesTestCase(APITestCase):
         later = self._confirm(key)
         self.assertEqual(later.status_code, 200)
 
+    def test_allauth_get_route_does_not_consume_the_key(self):
+        from django.urls import reverse
+
+        email_address = self._make_address("allauth-scan@test.com")
+        key = self._key_for(email_address)
+
+        response = self.client.get(reverse("account_confirm_email", args=[key]))
+
+        self.assertEqual(response.status_code, 200)
+        email_address.refresh_from_db()
+        self.assertFalse(email_address.verified)
+
+        confirmed = self._confirm(key)
+        self.assertEqual(confirmed.status_code, 200)
+        email_address.refresh_from_db()
+        self.assertTrue(email_address.verified)
+
     def test_emailed_url_key_validates_end_to_end(self):
         response = self.client.post(
             "/api/auth/register/",

@@ -14,7 +14,7 @@ from django.contrib.auth import get_user_model
 from django.test import TestCase, override_settings
 from rest_framework.test import APIClient
 
-from accounts.models import UserProfile
+from accounts.models import ManagerLock, UserProfile
 from accounts.services.manager_relationships import managers_for_client
 from jobs.models import ManagedJob
 from quotes.models import QuoteRequest
@@ -87,6 +87,80 @@ class MyManagersLawTests(TestCase):
         self.assertEqual(origin_row["sources"], ["origin", "paid_job"])
         self.assertEqual(origin_row["paid_jobs"], 1)
         self.assertEqual(worker_row["paid_jobs"], 2)
+
+    def test_locked_manager_is_listed_before_any_paid_job(self):
+        locked = self._manager("locked@example.test", "Lena Locked", "Lena")
+        ManagerLock.objects.create(buyer=self.client_user, manager=locked)
+
+        rows = managers_for_client(self.client_user)
+
+        self.assertEqual([row["id"] for row in rows], [locked.id])
+        self.assertEqual(rows[0]["sources"], ["locked"])
+        self.assertEqual(rows[0]["paid_jobs"], 0)
+        self.assertEqual(rows[0]["quote_requests"], 0)
+
+    def test_assigned_request_manager_is_listed_before_any_paid_job(self):
+        assigned = self._manager("assigned@example.test", "Ari Assigned", "Ari")
+        QuoteRequest.objects.create(
+            created_by=self.client_user,
+            assigned_manager=assigned,
+            customer_name="Cathy Client",
+            status="submitted",
+        )
+
+        rows = managers_for_client(self.client_user)
+
+        self.assertEqual([row["id"] for row in rows], [assigned.id])
+        self.assertEqual(rows[0]["sources"], ["quote_request"])
+        self.assertEqual(rows[0]["quote_requests"], 1)
+        self.assertIsNotNone(rows[0]["last_quote_request_at"])
+
+    def test_origin_sorts_before_locked_and_assigned_managers(self):
+        origin = self._manager("origin@example.test", "Olive Origin", "Olive")
+        locked = self._manager("locked@example.test", "Lena Locked", "Lena")
+        assigned = self._manager("assigned@example.test", "Ari Assigned", "Ari")
+        self._set_origin(origin)
+        ManagerLock.objects.create(buyer=self.client_user, manager=locked)
+        QuoteRequest.objects.create(
+            created_by=self.client_user,
+            assigned_manager=assigned,
+            customer_name="Cathy Client",
+            status="submitted",
+        )
+
+        rows = managers_for_client(self.client_user)
+
+        self.assertEqual([row["id"] for row in rows], [origin.id, assigned.id, locked.id])
+        self.assertEqual(rows[0]["sources"], ["origin"])
+
+    def test_inactive_manager_is_not_listed(self):
+        locked = self._manager("locked@example.test", "Lena Locked", "Lena")
+        ManagerLock.objects.create(buyer=self.client_user, manager=locked)
+        locked.is_active = False
+        locked.save(update_fields=["is_active"])
+
+        self.assertEqual(managers_for_client(self.client_user), [])
+
+    def test_printy_fallback_is_listed_only_when_it_holds_the_request(self):
+        from accounts.services.system_accounts import ensure_printy_manager_user
+
+        printy, _profile, _created = ensure_printy_manager_user()
+        lock = ManagerLock.objects.create(buyer=self.client_user, manager=printy)
+        self.assertEqual(managers_for_client(self.client_user), [])
+        lock.delete()
+
+        QuoteRequest.objects.create(
+            created_by=self.client_user,
+            assigned_manager=printy,
+            customer_name="Cathy Client",
+            status="submitted",
+        )
+
+        rows = managers_for_client(self.client_user)
+
+        self.assertEqual([row["id"] for row in rows], [printy.id])
+        self.assertTrue(rows[0]["is_printy"])
+        self.assertEqual(rows[0]["sources"], ["quote_request"])
 
     def test_list_carries_no_money_and_writes_nothing(self):
         origin = self._manager("origin@example.test", "Olive Origin", "Olive")

@@ -213,7 +213,10 @@ ACCOUNT_UNIQUE_EMAIL = True
 ACCOUNT_USER_MODEL_USERNAME_FIELD = None
 ACCOUNT_EMAIL_VERIFICATION = os.environ.get("ACCOUNT_EMAIL_VERIFICATION", "mandatory")
 ACCOUNT_EMAIL_SUBJECT_PREFIX = ""
-ACCOUNT_CONFIRM_EMAIL_ON_GET = True
+# Confirmation keys are single-use secrets. A GET (mail-client preview or
+# link scanner) must never consume one; the SPA confirms with an explicit API
+# POST after the recipient opens the link.
+ACCOUNT_CONFIRM_EMAIL_ON_GET = False
 ACCOUNT_EMAIL_UNKNOWN_ACCOUNTS = os.environ.get("ACCOUNT_EMAIL_UNKNOWN_ACCOUNTS", "false").lower() in ("1", "true", "yes")
 ACCOUNT_DEFAULT_HTTP_PROTOCOL = "http" if DEBUG else "https"
 ACCOUNT_ADAPTER = "accounts.adapters.AccountAdapter"

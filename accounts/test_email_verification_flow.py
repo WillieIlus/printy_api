@@ -101,7 +101,28 @@ class EmailVerificationFlowTestCase(TestCase):
         self.assertTrue(query["key"][0])
         self.assertEqual(query["email"][0], user.email)
 
-    def test_email_only_confirmation_activates_the_matching_address(self):
+    def test_valid_key_verifies_its_own_address_when_the_email_hint_differs(self):
+        user, email_address = self._make_unverified("key-wins@test.com")
+        email_address.send_confirmation()
+        link = next(
+            part
+            for part in mail.outbox[-1].body.split()
+            if part.startswith("https://printy.test/auth/confirm-email")
+        )
+        key = parse_qs(urlparse(link).query)["key"][0]
+
+        response = self.client.post(
+            "/api/auth/confirm-email/",
+            {"key": key, "email": "someone-else@test.com"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(response.data["email"], user.email)
+        email_address.refresh_from_db()
+        self.assertTrue(email_address.verified)
+
+    def test_email_only_confirmation_is_rejected(self):
         user, email_address = self._make_unverified("email-only@test.com")
 
         response = self.client.post(
@@ -110,13 +131,12 @@ class EmailVerificationFlowTestCase(TestCase):
             format="json",
         )
 
-        self.assertEqual(response.status_code, 200, response.data)
-        self.assertTrue(response.data["verified"])
-        self.assertFalse(response.data["already_verified"])
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.data["code"], "TOKEN_REQUIRED")
         email_address.refresh_from_db()
-        self.assertTrue(email_address.verified)
+        self.assertFalse(email_address.verified)
 
-    def test_invalid_key_still_activates_when_the_email_matches(self):
+    def test_invalid_key_is_rejected_even_when_the_email_matches(self):
         user, email_address = self._make_unverified("broken-key@test.com")
 
         response = self.client.post(
@@ -125,11 +145,12 @@ class EmailVerificationFlowTestCase(TestCase):
             format="json",
         )
 
-        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.data["code"], "TOKEN_INVALID")
         email_address.refresh_from_db()
-        self.assertTrue(email_address.verified)
+        self.assertFalse(email_address.verified)
 
-    def test_email_only_confirmation_rejects_an_unknown_address(self):
+    def test_email_only_confirmation_is_rejected_for_an_unknown_address(self):
         response = self.client.post(
             "/api/auth/confirm-email/",
             {"email": "nobody@test.com"},
@@ -137,9 +158,9 @@ class EmailVerificationFlowTestCase(TestCase):
         )
 
         self.assertEqual(response.status_code, 400)
-        self.assertEqual(response.data["code"], "TOKEN_INVALID")
+        self.assertEqual(response.data["code"], "TOKEN_REQUIRED")
 
-    def test_email_only_confirmation_reports_an_already_verified_address(self):
+    def test_email_only_confirmation_does_not_report_a_verified_address(self):
         user, email_address = self._make_unverified("already-verified@test.com")
         email_address.verified = True
         email_address.save(update_fields=["verified"])
@@ -150,8 +171,8 @@ class EmailVerificationFlowTestCase(TestCase):
             format="json",
         )
 
-        self.assertEqual(response.status_code, 200, response.data)
-        self.assertTrue(response.data["already_verified"])
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.data["code"], "TOKEN_REQUIRED")
 
     def test_resend_reports_an_already_verified_address(self):
         user, email_address = self._make_unverified("resend-verified@test.com")

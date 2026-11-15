@@ -12,9 +12,9 @@ class AccountAdapter(DefaultAccountAdapter):
     """
 
     def get_email_confirmation_url(self, request, emailconfirmation):
-        # Carry the address alongside the key. If a mail client drops or
-        # mangles the query key, the confirmation page can still activate the
-        # address that received the link.
+        # Carry the address as a display hint so the confirmation page can
+        # prefill the resend field. It is never proof: only the signed key can
+        # verify an address.
         params = {"key": emailconfirmation.key}
         email = getattr(getattr(emailconfirmation, "email_address", None), "email", "")
         if email:
