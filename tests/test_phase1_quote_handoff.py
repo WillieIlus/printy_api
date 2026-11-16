@@ -416,7 +416,7 @@ class BuyerQuotesListViewTestCase(TestCase):
             intent=CalculatorDraftIntent.SAVE_DRAFT,
             calculator_inputs_snapshot=MINIMAL_CALC_PAYLOAD["calculator_inputs_snapshot"],
         )
-        QuoteRequest.objects.create(
+        quote_request = QuoteRequest.objects.create(
             created_by=self.user,
             source_draft=draft,
             customer_name="Buyer",
@@ -432,7 +432,7 @@ class BuyerQuotesListViewTestCase(TestCase):
         self.assertEqual(len(resp.json()), 2)
         by_type = {item["item_type"]: item for item in resp.json()}
         self.assertEqual(by_type["draft"]["draft"]["id"], saved.id)
-        self.assertEqual(by_type["quote_request"]["quote_request"]["id"], draft.id)
+        self.assertEqual(by_type["quote_request"]["quote_request"]["id"], quote_request.id)
 
     def test_unauthenticated_forbidden(self):
         self.client.force_authenticate(None)

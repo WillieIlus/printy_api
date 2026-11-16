@@ -1057,7 +1057,9 @@ class CalculatorDraftSendSerializer(serializers.Serializer):
             attrs["selected_manager_id"] = public_manager_id
         mode = attrs.get("manager_selection_mode")
         if mode == "client_selected" and attrs.get("selected_manager_id") is None:
-            raise serializers.ValidationError({"selected_manager_id": "manager_id is required for client_selected mode."})
+            raise serializers.ValidationError(
+                {"selected_manager_id": "Choose a print manager, or let Printy assign one."}
+            )
         if not mode:
             attrs["manager_selection_mode"] = "client_selected" if attrs.get("selected_manager_id") is not None else "printy_auto"
         return attrs
@@ -1161,7 +1163,9 @@ class IntakeSubmitSerializer(serializers.Serializer):
             attrs["selected_manager_id"] = public_manager_id
         mode = attrs.get("manager_selection_mode")
         if mode == "client_selected" and attrs.get("selected_manager_id") is None:
-            raise serializers.ValidationError({"selected_manager_id": "manager_id is required for client_selected mode."})
+            raise serializers.ValidationError(
+                {"selected_manager_id": "Choose a print manager, or let Printy assign one."}
+            )
         if not mode:
             attrs["manager_selection_mode"] = "client_selected" if attrs.get("selected_manager_id") is not None else "printy_auto"
         return attrs
