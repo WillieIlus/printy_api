@@ -240,9 +240,10 @@ class Law101TrackingTestCase(TestCase):
                 <= set(stage),
                 stage,
             )
-        # Law 11 owners are role labels, never a shop id or name.
+        # Law 11 owners are buyer-safe role labels, never a shop id or name.
+        # Production/printer ownership is presented as the manager.
         self.assertTrue(
-            body["who_has_the_ball"] in {"buyer", "printy", "printer"},
+            body["who_has_the_ball"] in {"buyer", "printy", "manager"},
             body["who_has_the_ball"],
         )
         self.assertNotIn("timeline", body)

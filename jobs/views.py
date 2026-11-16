@@ -35,6 +35,7 @@ from api.throttling import TrackLookupCodeThrottle, TrackLookupIPThrottle
 from jobs.job_codes import job_code, job_from_quote_ref, job_tracking_url
 from jobs.timing import stage_timeline, timing_fields
 from services.pricing.role_projection import (
+    ROLE_BUYER,
     ROLE_MANAGER,
     ROLE_PRINTER,
     assert_projection_is_clean,
@@ -375,6 +376,34 @@ def _phone_matches(provided: str, candidates) -> bool:
     return any(_significant_phone(candidate) == provided_significant for candidate in candidates)
 
 
+_BUYER_SAFE_OWNER = {
+    "printer": "manager",
+    "shop": "manager",
+    "production": "manager",
+    "printshop": "manager",
+}
+_BUYER_SAFE_NEXT_ACTION = {
+    "print the job": "Your manager is running production",
+    "deliver or hand off the job": "Your manager is arranging delivery",
+}
+
+
+def _buyer_owner_label(owner):
+    key = str(owner or "").strip().lower()
+    return _BUYER_SAFE_OWNER.get(key, owner)
+
+
+def _buyer_next_action(action):
+    return _BUYER_SAFE_NEXT_ACTION.get(str(action or "").strip().lower(), action)
+
+
+def _buyer_safe_stage(stage: dict) -> dict:
+    safe = dict(stage)
+    safe["owner"] = _buyer_owner_label(safe.get("owner"))
+    safe["next_action"] = _buyer_next_action(safe.get("next_action"))
+    return safe
+
+
 class JobTrackView(APIView):
     """Law 7.7 / 10.1: the single track page, resolved by job code.
 
@@ -453,6 +482,19 @@ class JobTrackView(APIView):
         assert_projection_is_clean(timing, role)
         events = getattr(managed_job, "job_events", None)
         event_list = list(events.all()) if events is not None else []
+        timeline = stage_timeline(managed_job, events=event_list)
+        if role == ROLE_BUYER:
+            # The buyer's contract is with their manager; production-shop
+            # ownership is presented as the manager handling the job.
+            timing = dict(timing)
+            timing["stage_owner"] = _buyer_owner_label(timing.get("stage_owner"))
+            timing["next_action"] = _buyer_next_action(timing.get("next_action"))
+            timeline = {
+                **timeline,
+                "stages": [
+                    _buyer_safe_stage(stage) for stage in timeline.get("stages") or []
+                ],
+            }
         payload: dict[str, object] = {
             "code": job_code(managed_job),
             "from_quote_ref": job_from_quote_ref(managed_job),
@@ -465,7 +507,7 @@ class JobTrackView(APIView):
             "payment_state": canonical_job_payment_state(managed_job),
             # Law 7.6: the stage timeline (owner, SLA, time taken/remaining,
             # overdue) carries no money for any role.
-            "timeline": stage_timeline(managed_job, events=event_list),
+            "timeline": timeline,
             "timing": timing,
         }
         if role in {ROLE_MANAGER, ROLE_PRINTER}:
@@ -494,8 +536,8 @@ class JobTrackView(APIView):
             {
                 "key": stage.get("key"),
                 "label": stage.get("label"),
-                "owner": stage.get("owner"),
-                "next_action": stage.get("next_action"),
+                "owner": _buyer_owner_label(stage.get("owner")),
+                "next_action": _buyer_next_action(stage.get("next_action")),
                 "state": stage.get("state"),
                 "started_at": stage.get("started_at"),
                 "due_at": stage.get("due_at"),

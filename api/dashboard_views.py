@@ -89,6 +89,15 @@ from .workflow_serializers import (
 )
 
 
+# Buyer-facing wording for production stages. The buyer's contract is with
+# their Printy manager, never with the production shop, so any "printer"
+# ownership is presented as the manager handling the job.
+_BUYER_NEXT_ACTION = {
+    "print the job": "Your manager is running production",
+    "deliver or hand off the job": "Your manager is arranging delivery",
+}
+
+
 class PartnerClientCreateSerializer(serializers.Serializer):
     name = serializers.CharField(required=False, allow_blank=True, max_length=255)
     phone = serializers.CharField(required=False, allow_blank=True, max_length=50)
@@ -1098,6 +1107,16 @@ class BaseRoleDetailView(BaseDashboardHomeView):
         }
         if role == CANONICAL_CLIENT_ROLE:
             row.update(self._client_tracking_payload(job))
+            # The buyer deals with their Printy manager, never the production
+            # shop. Print/printer ownership is projected onto the manager so no
+            # buyer surface can say "the printer is responsible".
+            timing = row.get("timing")
+            if isinstance(timing, dict):
+                owner = str(timing.get("stage_owner") or "").strip().lower()
+                if owner in {"printer", "shop", "production", "press", "printshop"}:
+                    timing["stage_owner"] = "manager"
+                action = str(timing.get("next_action") or "").strip()
+                timing["next_action"] = _BUYER_NEXT_ACTION.get(action.lower(), action)
         if role == CANONICAL_PARTNER_ROLE:
             row["client_name"] = getattr(job.client, "name", "") or getattr(job.client, "email", "") or "Client"
             row["assigned_shop_id"] = job.assigned_shop_id

@@ -11,11 +11,12 @@ from jobs.artwork_confirmation import require_artwork_confirmation_dispatch_read
 from jobs.artwork_workflow import artwork_blocks_dispatch
 from jobs.choices import (
     JobAssignmentStatus,
+    JobFileType,
     ManagedJobAssignmentStatus,
     ManagedJobPaymentStatus,
     ManagedJobStatus,
 )
-from jobs.models import JobAssignment, ManagedJob
+from jobs.models import JobAssignment, JobFile, ManagedJob
 from notifications.models import Notification
 from notifications.services import notify_quote_event
 
@@ -121,6 +122,14 @@ def dispatch_job_to_shop(*, managed_job: ManagedJob, dispatched_by, shop=None, n
                 "updated_at",
             ]
         )
+
+    # Artwork is buyer-supplied: whichever shop produces this job must receive
+    # the original file and every later replacement. Proofs stay shop-private
+    # because they belong to the shop that produced them.
+    JobFile.objects.filter(
+        managed_job=managed_job,
+        file_type__in=[JobFileType.ARTWORK, JobFileType.CUSTOMER_UPLOAD],
+    ).update(assignment=assignment)
 
     managed_job.assigned_shop = target_shop
     managed_job.dispatched_at = timezone.now()

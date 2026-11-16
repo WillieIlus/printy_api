@@ -113,3 +113,14 @@ class Law711ReadStateTests(APITestCase):
             ).count(),
             1,
         )
+
+    def test_buyer_job_timing_names_the_manager_not_the_printer(self):
+        """The buyer's contract is with their manager, never the print shop."""
+        self._auth(self.buyer)
+        rows = self._client_job_list().json()["results"]
+        row = next(item for item in rows if item["id"] == self.job.id)
+        timing = row["timing"]
+
+        self.assertEqual(timing["stage_owner"], "manager")
+        self.assertNotIn("printer", str(timing.get("next_action") or "").lower())
+        self.assertNotIn("print the job", str(timing.get("next_action") or "").lower())

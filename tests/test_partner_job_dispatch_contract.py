@@ -18,6 +18,9 @@ from django.utils import timezone
 
 from jobs.choices import (
     JobAssignmentStatus,
+    JobFileStatus,
+    JobFileType,
+    JobFileVisibility,
     ManagedJobAssignmentStatus,
     ManagedJobPaymentStatus,
     ManagedJobStatus,
@@ -26,7 +29,8 @@ from jobs.artwork_confirmation import (
     request_client_artwork_confirmation,
     respond_to_client_artwork_confirmation,
 )
-from jobs.models import JobAssignment, ManagedJob
+from jobs.file_services import get_visible_job_files_for_actor
+from jobs.models import JobAssignment, JobFile, ManagedJob
 from notifications.models import Notification
 from payments.services import handle_stk_callback, initiate_stk_push
 from pricing.models import PlatformFeePolicy
@@ -212,6 +216,34 @@ class PartnerJobDispatchContractTestCase(TestCase):
             body["dispatched_at"][:19],
             managed_job.dispatched_at.isoformat()[:19],
         )
+
+    @override_settings(MPESA_ENVIRONMENT="test")
+    def test_dispatch_moves_the_buyer_artwork_to_the_production_shop(self):
+        managed_job = self._paid_managed_job()
+        artwork = JobFile.objects.create(
+            managed_job=managed_job,
+            uploaded_by=self.client_user,
+            file="artwork/dispatch-contract-card.pdf",
+            original_filename="card.pdf",
+            file_type=JobFileType.ARTWORK,
+            visibility=JobFileVisibility.CLIENT,
+            status=JobFileStatus.UPLOADED,
+        )
+        self.assertIsNone(artwork.assignment_id)
+
+        body = self._dispatch(managed_job).json()
+        assignment = JobAssignment.objects.get(pk=body["assignment_id"])
+        artwork.refresh_from_db()
+
+        # The printer must receive the buyer's file with the dispatch, not an
+        # empty queue: artwork follows the job to the active assignment.
+        self.assertEqual(artwork.assignment_id, assignment.id)
+        visible = get_visible_job_files_for_actor(
+            managed_job=managed_job,
+            actor="shop",
+            assignment=assignment,
+        )
+        self.assertIn(artwork, list(visible))
 
     @override_settings(MPESA_ENVIRONMENT="test")
     def test_dispatched_job_reaches_the_shop_owners_production_queue(self):
