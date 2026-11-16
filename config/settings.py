@@ -276,6 +276,8 @@ EMAIL_USE_TLS = os.environ.get("EMAIL_USE_TLS", "true").lower() in ("1", "true",
 EMAIL_HOST_USER = os.environ.get("EMAIL_HOST_USER", "")
 EMAIL_HOST_PASSWORD = os.environ.get("EMAIL_HOST_PASSWORD", "")
 EMAIL_TIMEOUT = 10
+# Only used when EMAIL_BACKEND is the filebased backend (local e2e runs).
+EMAIL_FILE_PATH = os.environ.get("EMAIL_FILE_PATH", str(BASE_DIR / "sent_emails"))
 EMAIL_OUTBOX_AUTO_SEND = os.environ.get("EMAIL_OUTBOX_AUTO_SEND", "true").lower() in ("1", "true", "yes")
 # Deferred to a background thread outside local/test, so a slow or blocked SMTP
 # host never holds up the request that enqueued the email (e.g. quote accept).

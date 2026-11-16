@@ -120,6 +120,31 @@ class SpeedTierTests(TestCase):
 
         self.assertEqual([item["tier"]["key"] for item in options], ["standard"])
 
+    def test_buyer_speed_labels_and_surcharges_share_one_config(self):
+        # The label suffix, surcharge percent and multiplier must all come from
+        # speed_config; no buyer-facing surface keeps its own copy.
+        from services.pricing.calculator_config import get_calculator_config
+        from services.pricing.speed_config import (
+            DESIGN_SPEED_TIER_KEYS,
+            DESIGN_SPEED_TIER_LABELS,
+            multiplier_for_tier,
+            surcharge_percent_for_tier,
+        )
+
+        faster = self._option("faster", start=monday(9))
+        fastest = self._option("fastest", start=monday(9))
+        self.assertEqual(faster["tier"]["label"], "Faster +50%")
+        self.assertEqual(fastest["tier"]["label"], "Fastest +100%")
+        self.assertEqual(faster["surcharge_percent"], 50)
+        self.assertEqual(fastest["surcharge_percent"], 100)
+
+        config_tiers = get_calculator_config()["speed_tiers"]
+        self.assertEqual([tier["key"] for tier in config_tiers], list(DESIGN_SPEED_TIER_KEYS))
+        for tier in config_tiers:
+            self.assertEqual(tier["label"], DESIGN_SPEED_TIER_LABELS[tier["key"]])
+            self.assertEqual(tier["surcharge_percent"], surcharge_percent_for_tier(tier["key"]))
+            self.assertEqual(Decimal(str(tier["multiplier"])), multiplier_for_tier(tier["key"]))
+
     def test_odd_hour_windows_never_touch_a_business_hours_ready_time(self):
         self.shop.time_window_optins.update(is_active=False)
         options = build_speed_options(

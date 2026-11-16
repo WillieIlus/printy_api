@@ -470,8 +470,13 @@ def _already_processed(job: ManagedJob, *, request_id: str | None) -> bool:
 def _status_for_stages(stages: list[dict[str, Any]]) -> tuple[str, str, str | None]:
     done = {stage["key"] for stage in stages if stage["state"] == "done"}
     started = {stage["key"] for stage in stages if stage["started_at"]}
-    if "quality_check" in done or "ready_for_dispatch" in done:
+    if "ready_for_dispatch" in done:
         return ManagedJobStatus.READY, JobAssignmentStatus.READY, "ready"
+    if "quality_check" in done:
+        # QC done is not handoff: the printer still has to tap "Ready for
+        # dispatch". Marking the job ready here muted the printer card and
+        # disabled that last button before it could be pressed.
+        return ManagedJobStatus.FINISHING, JobAssignmentStatus.FINISHING, "finishing"
     if "printing" in done or any(key.startswith("finishing:") for key in started):
         return ManagedJobStatus.FINISHING, JobAssignmentStatus.FINISHING, "finishing"
     if "printing" in started:

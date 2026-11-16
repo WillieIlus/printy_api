@@ -26,6 +26,7 @@ from api.visibility import (
 from pricing.choices import ColorMode, Sides
 from pricing.models import FinishingRate
 from services.pricing.role_projection import ROLE_BUYER
+from services.pricing.spec_title import build_calculator_spec_text
 
 logger = logging.getLogger(__name__)
 from quotes.choices import CalculatorDraftContext, CalculatorDraftIntent, CalculatorDraftStatus, QuoteStatus, QuoteOfferStatus
@@ -387,7 +388,12 @@ def _build_quote_item(*, quote_request: QuoteRequest, draft: CalculatorDraft, sh
         item_type="PRODUCT" if product else "CUSTOM",
         product=product,
         title=(product.name if product else custom_snapshot.get("custom_title") or calculator_inputs.get("custom_title") or draft.title or "Custom print job")[:120],
-        spec_text=(custom_snapshot.get("custom_brief") or calculator_inputs.get("custom_brief") or merged_request_details.get("notes") or "")[:5000],
+        spec_text=(
+            custom_snapshot.get("custom_brief")
+            or calculator_inputs.get("custom_brief")
+            or merged_request_details.get("notes")
+            or build_calculator_spec_text(calculator_inputs)
+        )[:5000],
         has_artwork=True,
         quantity=_coerce_positive_int(calculator_inputs.get("quantity")) or 1,
         pricing_mode=pricing_mode if pricing_mode in {"SHEET", "LARGE_FORMAT"} else "SHEET",
@@ -464,7 +470,12 @@ def _build_manager_intake_quote_item(*, quote_request: QuoteRequest, draft: Calc
         quote_request=quote_request,
         item_type="CUSTOM",
         title=(custom_snapshot.get("custom_title") or calculator_inputs.get("custom_title") or draft.title or "Print job")[:120],
-        spec_text=(custom_snapshot.get("custom_brief") or calculator_inputs.get("custom_brief") or merged_request_details.get("notes") or "")[:5000],
+        spec_text=(
+            custom_snapshot.get("custom_brief")
+            or calculator_inputs.get("custom_brief")
+            or merged_request_details.get("notes")
+            or build_calculator_spec_text(calculator_inputs)
+        )[:5000],
         has_artwork=True,
         quantity=_coerce_positive_int(calculator_inputs.get("quantity")) or 1,
         pricing_mode=pricing_mode if pricing_mode in {"SHEET", "LARGE_FORMAT"} else "SHEET",
@@ -936,6 +947,37 @@ def _assert_response_transition(current_status: str | None, next_status: str):
         raise ValueError(f"Cannot change quote response from {current_status or 'new'} to {next_status}.")
 
 
+def _supersede_prior_sent_quotes(*, quote_request: QuoteRequest, response: Quote) -> None:
+    """Close every earlier client-visible offer from the same shop.
+
+    A resend is a new ``Quote`` row (revision), so without this the previous
+    price stays ``sent`` and the buyer can accept the stale amount. The older
+    rows keep their history and version outcome but leave the client inbox.
+    """
+    if response.status not in {
+        QuoteOfferStatus.SENT,
+        QuoteOfferStatus.REVISED,
+        QuoteOfferStatus.MODIFIED,
+    }:
+        return
+    (
+        quote_request.quotes.filter(
+            shop_id=response.shop_id,
+            status__in=[
+                QuoteOfferStatus.SENT,
+                QuoteOfferStatus.REVISED,
+                QuoteOfferStatus.MODIFIED,
+            ],
+        )
+        .exclude(pk=response.pk)
+        .update(
+            status=QuoteOfferStatus.REVISED,
+            client_quote_status="superseded",
+            updated_at=timezone.now(),
+        )
+    )
+
+
 def create_quote_response(*, quote_request: QuoteRequest, shop, user, status: str, response_snapshot: dict, revised_pricing_snapshot: dict | None = None, total=None, note: str = "", turnaround_days=None, turnaround_hours=None) -> Quote:
     _assert_response_transition(None, status)
     if turnaround_hours is None and turnaround_days is not None:
@@ -962,6 +1004,7 @@ def create_quote_response(*, quote_request: QuoteRequest, shop, user, status: st
     response.save(update_fields=["quote_reference", "updated_at"])
     quote_request.status = _request_status_for_response_status(status)
     quote_request.save(update_fields=["status", "updated_at"])
+    _supersede_prior_sent_quotes(quote_request=quote_request, response=response)
 
     if status != QuoteOfferStatus.PENDING:
         from quotes.snapshots import record_quote_version
@@ -1058,6 +1101,7 @@ def update_quote_response(
     if status != QuoteOfferStatus.PENDING and response.sent_at is None:
         response.sent_at = timezone.now()
     response.save()
+    _supersede_prior_sent_quotes(quote_request=response.quote_request, response=response)
 
     quote_request = response.quote_request
     quote_request.status = _request_status_for_response_status(status)

@@ -104,3 +104,123 @@ class Phase2CalculatorManagerSelectionAPITestCase(TestCase):
         )
 
         self.assertIn(response.status_code, (401, 403))
+
+    def _create_intake_draft(self):
+        response = self.client.post(
+            "/api/calculator/drafts/",
+            {
+                "title": "Business cards · 250 pcs",
+                "calculator_inputs_snapshot": {
+                    "product_type": "business_card",
+                    "quantity": 250,
+                    "print_sides": "DUPLEX",
+                    "color_mode": "COLOR",
+                },
+                "pricing_snapshot": {"product_name": "Business cards", "quantity": 250, "total": 5200},
+            },
+            format="json",
+            HTTP_X_PRINTY_ACTIVE_ROLE="client",
+        )
+        self.assertEqual(response.status_code, 201, response.content)
+        return response.json()
+
+    def test_intake_submit_accepts_the_public_manager_id_and_assigns_that_manager(self):
+        from accounts.models import UserProfile
+
+        profile, _ = UserProfile.objects.get_or_create(user=self.manager)
+        draft = self._create_intake_draft()
+
+        response = self.client.post(
+            "/api/intake/submit/",
+            {
+                "draft_id": draft["id"],
+                "selected_manager_public_id": str(profile.public_id),
+                "manager_selection_mode": "client_selected",
+            },
+            format="json",
+            HTTP_X_PRINTY_ACTIVE_ROLE="client",
+        )
+
+        self.assertEqual(response.status_code, 201, response.content)
+        from quotes.models import QuoteRequest
+
+        request = QuoteRequest.objects.get(pk=response.json()["intake_id"])
+        self.assertEqual(request.assigned_manager_id, self.manager.id)
+        self.assertEqual(request.manager_selection_mode, QuoteRequest.MANAGER_SELECTION_CLIENT_SELECTED)
+
+    def test_intake_submit_is_idempotent_when_the_draft_was_already_sent(self):
+        from accounts.models import UserProfile
+        from quotes.models import QuoteRequest
+
+        profile, _ = UserProfile.objects.get_or_create(user=self.manager)
+        draft = self._create_intake_draft()
+        payload = {
+            "draft_id": draft["id"],
+            "selected_manager_public_id": str(profile.public_id),
+            "manager_selection_mode": "client_selected",
+        }
+
+        first = self.client.post(
+            "/api/intake/submit/", payload, format="json", HTTP_X_PRINTY_ACTIVE_ROLE="client"
+        )
+        second = self.client.post(
+            "/api/intake/submit/", payload, format="json", HTTP_X_PRINTY_ACTIVE_ROLE="client"
+        )
+
+        self.assertEqual(first.status_code, 201, first.content)
+        self.assertEqual(second.status_code, 200, second.content)
+        self.assertEqual(second.json()["intake_id"], first.json()["intake_id"])
+        self.assertTrue(second.json()["already_submitted"])
+        self.assertEqual(QuoteRequest.objects.count(), 1)
+
+    def test_dashboard_draft_send_accepts_the_public_manager_id(self):
+        """The signed-in dashboard picker only holds the public manager UUID."""
+        from accounts.models import UserProfile
+        from quotes.models import QuoteRequest
+
+        profile, _ = UserProfile.objects.get_or_create(user=self.manager)
+        draft = self._create_intake_draft()
+
+        response = self.client.post(
+            f"/api/calculator/drafts/{draft['id']}/send/",
+            {
+                "selected_manager_public_id": str(profile.public_id),
+                "manager_selection_mode": "client_selected",
+            },
+            format="json",
+            HTTP_X_PRINTY_ACTIVE_ROLE="client",
+        )
+
+        self.assertEqual(response.status_code, 201, response.content)
+        request = QuoteRequest.objects.get(source_draft_id=draft["id"])
+        self.assertEqual(request.assigned_manager_id, self.manager.id)
+        self.assertEqual(request.manager_selection_mode, QuoteRequest.MANAGER_SELECTION_CLIENT_SELECTED)
+
+    def test_dashboard_draft_send_rejects_a_manager_id_that_conflicts_with_the_public_id(self):
+        from accounts.models import UserProfile
+        from quotes.models import QuoteRequest
+
+        other_manager = User.objects.create_user(
+            email="phase2-other-manager@test.com",
+            password="pass12345",
+            role=User.Role.PARTNER,
+            name="Other Manager",
+            partner_profile_enabled=True,
+        )
+        profile, _ = UserProfile.objects.get_or_create(user=self.manager)
+        draft = self._create_intake_draft()
+
+        response = self.client.post(
+            f"/api/calculator/drafts/{draft['id']}/send/",
+            {
+                "selected_manager_id": other_manager.id,
+                "selected_manager_public_id": str(profile.public_id),
+                "manager_selection_mode": "client_selected",
+            },
+            format="json",
+            HTTP_X_PRINTY_ACTIVE_ROLE="client",
+        )
+
+        self.assertEqual(response.status_code, 400, response.content)
+        self.assertIn("does not match", json.dumps(response.json()))
+        self.assertEqual(QuoteRequest.objects.count(), 0)

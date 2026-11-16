@@ -9,7 +9,12 @@ from django.utils import timezone
 from jobs.audit_services import EVENT_ASSIGNMENT_CREATED, record_job_status_event
 from jobs.artwork_confirmation import require_artwork_confirmation_dispatch_ready
 from jobs.artwork_workflow import artwork_blocks_dispatch
-from jobs.choices import ManagedJobAssignmentStatus, ManagedJobPaymentStatus, ManagedJobStatus
+from jobs.choices import (
+    JobAssignmentStatus,
+    ManagedJobAssignmentStatus,
+    ManagedJobPaymentStatus,
+    ManagedJobStatus,
+)
 from jobs.models import JobAssignment, ManagedJob
 from notifications.models import Notification
 from notifications.services import notify_quote_event
@@ -50,11 +55,15 @@ def dispatch_job_to_shop(*, managed_job: ManagedJob, dispatched_by, shop=None, n
     artwork_production_reason = artwork_blocks_dispatch(managed_job)
     if artwork_production_reason:
         raise ValidationError(artwork_production_reason)
+    active_assignment = JobAssignment.objects.filter(
+        managed_job=managed_job,
+        reassigned_from__isnull=True,
+    ).first()
     if managed_job.dispatched_at is not None:
-        existing = managed_job.assignments.filter(reassigned_from__isnull=True).first()
-        if existing is not None:
-            return existing
-        raise ValidationError("This job has already been dispatched.")
+        if active_assignment is not None and active_assignment.status != JobAssignmentStatus.REJECTED:
+            return active_assignment
+        if active_assignment is None:
+            raise ValidationError("This job has already been dispatched.")
 
     target_shop = shop or managed_job.assigned_shop or getattr(getattr(managed_job, "source_quote", None), "shop", None)
     if target_shop is None:
@@ -65,10 +74,7 @@ def dispatch_job_to_shop(*, managed_job: ManagedJob, dispatched_by, shop=None, n
         raise ValidationError("Managed job needs QuoteFinancialSplit before dispatch.")
     shop_payout = split.shop_payout
 
-    assignment = JobAssignment.objects.filter(
-        managed_job=managed_job,
-        reassigned_from__isnull=True,
-    ).first()
+    assignment = active_assignment
     if assignment is None:
         assignment = JobAssignment.objects.create(
             managed_job=managed_job,
@@ -87,11 +93,34 @@ def dispatch_job_to_shop(*, managed_job: ManagedJob, dispatched_by, shop=None, n
             },
         )
     else:
+        snapshot = dict(assignment.operational_snapshot or {})
+        if assignment.status == JobAssignmentStatus.REJECTED:
+            # The one active row is reused so the unique-active-assignment
+            # invariant keeps holding. The rejection itself remains in the
+            # append-only job event log; the row now represents the new shop.
+            snapshot["previous_assignment"] = {
+                "shop_id": assignment.assigned_shop_id,
+                "rejected_at": assignment.rejected_at.isoformat() if assignment.rejected_at else None,
+            }
+            assignment.status = JobAssignmentStatus.PENDING
+            assignment.rejected_at = None
+        snapshot["assigned_shop_id"] = target_shop.id
         assignment.assigned_shop = target_shop
         assignment.shop_payout = shop_payout
+        assignment.operational_snapshot = snapshot
         if notes:
             assignment.assignment_notes = notes
-        assignment.save(update_fields=["assigned_shop", "shop_payout", "assignment_notes", "updated_at"])
+        assignment.save(
+            update_fields=[
+                "assigned_shop",
+                "shop_payout",
+                "operational_snapshot",
+                "assignment_notes",
+                "status",
+                "rejected_at",
+                "updated_at",
+            ]
+        )
 
     managed_job.assigned_shop = target_shop
     managed_job.dispatched_at = timezone.now()
@@ -136,6 +165,10 @@ def ensure_job_assignment_for_paid_job(
 
     active_assignment = managed_job.assignments.filter(reassigned_from__isnull=True).first()
     if active_assignment is not None:
+        if active_assignment.status == JobAssignmentStatus.REJECTED:
+            # A rejection is an explicit manager decision point, not a hole for
+            # the payment path to auto-fill. The manager picks the new printer.
+            return None
         return active_assignment
     if managed_job.payment_status != ManagedJobPaymentStatus.CONFIRMED and managed_job.status != ManagedJobStatus.PAYMENT_CONFIRMED:
         return None

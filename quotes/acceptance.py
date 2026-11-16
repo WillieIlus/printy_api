@@ -36,6 +36,8 @@ def accept_quote_for_payment(*, quote: Quote, accepted_by, payer_phone: str = ""
     so the account check is skipped only when the caller passes this flag.
     """
     quote = Quote.objects.select_for_update().select_related("quote_request").get(pk=quote.pk)
+    if quote.client_quote_status == "superseded":
+        raise ValidationError("This offer was replaced by a newer revision. Refresh and review the latest offer.")
     if not authorized and not _can_accept(quote, accepted_by):
         raise ValidationError("You cannot accept this quote.")
     if quote.is_expired:

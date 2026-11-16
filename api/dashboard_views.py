@@ -47,6 +47,7 @@ from pricing.services.production_cost_calculator import calculate_client_price_w
 from jobs.settlement_compat import get_financial_split_for_job
 from payments.models import Payment
 from payments.services import create_payment_for_quote, initiate_stk_push, normalize_mpesa_phone
+from quotes.choices import QuoteStatus
 from quotes.guardrails import calculate_quote_expiry, validate_partner_markup_amount
 from quotes.models import QuoteRequest, Quote
 from quotes.partner_services import respond_to_assigned_quote_request
@@ -108,6 +109,22 @@ class OfflineQuoteClaimSerializer(serializers.Serializer):
 
 def _new_offline_claim_token() -> str:
     return secrets.token_urlsafe(24)
+
+
+def _pending_client_invite_token(request_snapshot: dict | None) -> str | None:
+    """Token for the phone-first account setup link.
+
+    The offline-claim token belongs to an already signed-in account claiming a
+    request. A phone-only client first has to create the account, and the
+    ``/app/client-invite`` page claims a ``ClientInvite`` token, so the send
+    response has to expose that token separately instead of handing the wrong
+    token to the setup page.
+    """
+    pending_client = (request_snapshot or {}).get("pending_client")
+    if not isinstance(pending_client, dict):
+        return None
+    token = str(pending_client.get("claim_token") or "").strip()
+    return token or None
 
 
 def _pending_client_has_offline_contact(pending_client: dict[str, object], quote_request: QuoteRequest) -> bool:
@@ -479,13 +496,34 @@ class PartnerDashboardProfileView(BaseDashboardHomeView):
         return profile
 
     def get(self, request):
+        from quotes.guardrails import (
+            get_partner_markup_default_rate,
+            get_partner_markup_min_rate,
+        )
+
         profile = self._get_profile(request.user)
-        return Response({"default_markup_rate": str(profile.default_markup_rate)})
+        rate = profile.default_markup_rate
+        # A profile created before the manager workspace existed stores 0.0000,
+        # which is below the quote guardrail's 5% floor and would make every
+        # "Prepare quote" fail. Treat an unusable stored rate as unset and heal
+        # it to the platform default so the manager can price the first job.
+        if rate < get_partner_markup_min_rate():
+            rate = get_partner_markup_default_rate()
+            profile.default_markup_rate = rate
+            profile.save(update_fields=["default_markup_rate", "updated_at"])
+        return Response({"default_markup_rate": str(rate)})
 
     def patch(self, request):
+        from quotes.guardrails import get_partner_markup_max_rate, get_partner_markup_min_rate
+
         profile = self._get_profile(request.user)
         serializer = serializers.Serializer(data=request.data)
-        serializer.fields["default_markup_rate"] = serializers.DecimalField(max_digits=5, decimal_places=4)
+        serializer.fields["default_markup_rate"] = serializers.DecimalField(
+            max_digits=5,
+            decimal_places=4,
+            min_value=get_partner_markup_min_rate(),
+            max_value=get_partner_markup_max_rate(),
+        )
         serializer.is_valid(raise_exception=True)
         profile.default_markup_rate = serializer.validated_data["default_markup_rate"]
         profile.save(update_fields=["default_markup_rate", "updated_at"])
@@ -973,6 +1011,7 @@ class BaseRoleDetailView(BaseDashboardHomeView):
             "assigned_manager_name": (serialized.get("assigned_manager") or {}).get("display_name") or "",
             "request_snapshot": serialized.get("request_snapshot") or {},
             "attachments": serialized.get("attachments") or [],
+            "artwork": serialized.get("artwork") or {},
             "latest_response": latest_response_payload,
             "created_at": quote_request.created_at,
             "updated_at": quote_request.updated_at,
@@ -1035,6 +1074,10 @@ class BaseRoleDetailView(BaseDashboardHomeView):
             "status": job.status,
             "payment_status": job.payment_status,
             "assignment_status": job.assignment_status,
+            # The manager card renders its dispatched state (and hides the
+            # dispatch control) from this field; omitting it made every list
+            # refresh look like the job had never been dispatched.
+            "dispatched_at": job.dispatched_at,
             "requested_deadline": job.requested_deadline,
             "updated_at": job.updated_at,
             **artwork_state,
@@ -1057,7 +1100,11 @@ class BaseRoleDetailView(BaseDashboardHomeView):
             row.update(self._client_tracking_payload(job))
         if role == CANONICAL_PARTNER_ROLE:
             row["client_name"] = getattr(job.client, "name", "") or getattr(job.client, "email", "") or "Client"
+            row["assigned_shop_id"] = job.assigned_shop_id
             row["assigned_shop_name"] = getattr(job.assigned_shop, "name", "") or "Awaiting assignment"
+            row["payout_hold"] = bool(job.payout_hold)
+            row["is_late"] = bool(job.is_late)
+            row["lateness_minutes"] = job.lateness_minutes
         if role == CANONICAL_PRODUCTION_ROLE:
             row["assigned_shop_name"] = getattr(job.assigned_shop, "name", "") or "Production Shop"
             row["specs"] = self._production_specs_snapshot(job)
@@ -1298,6 +1345,71 @@ def _resolve_partner_speed_option(*, quote_request, base_price, request):
     return option, None
 
 
+class PartnerQuoteDeclineView(ManagerCapablePartnerQuoteView):
+    """The manager's explicit "I cannot take this request" action.
+
+    Declining never deletes the request. The buyer keeps the specs and can
+    choose another verified manager, while the manager keeps the audit trail
+    in the request snapshot. A request that already has a paid job cannot be
+    declined from here.
+    """
+
+    dashboard_role = "partner"
+    allowed_roles = (CANONICAL_PARTNER_ROLE,)
+
+    def get_queryset(self, request):
+        return QuoteRequest.objects.filter(
+            Q(created_by=request.user) | Q(assigned_manager=request.user) | Q(managed_jobs__broker=request.user)
+        ).select_related("shop", "on_behalf_of", "assigned_manager").distinct()
+
+    def post(self, request, pk):
+        quote_request = get_object_or_404(self.get_queryset(request), pk=pk)
+        reason = str(request.data.get("reason") or "").strip()
+        if not reason:
+            return Response({"detail": "Tell the client why you cannot take this request."}, status=400)
+        if quote_request.status in {QuoteStatus.CANCELLED, QuoteStatus.REJECTED, QuoteStatus.CLOSED}:
+            return Response(
+                {"detail": "This request is already closed.", "status": quote_request.status},
+                status=400,
+            )
+        if quote_request.managed_jobs.exists():
+            return Response({"detail": "A paid job already exists on this request."}, status=400)
+        if quote_request.quotes.filter(status="accepted").exists():
+            return Response({"detail": "An accepted offer already exists on this request."}, status=400)
+
+        snapshot = dict(quote_request.request_snapshot or {})
+        snapshot["manager_declined"] = {
+            "reason": reason,
+            "declined_at": timezone.now().isoformat(),
+            "declined_by": request.user.id,
+        }
+        quote_request.request_snapshot = snapshot
+        quote_request.status = QuoteStatus.REJECTED
+        quote_request.save(update_fields=["request_snapshot", "status", "updated_at"])
+
+        buyer = quote_request.on_behalf_of or quote_request.created_by
+        if buyer and buyer.id != request.user.id:
+            notify_quote_event(
+                recipient=buyer,
+                notification_type=Notification.REQUEST_DECLINED,
+                message=(
+                    f"Your manager declined request "
+                    f"{quote_request.request_reference or quote_request.id}. "
+                    "You can choose another verified manager."
+                ),
+                object_type="quote_request",
+                object_id=quote_request.id,
+                actor=request.user,
+            )
+        record = {
+            "quote_request_id": quote_request.id,
+            "status": quote_request.status,
+            "reason": reason,
+            "declined_at": snapshot["manager_declined"]["declined_at"],
+        }
+        return Response(record, status=200)
+
+
 class PartnerQuoteSendToClientView(ManagerCapablePartnerQuoteView):
     dashboard_role = "partner"
     allowed_roles = (CANONICAL_PARTNER_ROLE,)
@@ -1402,6 +1514,25 @@ class PartnerQuoteSendToClientView(ManagerCapablePartnerQuoteView):
         if latest_response is None or latest_response.total is None:
             return Response({"detail": "A production base quote is required before sending to the client."}, status=400)
 
+        # LAW 2.3: a revision that moves the client total must show the buyer the
+        # old and new price and require an acknowledgement before payment. The
+        # baseline is this quote's own last sent total when it is being re-sent,
+        # otherwise the total of the previous quote the client already saw.
+        already_sent_to_client = (
+            latest_response.client_quote_status == "sent"
+            and latest_response.sent_to_client_at is not None
+        )
+        if already_sent_to_client:
+            previous_client_total = latest_response.total
+        else:
+            previous_sent_quote = (
+                quote_request.quotes.filter(client_quote_status="sent")
+                .exclude(pk=latest_response.pk)
+                .order_by("-sent_to_client_at", "-id")
+                .first()
+            )
+            previous_client_total = previous_sent_quote.total if previous_sent_quote is not None else None
+
         chosen_speed = None
         production_cost_inputs = (
             request.data.get("production_cost_inputs")
@@ -1447,8 +1578,7 @@ class PartnerQuoteSendToClientView(ManagerCapablePartnerQuoteView):
             }
         else:
             gross_margin_type = str(request.data.get("broker_margin_type") or "percent").strip().lower()
-            default_broker_percent = Decimal("75.00")
-            gross_margin_value = Decimal(str(request.data.get("broker_margin_value") or default_broker_percent))
+            explicit_margin = request.data.get("broker_margin_value") not in (None, "")
             existing_split = getattr(latest_response, "financial_split", None)
             base_price = Decimal(str(existing_split.production_cost if existing_split is not None else latest_response.total))
             # Re-sending an already surcharged quote must not stack the speed uplift
@@ -1461,14 +1591,22 @@ class PartnerQuoteSendToClientView(ManagerCapablePartnerQuoteView):
             if previous_multiplier > 0 and previous_multiplier != Decimal("1.00"):
                 base_price = (base_price / previous_multiplier).quantize(Decimal("0.01"))
 
-            if gross_margin_type == "fixed":
+            if not explicit_margin and existing_split is not None:
+                # The manager already prepared this price. Sending it to the
+                # client must keep that exact margin: defaulting to 75% here
+                # silently rewrote a 100% quote back to 75% at send time.
+                gross_margin_amount = Decimal(str(existing_split.gross_margin or "0")).quantize(Decimal("0.01"))
+            elif gross_margin_type == "fixed":
                 try:
-                    validate_partner_markup_amount(base_price=base_price, markup_amount=gross_margin_value)
+                    validate_partner_markup_amount(
+                        base_price=base_price,
+                        markup_amount=Decimal(str(request.data.get("broker_margin_value") or "0")),
+                    )
                 except ValueError as exc:
                     return Response({"detail": str(exc)}, status=400)
-                gross_margin_amount = gross_margin_value.quantize(Decimal("0.01"))
+                gross_margin_amount = Decimal(str(request.data.get("broker_margin_value") or "0")).quantize(Decimal("0.01"))
             else:
-                rate = Decimal(str(request.data.get("broker_margin_value") or default_broker_percent)).quantize(Decimal("0.01"))
+                rate = Decimal(str(request.data.get("broker_margin_value") or "75.00")).quantize(Decimal("0.01"))
                 try:
                     validate_partner_markup_amount(
                         base_price=base_price,
@@ -1512,6 +1650,7 @@ class PartnerQuoteSendToClientView(ManagerCapablePartnerQuoteView):
                     "pricing": stored_snapshot.get("customer_pricing") or {},
                     "offline_client": is_offline_quote,
                     "claim_token": request_snapshot.get("offline_claim_token") if is_offline_quote else None,
+                    "client_invite_token": _pending_client_invite_token(request_snapshot) if is_offline_quote else None,
                     "payment": None,
                     "already_sent": True,
                 }
@@ -1612,6 +1751,15 @@ class PartnerQuoteSendToClientView(ManagerCapablePartnerQuoteView):
             quote_request.status = QuoteRequest.QUOTED
             update_fields.append("status")
         quote_request.save(update_fields=update_fields)
+        # LAW 2.3: the revised total must be acknowledged by the buyer before
+        # payment can start. This is the same flag the override path sets.
+        from quotes.overrides import flag_buyer_price_updated
+
+        flag_buyer_price_updated(
+            quote_request=quote_request,
+            old_total=previous_client_total,
+            new_total=financial_split["client_total"],
+        )
         client_recipient = quote_request.on_behalf_of or quote_request.created_by
         if client_recipient and getattr(client_recipient, "id", None) != request.user.id:
             notify_quote_event(
@@ -1662,6 +1810,7 @@ class PartnerQuoteSendToClientView(ManagerCapablePartnerQuoteView):
                 "speed": chosen_speed,
                 "offline_client": is_offline_quote,
                 "claim_token": request_snapshot.get("offline_claim_token") if is_offline_quote else None,
+                "client_invite_token": _pending_client_invite_token(request_snapshot) if is_offline_quote else None,
                 "payment": payment_payload,
             }
         )

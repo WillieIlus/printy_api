@@ -59,6 +59,55 @@ def build_job_title(job: ManagedJob, *, long_form: bool = False) -> str:
     return title or "Print job"
 
 
+def build_calculator_spec_text(calculator_inputs: dict | None, *, fallback: str = "") -> str:
+    """One buyer-readable line describing the calculator spec.
+
+    Quote items created from a manager-led intake have no product-specific
+    ``custom_brief``; the buyer still needs to see the size, stock, sides,
+    colour and finishing they selected. This reads only the stored calculator
+    inputs and never prices anything.
+    """
+    raw = calculator_inputs if isinstance(calculator_inputs, dict) else {}
+    product_key = str(raw.get("product_type") or "").strip().lower()
+    parts: list[str] = []
+
+    size = _size_label(raw.get("size") or raw.get("finished_size"), product_key)
+    if size:
+        parts.append(size)
+
+    category = str(raw.get("requested_paper_category") or "").strip()
+    gsm = _int(raw.get("requested_gsm"))
+    if category:
+        paper = f"{' '.join(category.replace('_', ' ').replace('-', ' ').split()).title()}"
+        if gsm:
+            paper = f"{paper} {gsm}gsm"
+        parts.append(paper)
+    elif gsm:
+        parts.append(f"{gsm}gsm")
+
+    sides = normalize_print_sides(raw.get("print_sides") or raw.get("sides"))
+    if sides == "DUPLEX":
+        parts.append("Double sided")
+    elif sides == "SIMPLEX":
+        parts.append("Single sided")
+
+    color = normalize_color_mode(raw.get("color_mode") or raw.get("colour_mode"))
+    if color == "COLOR":
+        parts.append("Full color")
+    elif color == "BW":
+        parts.append("Black only")
+
+    finishing = _finishing_label(raw.get("lamination"), product_key)
+    if finishing:
+        parts.append(finishing.title())
+
+    if raw.get("corner_rounding"):
+        parts.append("Round corners")
+
+    text = " · ".join(part for part in parts if part)
+    return text or fallback
+
+
 def _first(*values: Any) -> str:
     for value in values:
         if value is None:
@@ -261,8 +310,8 @@ def _size_label(raw: Any, product_key: str) -> str:
     parts = cleaned.split()
     if len(parts) == 2:
         try:
-            w = float(parts[0])
-            h = float(parts[1])
+            w = float(parts[0].replace("mm", "").replace("cm", ""))
+            h = float(parts[1].replace("mm", "").replace("cm", ""))
             if (w >= 1 and h >= 1):
                 unit = raw if isinstance(raw, str) else ""
                 unit_lower = str(unit).lower()

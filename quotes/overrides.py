@@ -168,6 +168,39 @@ def _flag_buyer_price_updated(
     )
 
 
+def flag_buyer_price_updated(
+    *,
+    quote_request: QuoteRequest,
+    old_total: Any,
+    new_total: Any,
+) -> None:
+    """Flag a client-visible price change the buyer must acknowledge (law 2.3).
+
+    Used by the manager send path when a revised quote moves the client total:
+    the buyer sees the old and new totals and must acknowledge before payment.
+    No-op when either total is missing or the price did not actually move.
+    """
+    old_total = _to_decimal(old_total)
+    new_total = _to_decimal(new_total)
+    if old_total is None or new_total is None or old_total == new_total:
+        return
+    quote_request.price_updated = True
+    quote_request.price_updated_old_total = old_total
+    quote_request.price_updated_new_total = new_total
+    quote_request.price_acknowledged_at = None
+    quote_request.price_acknowledged_by = None
+    quote_request.save(
+        update_fields=[
+            "price_updated",
+            "price_updated_old_total",
+            "price_updated_new_total",
+            "price_acknowledged_at",
+            "price_acknowledged_by",
+            "updated_at",
+        ]
+    )
+
+
 def acknowledge_price_update(*, quote_request: QuoteRequest, user) -> QuoteRequest:
     """Buyer acknowledges a price update so payment may proceed (law 2.3)."""
     quote_request.price_updated = False
@@ -287,6 +320,7 @@ __all__ = [
     "active_overrides",
     "record_override",
     "acknowledge_price_update",
+    "flag_buyer_price_updated",
     "apply_overrides_to_canonical",
     "create_quote_version",
 ]

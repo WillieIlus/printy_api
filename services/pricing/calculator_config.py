@@ -12,6 +12,12 @@ from inventory.choices import PaperCategory
 from inventory.models import Paper
 from pricing.choices import Sides
 from pricing.models import FinishingRate
+from services.pricing.speed_config import (
+    DESIGN_SPEED_TIER_KEYS,
+    DESIGN_SPEED_TIER_LABELS,
+    multiplier_for_tier,
+    surcharge_percent_for_tier,
+)
 from shops.models import Shop
 
 
@@ -424,6 +430,18 @@ def get_calculator_config() -> dict[str, Any]:
         "sizes": SIZE_LIBRARY,
         "print_sides": PRINT_SIDES,
         "color_modes": COLOR_MODES,
+        # Buyer speed tiers, composed from the same config as the pricing
+        # engine. The calculator uses these labels/multipliers only until its
+        # first server preview arrives; every total stays server-priced.
+        "speed_tiers": [
+            {
+                "key": key,
+                "label": DESIGN_SPEED_TIER_LABELS[key],
+                "multiplier": str(multiplier_for_tier(key)),
+                "surcharge_percent": surcharge_percent_for_tier(key),
+            }
+            for key in DESIGN_SPEED_TIER_KEYS
+        ],
         "preview_endpoint": "/api/calculator/public-preview/",
     }
 

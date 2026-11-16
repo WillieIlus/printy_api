@@ -3,6 +3,7 @@ from types import SimpleNamespace
 
 from unittest.mock import patch
 from django.test import TestCase, override_settings
+from django.utils import timezone
 from rest_framework.test import APIClient
 
 from accounts.models import User
@@ -184,6 +185,65 @@ format="json",
         # acceptance charge could pick either value.
         self.assertEqual(quote.total, quote.financial_split.client_total)
         self.assertEqual(str(quote.total), "700.00")
+
+    def test_new_revision_supersedes_previous_offer_and_stale_offer_cannot_be_accepted(self):
+        quote_request = QuoteRequest.objects.create(
+            shop=self.shop,
+            created_by=self.partner,
+            on_behalf_of=self.end_client,
+            customer_name="Send Quote Client",
+            customer_email=self.end_client.email,
+            status=QuoteStatus.QUOTED,
+            request_snapshot={"source": "partner_quote_builder"},
+        )
+        old = Quote.objects.create(
+            quote_request=quote_request,
+            shop=self.shop,
+            created_by=self.partner,
+            status=QuoteOfferStatus.SENT,
+            client_quote_status="sent",
+            total=Decimal("1000.00"),
+            sent_at=timezone.now(),
+            sent_to_client_at=timezone.now(),
+            revision_number=1,
+            response_snapshot={"production_cost_inputs": self._production_cost_inputs()},
+        )
+        revision = Quote.objects.create(
+            quote_request=quote_request,
+            shop=self.shop,
+            created_by=self.partner,
+            status=QuoteOfferStatus.PENDING,
+            total=Decimal("1200.00"),
+            revision_number=2,
+            response_snapshot={"production_cost_inputs": self._production_cost_inputs()},
+        )
+        self.client.force_authenticate(user=self.partner)
+
+        with self.captureOnCommitCallbacks(execute=True):
+            response = self.client.post(
+                f"/api/dashboard/partner/quotes/{quote_request.id}/send-to-client/",
+                {},
+                format="json",
+            )
+
+        self.assertEqual(response.status_code, 200)
+        old.refresh_from_db()
+        revision.refresh_from_db()
+        self.assertEqual(old.status, QuoteOfferStatus.REVISED)
+        self.assertEqual(old.client_quote_status, "superseded")
+        self.assertEqual(revision.status, QuoteOfferStatus.SENT)
+        self.assertEqual(revision.client_quote_status, "sent")
+
+        # The buyer only sees the current revision, and the stale price cannot be
+        # accepted even by a direct call.
+        self.client.force_authenticate(user=self.end_client)
+        listed = self.client.get("/api/client/responses/")
+        self.assertEqual(listed.status_code, 200)
+        ids = [row["id"] for row in listed.data]
+        self.assertIn(revision.id, ids)
+        self.assertNotIn(old.id, ids)
+        stale_accept = self.client.post(f"/api/client/responses/{old.id}/accept/", {}, format="json")
+        self.assertEqual(stale_accept.status_code, 400)
 
     def test_duplicate_send_to_client_is_idempotent_and_sends_exactly_once(self):
         quote_request = QuoteRequest.objects.create(

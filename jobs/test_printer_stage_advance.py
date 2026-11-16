@@ -15,6 +15,7 @@ from jobs.choices import (
     ManagedJobStatus,
 )
 from jobs.models import JobAssignment, JobEvent, JobStatusEvent, ManagedJob
+from jobs.printer_workflow import build_printer_progress
 from quotes.models import QuoteRequest
 from shops.models import Shop
 
@@ -126,8 +127,18 @@ class PrinterStageAdvanceTests(TestCase):
         # The first finishing step is auto-started: the printer only taps "done".
         self._advance(assignment, "Lamination done")
         self._advance(assignment, "QC passed")
+        # The QC tap leaves the final dispatch action on the card; the card must
+        # stay active and the assignment must not read ready yet.
         self._advance(assignment, "Ready for dispatch")
+        assignment.refresh_from_db()
+        self.assertEqual(assignment.status, JobAssignmentStatus.FINISHING)
+        self.assertEqual(
+            build_printer_progress(assignment)["next_action"]["label"],
+            "Ready for dispatch",
+        )
         last = self._advance(assignment, "All steps complete")
+        assignment.refresh_from_db()
+        self.assertEqual(assignment.status, JobAssignmentStatus.READY)
         self.assertEqual(last.json()["printer_action"]["kind"], "none")
 
     def test_only_the_assigned_printer_can_advance(self):

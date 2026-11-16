@@ -19,6 +19,7 @@ from .speed_config import (
     DESIGN_STANDARD_TURNAROUND_HOURS,
     derived_turnaround_hours,
     multiplier_for_tier,
+    surcharge_percent_for_tier,
 )
 from .urgency import apply_priority_pricing
 
@@ -450,6 +451,7 @@ def _design_speed_options(payload: dict[str, Any], standard_total: Decimal) -> l
                 "key": key,
                 "label": DESIGN_SPEED_TIER_LABELS[key],
                 "multiplier": str(multiplier),
+                "surcharge_percent": surcharge_percent_for_tier(key),
                 "total": _stringify_money(
                     (standard_total * multiplier).quantize(MONEY_QUANTIZER, rounding=ROUND_HALF_UP)
                 ),

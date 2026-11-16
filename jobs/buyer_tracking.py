@@ -155,6 +155,10 @@ def build_tracked_job(job: ManagedJob, *, now: datetime | None = None) -> dict[s
         "is_late": is_late,
         "overdue_minutes": overdue_minutes,
         "lateness_minutes": overdue_minutes,
+        # The buyer can close the job once the printer has handed it over.
+        # Ops and the manager can still confirm on the buyer's behalf, but the
+        # buyer's own button is the canonical happy-path completion.
+        "can_confirm_completion": job.status in {ManagedJobStatus.READY, ManagedJobStatus.DELIVERED},
         "last_updated_at": last_updated_at,
         "short_title": build_job_title(job, long_form=False),
         "_due_sort": due_at or datetime.max.replace(tzinfo=dt_timezone.utc),

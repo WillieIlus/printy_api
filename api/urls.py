@@ -181,6 +181,7 @@ urlpatterns = [
     path("dashboard/partner/quotes/<int:pk>/", dashboard_views.PartnerQuoteListDetailView.as_view(), name="dashboard-partner-quote-detail"),
     path("dashboard/partner/quotes/<int:pk>/attach-client/", dashboard_views.PartnerQuoteAttachClientView.as_view(), name="dashboard-partner-quote-attach-client"),
     path("dashboard/partner/quotes/<int:pk>/send-to-client/", dashboard_views.PartnerQuoteSendToClientView.as_view(), name="dashboard-partner-quote-send-to-client"),
+    path("dashboard/partner/quotes/<int:pk>/decline/", dashboard_views.PartnerQuoteDeclineView.as_view(), name="dashboard-partner-quote-decline"),
     path("dashboard/partner/quotes/<int:pk>/shop-options/", dashboard_views.PartnerAssignedRequestShopOptionsView.as_view(), name="dashboard-partner-quote-shop-options"),
     path("dashboard/partner/quotes/<int:pk>/prepare/", dashboard_views.PartnerAssignedRequestQuoteCreateView.as_view(), name="dashboard-partner-quote-prepare"),
     path("dashboard/partner/market-rates/", dashboard_views.PartnerMarketRateListView.as_view(), name="dashboard-partner-market-rates"),
@@ -294,6 +295,11 @@ urlpatterns = [
         "quote-requests/<int:quote_request_pk>/attachments/",
         quote_views.QuoteRequestAttachmentViewSet.as_view({"get": "list", "post": "create"}),
         name="quote-request-attachments",
+    ),
+    path(
+        "quote-requests/<int:quote_request_pk>/artwork/",
+        workflow_views.QuoteRequestArtworkView.as_view(),
+        name="quote-request-artwork",
     ),
     path(
         "quote-requests/<int:quote_request_pk>/attachments/<int:pk>/",

@@ -193,7 +193,7 @@ def reject_assignment(*, assignment: JobAssignment, actor=None, note: str = "") 
         allowed={JobAssignmentStatus.PENDING, JobAssignmentStatus.ACCEPTED},
         action="reject assignment",
     )
-    return _transition_assignment(
+    assignment = _transition_assignment(
         assignment=assignment,
         actor=actor,
         status=JobAssignmentStatus.REJECTED,
@@ -203,6 +203,15 @@ def reject_assignment(*, assignment: JobAssignment, actor=None, note: str = "") 
         summary="Assignment rejected.",
         note=note,
     )
+    # The job goes back to the manager's dispatch queue. Clearing the dispatch
+    # stamp and the shop link is what makes the "Assign a printer" step active
+    # again; the rejected assignment row and its event log stay as evidence.
+    managed_job = assignment.managed_job
+    managed_job.dispatched_at = None
+    managed_job.dispatched_by = None
+    managed_job.assigned_shop = None
+    managed_job.save(update_fields=["dispatched_at", "dispatched_by", "assigned_shop", "updated_at"])
+    return assignment
 
 
 @transaction.atomic

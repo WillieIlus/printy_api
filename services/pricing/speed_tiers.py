@@ -34,6 +34,7 @@ from pricing.models import (
 )
 from services.pricing.speed_config import (
     STANDARD_TIER,
+    buyer_speed_label,
     derived_turnaround_hours,
     multiplier_for_tier,
     surcharge_percent_for_tier,
@@ -331,7 +332,7 @@ def build_speed_options(
             {
                 "tier": {
                     "key": tier.key,
-                    "label": tier.label,
+                    "label": buyer_speed_label(tier.key, tier.label),
                     "multiplier": str(speed_multiplier),
                 },
                 "speed_multiplier": str(speed_multiplier),

@@ -517,27 +517,14 @@ def respond_to_assigned_quote_request(
         quote_request=quote_request,
         shop=shop,
         user=partner_user,
-        status="sent",
+        # LAW 2.4/3.4: preparing a quote is not sending it. The draft stays
+        # PENDING (invisible to the client, excluded from the client responses
+        # endpoint) until the manager presses Send to client.
+        status=QuoteOfferStatus.PENDING,
         response_snapshot=response_snapshot,
         revised_pricing_snapshot=None,
         total=split["client_total"],
         note=note or "Your Print Manager prepared an exact quote in Printy.",
-    )
-    sent_at = response.sent_at or timezone.now()
-    response.sent_at = sent_at
-    response.expires_at = calculate_quote_expiry(sent_at=sent_at)
-    response.sent_to_client_at = response.sent_at
-    response.sent_to_client_by = partner_user
-    response.client_quote_status = "sent"
-    response.save(
-        update_fields=[
-            "sent_at",
-            "expires_at",
-            "sent_to_client_at",
-            "sent_to_client_by",
-            "client_quote_status",
-            "updated_at",
-        ]
     )
     _persist_quote_split(quote=response, split=split)
     return {

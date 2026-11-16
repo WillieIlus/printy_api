@@ -148,7 +148,7 @@ class ManagerPayoutHandoffTestCase(TestCase):
         shop_payout is written onto the JobAssignment that the same production
         path creates. Assert it arrives as the exact split Decimal.
         """
-        from jobs.services.managed_job_creation import ensure_job_assignment_for_paid_job
+        from jobs.services.dispatch import ensure_job_assignment_for_paid_job
 
         payment = self._create_accepted_quote_with_payment(JOB_A)
         from payments.services import mark_payment_paid

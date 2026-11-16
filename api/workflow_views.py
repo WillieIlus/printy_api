@@ -43,7 +43,7 @@ from jobs.models import ManagedJob
 from jobs.timing import on_time_rate
 from payments.serializers import PaymentSerializer
 from payments.models import Payment
-from quotes.choices import CalculatorDraftContext, CalculatorDraftIntent, QuoteStatus, QuoteOfferStatus
+from quotes.choices import CalculatorDraftContext, CalculatorDraftIntent, CalculatorDraftStatus, QuoteStatus, QuoteOfferStatus
 from quotes.guardrails import expire_quote
 from quotes.messaging import create_quote_message
 from quotes.models import CalculatorDraft, QuoteRequest, QuoteRequestMessage, Quote
@@ -132,6 +132,7 @@ from .workflow_serializers import (
     PublicRateWizardPreviewSerializer,
     RateWizardStepActionSerializer,
     QuoteRequestReadSerializer,
+    build_request_artwork_payload,
     QuoteResponseCreateSerializer,
     QuoteResponseReadSerializer,
     QuoteResponseUpdateSerializer,
@@ -1612,6 +1613,35 @@ class IntakeSubmitView(APIView):
                 intent=CalculatorDraftIntent.SAVE_DRAFT,
             )
 
+        # A draft that already produced a quote request is a completed intake.
+        # Sign-up completion and dashboard entry can race each other, so return
+        # the same request instead of failing with a "draft was already sent".
+        if draft.status == CalculatorDraftStatus.SENT:
+            existing_request = (
+                draft.generated_requests.filter(
+                    Q(created_by=request.user) | Q(on_behalf_of=request.user)
+                )
+                .select_related("assigned_manager")
+                .order_by("created_at", "id")
+                .first()
+            )
+            if existing_request is not None:
+                manager = existing_request.assigned_manager
+                return Response(
+                    {
+                        "intake_id": existing_request.id,
+                        "intake_reference": existing_request.request_reference,
+                        "manager_name": (
+                            getattr(manager, "name", "")
+                            or getattr(manager, "email", "")
+                            or "Printy"
+                        ),
+                        "expected_response_by": None,
+                        "already_submitted": True,
+                    },
+                    status=status.HTTP_200_OK,
+                )
+
         request_details_snapshot = dict(validated.get("request_details_snapshot") or draft.request_details_snapshot or {})
         request_details_snapshot["calculator_context"] = CalculatorDraftContext.CLIENT_DASHBOARD
         request_details_snapshot["intent"] = CalculatorDraftIntent.CLIENT_QUOTE_REQUEST
@@ -1664,6 +1694,70 @@ class IntakeSubmitView(APIView):
             },
             status=status.HTTP_201_CREATED,
         )
+
+
+class QuoteRequestArtworkView(APIView):
+    """Read or declare the artwork state on a live quote request.
+
+    Files themselves use the existing request-attachments endpoint. This view
+    records the buyer telling Printy the manager/printer already holds the
+    artwork, so the manager sees a real reference instead of an empty panel.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    _CLOSED_STATUSES = {
+        QuoteStatus.ACCEPTED,
+        QuoteStatus.REJECTED,
+        QuoteStatus.EXPIRED,
+        QuoteStatus.CLOSED,
+        QuoteStatus.CANCELLED,
+    }
+
+    def _get_request(self, request, quote_request_pk):
+        return get_object_or_404(QuoteRequest, pk=quote_request_pk)
+
+    def _is_buyer(self, quote_request, user):
+        return quote_request.created_by_id == user.id or quote_request.on_behalf_of_id == user.id
+
+    def get(self, request, quote_request_pk):
+        quote_request = self._get_request(request, quote_request_pk)
+        if not (
+            self._is_buyer(quote_request, request.user)
+            or quote_request.assigned_manager_id == request.user.id
+            or request.user.is_staff
+        ):
+            return Response({"detail": "Not authorized."}, status=status.HTTP_403_FORBIDDEN)
+        return Response(build_request_artwork_payload(quote_request, request))
+
+    def post(self, request, quote_request_pk):
+        quote_request = self._get_request(request, quote_request_pk)
+        if not self._is_buyer(quote_request, request.user):
+            return Response(
+                {"detail": "Only the client can declare artwork for this request."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        if quote_request.status in self._CLOSED_STATUSES:
+            return Response(
+                {"detail": "Artwork can no longer be changed after a quote is accepted."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        state = str(request.data.get("state") or "").strip()
+        if state != "with_manager":
+            return Response(
+                {"state": ["Choose 'with_manager' or upload a file."]},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        snapshot = dict(quote_request.request_snapshot or {})
+        snapshot["artwork_claim"] = {
+            "state": "with_manager",
+            "message": str(request.data.get("message") or "").strip()[:500],
+            "declared_by_id": request.user.id,
+            "declared_at": timezone.now().isoformat(),
+        }
+        quote_request.request_snapshot = snapshot
+        quote_request.save(update_fields=["request_snapshot", "updated_at"])
+        return Response(build_request_artwork_payload(quote_request, request))
 
 
 class PartnerQuotePreviewView(APIView):
@@ -2098,6 +2192,8 @@ class ClientResponseListView(APIView):
             Q(quote_request__created_by=request.user) | Q(quote_request__on_behalf_of=request.user),
         ).exclude(
             status=QuoteOfferStatus.PENDING,
+        ).exclude(
+            client_quote_status="superseded",
         ).select_related(
             "quote_request", "shop",
         ).prefetch_related(
@@ -2137,6 +2233,11 @@ class ClientResponseAcknowledgeView(APIView):
             ),
             pk=response_id,
         )
+        if quote.client_quote_status == "superseded":
+            return Response(
+                {"detail": "This offer was replaced by a newer revision. Refresh and review the latest offer."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         from quotes.overrides import acknowledge_price_update
 
         acknowledge_price_update(quote_request=quote.quote_request, user=request.user)
@@ -2159,6 +2260,11 @@ class ClientResponseDateAcknowledgeView(APIView):
             ),
             pk=response_id,
         )
+        if quote.client_quote_status == "superseded":
+            return Response(
+                {"detail": "This offer was replaced by a newer revision. Refresh and review the latest offer."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         from jobs.timing_services import acknowledge_date_update
 
         revision = acknowledge_date_update(quote_request=quote.quote_request, user=request.user)
@@ -2181,6 +2287,11 @@ class ClientResponseAcceptView(APIView):
             ),
             pk=response_id,
         )
+        if quote.client_quote_status == "superseded":
+            return Response(
+                {"detail": "This offer was replaced by a newer revision. Refresh and review the latest offer."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         if quote.is_expired:
             expire_quote(quote=quote)
             return Response(
@@ -2310,6 +2421,11 @@ class ClientResponseRejectView(APIView):
             ),
             pk=response_id,
         )
+        if quote.client_quote_status == "superseded":
+            return Response(
+                {"detail": "This offer was replaced by a newer revision. Refresh and review the latest offer."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         serializer = ClientResponseRejectSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         if quote.status == QuoteOfferStatus.ACCEPTED:
@@ -2381,6 +2497,11 @@ class ClientResponseReplyView(APIView):
             ),
             pk=response_id,
         )
+        if quote.client_quote_status == "superseded":
+            return Response(
+                {"detail": "This offer was replaced by a newer revision. Refresh and review the latest offer."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         serializer = ClientResponseReplySerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         message_obj = _create_conversation_message(

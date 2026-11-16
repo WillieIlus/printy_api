@@ -40,13 +40,36 @@ TURNAROUND_FACTOR_BY_TIER: dict[str, Decimal] = {
     FASTEST_TIER: FASTEST_TURNAROUND_FACTOR,
 }
 
-#: Buyer-facing design speed tiers (design adoption): Standard, Faster (+50%) and
-#: Fastest (+100%). Same keys as the paid speed tiers, same ramp, different buyer
-#: vocabulary — the design calculator surfaces these labels directly.
-DESIGN_SPEED_TIER_LABELS: dict[str, str] = {
+#: Base names for the buyer-facing design speed tiers (design adoption). The
+#: surcharge suffix is appended from the configured percentage below, so the
+#: label and the priced multiplier can never disagree.
+DESIGN_SPEED_TIER_BASE_LABELS: dict[str, str] = {
     STANDARD_TIER: "Standard",
-    FASTER_TIER: "Faster +50%",
-    FASTEST_TIER: "Fastest +100%",
+    FASTER_TIER: "Faster",
+    FASTEST_TIER: "Fastest",
+}
+
+
+def buyer_speed_label(tier_key: str, base_label: str | None = None) -> str:
+    """Canonical buyer-facing label: base name plus the configured surcharge.
+
+    This is the ONLY place a speed label is composed. The DB ``SpeedTier.label``
+    is an internal/shop-settings name; every buyer-facing payload (calculator
+    preview, quote builder, public marketplace) calls this helper so an override
+    such as ``PRINTY_FASTER_SURCHARGE_PERCENT=40`` changes the label and the
+    price together.
+    """
+    label = (base_label or DESIGN_SPEED_TIER_BASE_LABELS.get(tier_key) or tier_key).strip()
+    percent = SURCHARGE_PERCENT_BY_TIER.get(tier_key, 0)
+    if percent <= 0:
+        return label
+    suffix = f"+{percent}%"
+    return label if label.endswith(suffix) else f"{label} {suffix}"
+
+
+DESIGN_SPEED_TIER_LABELS: dict[str, str] = {
+    key: buyer_speed_label(key, label)
+    for key, label in DESIGN_SPEED_TIER_BASE_LABELS.items()
 }
 
 #: Design speed tier keys the buyer may choose from (design adoption).
@@ -91,10 +114,12 @@ __all__ = [
     "MIN_TURNAROUND_HOURS",
     "SURCHARGE_PERCENT_BY_TIER",
     "TURNAROUND_FACTOR_BY_TIER",
+    "DESIGN_SPEED_TIER_BASE_LABELS",
     "DESIGN_SPEED_TIER_LABELS",
     "DESIGN_SPEED_TIER_KEYS",
     "DESIGN_STANDARD_TURNAROUND_HOURS",
     "multiplier_for_tier",
     "surcharge_percent_for_tier",
     "derived_turnaround_hours",
+    "buyer_speed_label",
 ]

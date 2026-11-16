@@ -911,15 +911,26 @@ class QuoteRequestAttachmentViewSet(viewsets.ModelViewSet):
     def get_quote_request(self):
         return get_object_or_404(QuoteRequest, pk=self.kwargs["quote_request_pk"])
 
+    # Artwork is part of the brief, so the buyer can add or replace it until a
+    # quote is accepted. After acceptance the job's own artwork workflow owns
+    # the files and this request-level path closes.
+    _BUYER_ARTWORK_CLOSED_STATUSES = {
+        QuoteStatus.ACCEPTED,
+        QuoteStatus.REJECTED,
+        QuoteStatus.EXPIRED,
+        QuoteStatus.CLOSED,
+        QuoteStatus.CANCELLED,
+    }
+
     def _check_access(self):
         qr = self.get_quote_request()
         user = self.request.user
-        is_buyer = qr.created_by_id == user.id
+        is_buyer = qr.created_by_id == user.id or qr.on_behalf_of_id == user.id
         is_seller = qr.shop_id and qr.shop.owner_id == user.id
         if user.is_staff:
             return qr, True, True  # qr, can_write, can_read
         if is_buyer:
-            return qr, qr.status == QuoteStatus.DRAFT, True
+            return qr, qr.status not in self._BUYER_ARTWORK_CLOSED_STATUSES, True
         if is_seller:
             return qr, False, True
         return qr, False, False
@@ -945,7 +956,7 @@ class QuoteRequestAttachmentViewSet(viewsets.ModelViewSet):
         qr, can_write, _ = self._check_access()
         if not can_write:
             return Response(
-                {"detail": "Only the customer can add attachments, and only when the request is in draft."},
+                {"detail": "Only the customer can add artwork, and only before a quote is accepted."},
                 status=status.HTTP_403_FORBIDDEN,
             )
         serializer = self.get_serializer(data=request.data)

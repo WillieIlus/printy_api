@@ -122,17 +122,62 @@ from .serializers import QuoteItemReadSerializer
 from .quote_serializers import QuoteItemCustomerSerializer, QuoteRequestAttachmentSerializer
 
 
+def build_request_artwork_payload(quote_request, request=None):
+    """Unified artwork state for a quote request.
+
+    The buyer either uploaded real files (stored as request attachments) or
+    declared that the manager/printer already holds the artwork. Both are real
+    states the manager must see before quoting; neither is a placeholder.
+    """
+    attachments = list(quote_request.attachments.all())
+    files = [
+        QuoteRequestAttachmentSerializer(attachment, context={"request": request}).data
+        for attachment in attachments
+    ]
+    snapshot = quote_request.request_snapshot if isinstance(quote_request.request_snapshot, dict) else {}
+    claim = snapshot.get("artwork_claim") if isinstance(snapshot.get("artwork_claim"), dict) else {}
+    declared_state = str(claim.get("state") or "").strip()
+    if files:
+        state = "uploaded"
+        reference = files[0].get("name") or "Artwork uploaded"
+    elif declared_state == "with_manager":
+        state = "with_manager"
+        reference = "Client says the manager already has the artwork"
+    else:
+        state = "missing"
+        reference = ""
+    return {
+        "state": state,
+        "reference": reference,
+        "files": files,
+        "declared_at": claim.get("declared_at") or None,
+        "message": str(claim.get("message") or ""),
+    }
+
+
+def _public_manager_name(manager):
+    """The name a buyer already saw on the public recommendation card.
+
+    A manager publishes a ``public_display_name``; that is the identity the
+    buyer selected, so the request must keep showing it instead of the private
+    account name. Fall back to the account name only when no public name exists
+    (for example a Printy-managed system account).
+    """
+    profile = getattr(manager, "profile", None)
+    if profile is not None:
+        public_name = str(getattr(profile, "public_display_name", "") or "").strip()
+        if public_name:
+            return public_name
+    return getattr(manager, "name", "") or getattr(manager, "email", "") or "Print Manager"
+
+
 def _assigned_manager_payload(manager):
     if manager is None:
         return None
     is_printy_managed = is_system_account(manager)
     payload = {
         "id": manager.id,
-        "display_name": (
-            "Printy"
-            if is_printy_managed
-            else getattr(manager, "name", "") or getattr(manager, "email", "") or "Print Manager"
-        ),
+        "display_name": "Printy" if is_printy_managed else _public_manager_name(manager),
         "short_title": "Managed by Printy" if is_printy_managed else "Print Manager",
     }
     if is_printy_managed:
@@ -241,6 +286,7 @@ class CalculatorConfigSerializer(serializers.Serializer):
     sizes = serializers.JSONField()
     print_sides = CalculatorConfigOptionSerializer(many=True)
     color_modes = CalculatorConfigOptionSerializer(many=True)
+    speed_tiers = serializers.JSONField()
     preview_endpoint = serializers.CharField()
 
 class CalculatorConfigPreviewSerializer(serializers.Serializer):
@@ -956,6 +1002,11 @@ class CalculatorDraftReadSerializer(serializers.ModelSerializer):
 
 class CalculatorDraftSendSerializer(serializers.Serializer):
     selected_manager_id = serializers.IntegerField(required=False, allow_null=True)
+    # The signed-in dashboard only knows the manager's public UUID, so the
+    # send endpoint has to accept it exactly like the signed-out intake
+    # endpoint does. Without this the browser sent a valid selection that the
+    # serializer dropped, and every dashboard send failed validation.
+    selected_manager_public_id = serializers.UUIDField(required=False, allow_null=True)
     manager_selection_mode = serializers.ChoiceField(
         choices=["client_selected", "printy_auto"],
         required=False,
@@ -973,8 +1024,37 @@ class CalculatorDraftSendSerializer(serializers.Serializer):
             raise serializers.ValidationError(str(exc))
         return manager.id if manager is not None else None
 
+    def validate_selected_manager_public_id(self, value):
+        """Resolve the public manager UUID the dashboard picked."""
+        from accounts.models import UserProfile
+        from quotes.services_workflow import resolve_assigned_manager
+
+        if value in (None, ""):
+            return None
+        profile = (
+            UserProfile.objects.select_related("user")
+            .filter(public_id=value)
+            .only("user_id")
+            .first()
+        )
+        if profile is None:
+            raise serializers.ValidationError("Selected manager is invalid or inactive.")
+        try:
+            manager = resolve_assigned_manager(profile.user_id)
+        except ValueError as exc:
+            raise serializers.ValidationError(str(exc))
+        return manager.id if manager is not None else None
+
     def validate(self, attrs):
         validate_client_calculator_payload(self.initial_data)
+        public_manager_id = attrs.pop("selected_manager_public_id", None)
+        if public_manager_id is not None:
+            explicit_id = attrs.get("selected_manager_id")
+            if explicit_id is not None and explicit_id != public_manager_id:
+                raise serializers.ValidationError(
+                    {"selected_manager_id": "Manager selection does not match the public manager id."}
+                )
+            attrs["selected_manager_id"] = public_manager_id
         mode = attrs.get("manager_selection_mode")
         if mode == "client_selected" and attrs.get("selected_manager_id") is None:
             raise serializers.ValidationError({"selected_manager_id": "manager_id is required for client_selected mode."})
@@ -1013,6 +1093,7 @@ class IntakeRecommendedManagerQuerySerializer(serializers.Serializer):
 class IntakeSubmitSerializer(serializers.Serializer):
     draft_id = serializers.IntegerField(required=False, allow_null=True)
     selected_manager_id = serializers.IntegerField(required=False, allow_null=True)
+    selected_manager_public_id = serializers.UUIDField(required=False, allow_null=True)
     manager_selection_mode = serializers.ChoiceField(
         choices=["client_selected", "printy_auto"],
         required=False,
@@ -1036,6 +1117,31 @@ class IntakeSubmitSerializer(serializers.Serializer):
             raise serializers.ValidationError(str(exc))
         return manager.id if manager is not None else None
 
+    def validate_selected_manager_public_id(self, value):
+        """Resolve the public manager UUID a signed-out buyer picked.
+
+        The browser only ever holds ``UserProfile.public_id``; the numeric
+        account primary key stays server-side.
+        """
+        from accounts.models import UserProfile
+        from quotes.services_workflow import resolve_assigned_manager
+
+        if value in (None, ""):
+            return None
+        profile = (
+            UserProfile.objects.select_related("user")
+            .filter(public_id=value)
+            .only("user_id")
+            .first()
+        )
+        if profile is None:
+            raise serializers.ValidationError("Selected manager is invalid or inactive.")
+        try:
+            manager = resolve_assigned_manager(profile.user_id)
+        except ValueError as exc:
+            raise serializers.ValidationError(str(exc))
+        return manager.id if manager is not None else None
+
     def validate(self, attrs):
         if attrs.get("draft_id"):
             has_source = True
@@ -1045,6 +1151,14 @@ class IntakeSubmitSerializer(serializers.Serializer):
             has_source = False
         if not has_source:
             raise serializers.ValidationError("draft_id or calculator_inputs_snapshot is required.")
+        public_manager_id = attrs.pop("selected_manager_public_id", None)
+        if public_manager_id is not None:
+            explicit_id = attrs.get("selected_manager_id")
+            if explicit_id is not None and explicit_id != public_manager_id:
+                raise serializers.ValidationError(
+                    {"selected_manager_id": "Manager selection does not match the public manager id."}
+                )
+            attrs["selected_manager_id"] = public_manager_id
         mode = attrs.get("manager_selection_mode")
         if mode == "client_selected" and attrs.get("selected_manager_id") is None:
             raise serializers.ValidationError({"selected_manager_id": "manager_id is required for client_selected mode."})
@@ -1058,6 +1172,7 @@ class QuoteRequestReadSerializer(serializers.ModelSerializer):
     latest_response = serializers.SerializerMethodField()
     responses_count = serializers.SerializerMethodField()
     attachments = QuoteRequestAttachmentSerializer(many=True, read_only=True)
+    artwork = serializers.SerializerMethodField()
     assigned_manager = serializers.SerializerMethodField()
     manager_selection_mode = serializers.CharField(read_only=True)
     raw_status = serializers.CharField(source="status", read_only=True)
@@ -1091,9 +1206,13 @@ class QuoteRequestReadSerializer(serializers.ModelSerializer):
             "latest_response",
             "responses_count",
             "attachments",
+            "artwork",
             "created_at",
             "updated_at",
         ]
+
+    def get_artwork(self, obj):
+        return build_request_artwork_payload(obj, self.context.get("request"))
 
     def get_holder(self, obj):
         return _buyer_holder(obj)
@@ -1756,6 +1875,7 @@ class ClientQuoteRequestDetailSerializer(serializers.ModelSerializer):
     shop_currency = serializers.CharField(source="shop.currency", read_only=True)
     items = ClientQuoteItemDetailSerializer(many=True, read_only=True)
     attachments = QuoteRequestAttachmentSerializer(many=True, read_only=True)
+    artwork = serializers.SerializerMethodField()
     sibling_responses = serializers.SerializerMethodField()
     responses = serializers.SerializerMethodField()
     managed_job = serializers.SerializerMethodField()
@@ -1794,6 +1914,7 @@ class ClientQuoteRequestDetailSerializer(serializers.ModelSerializer):
             "request_snapshot",
             "items",
             "attachments",
+            "artwork",
             "responses",
             "sibling_responses",
             "managed_job",
@@ -1820,6 +1941,9 @@ class ClientQuoteRequestDetailSerializer(serializers.ModelSerializer):
 
     def get_assigned_manager(self, obj):
         return _assigned_manager_payload(getattr(obj, "assigned_manager", None))
+
+    def get_artwork(self, obj):
+        return build_request_artwork_payload(obj, self.context.get("request"))
 
     def get_delivery_location(self, obj):
         snapshot = _as_dict(getattr(obj, "request_snapshot", None))
@@ -1876,9 +2000,11 @@ class ClientQuoteRequestDetailSerializer(serializers.ModelSerializer):
             return None
         return {
             "id": managed_job.id,
+            "managed_reference": managed_job.managed_reference,
             "status": managed_job.status,
             "payment_status": managed_job.payment_status,
             "assignment_status": managed_job.assignment_status,
+            "fee_waived": managed_job.fee_waived,
             "client_total": str(managed_job.client_total) if managed_job.client_total is not None else None,
             "tracking_token": str(managed_job.tracking_token) if managed_job.tracking_token else None,
             "public_token": None,

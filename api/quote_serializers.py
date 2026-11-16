@@ -265,6 +265,15 @@ class QuoteRequestAttachmentUploadSerializer(serializers.ModelSerializer):
         fields = ["file", "name"]
         extra_kwargs = {"file": {"required": True}, "name": {"required": False, "allow_blank": True}}
 
+    def validate_file(self, value):
+        from quotes.pending_artwork import validate_pending_artwork_file
+
+        try:
+            validate_pending_artwork_file(value)
+        except ValueError as exc:
+            raise serializers.ValidationError(str(exc))
+        return value
+
 
 class QuoteRequestMessageSerializer(serializers.ModelSerializer):
     sender_name = serializers.SerializerMethodField()

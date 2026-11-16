@@ -796,6 +796,7 @@ def project_public_marketplace_response(payload: dict[str, Any] | None) -> dict[
             "key": option.get("key"),
             "label": option.get("label"),
             "multiplier": option.get("multiplier"),
+            "surcharge_percent": option.get("surcharge_percent"),
             "total": option.get("total"),
             "turnaround_hours": option.get("turnaround_hours"),
         }

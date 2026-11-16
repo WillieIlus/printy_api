@@ -10,10 +10,10 @@ from jobs.audit_services import EVENT_MANAGED_JOB_CREATED, EVENT_PAYMENT_CONFIRM
 from jobs.choices import ManagedJobAssignmentStatus, ManagedJobPaymentStatus, ManagedJobStatus
 from jobs.file_services import import_legacy_files_to_managed_job, sync_managed_job_artwork_requirement
 from jobs.models import ManagedJob
-from jobs.services.dispatch import ensure_job_assignment_for_paid_job
 from notifications.models import Notification
 from notifications.services import notify, notify_quote_event
 from payments.models import Payment
+from jobs.services.dispatch import ensure_job_assignment_for_paid_job
 
 
 logger = logging.getLogger(__name__)
@@ -291,10 +291,13 @@ def create_managed_job_from_payment(*, payment: Payment) -> ManagedJob:
     _notify_payment_confirmed(managed_job=managed_job, payment=payment)
     _notify_managed_job_created(managed_job=managed_job, payment=payment)
 
+    # A paid job whose production shop is already known (direct-shop submissions)
+    # goes straight to that shop. Manager-sourced jobs keep the explicit manager
+    # dispatch choice: payment confirms, it never picks a printer on its own.
     if managed_job.assigned_shop_id and managed_job.assignment_status == ManagedJobAssignmentStatus.UNASSIGNED:
         dispatched_by = (
             managed_job.broker
-            or getattr(quote.quote_request, "assigned_manager", None)
+            or getattr(getattr(quote, "quote_request", None), "assigned_manager", None)
             or getattr(quote, "created_by", None)
         )
         if dispatched_by is None:
@@ -324,4 +327,5 @@ def create_managed_job_from_payment(*, payment: Payment) -> ManagedJob:
                 )
 
         transaction.on_commit(auto_dispatch_after_commit)
+
     return managed_job

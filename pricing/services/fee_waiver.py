@@ -86,12 +86,52 @@ def _client_candidates(quote_request) -> list[Any]:
     return candidates
 
 
+def _pending_invite_origin(quote_request) -> bool:
+    """True when the request is for an unclaimed invite the same manager made.
+
+    Law 9: the client record created at the send-quote step records the manager
+    as origin. Until the phone is claimed that record is the ``ClientInvite``
+    itself, so the invite creator is the client's origin manager.
+    """
+    if getattr(quote_request, "on_behalf_of_id", None) is not None:
+        return False
+    manager = getattr(quote_request, "created_by_manager", None)
+    manager_id = getattr(manager, "pk", None)
+    if manager_id is None:
+        return False
+    snapshot = getattr(quote_request, "request_snapshot", None)
+    if not isinstance(snapshot, dict):
+        return False
+    pending_client = snapshot.get("pending_client")
+    phone = ""
+    if isinstance(pending_client, dict):
+        phone = str(pending_client.get("phone") or "").strip()
+    if not phone:
+        return False
+    try:
+        from accounts.services.phone import normalize_phone
+
+        phone = normalize_phone(phone)
+    except Exception:
+        return False
+    if not phone:
+        return False
+    from accounts.models import ClientInvite
+
+    return ClientInvite.objects.filter(
+        created_by_id=manager_id,
+        phone_normalized=phone,
+        status__in=[ClientInvite.Status.PENDING, ClientInvite.Status.CLAIMED],
+    ).exists()
+
+
 def fee_waived_for_quote_request(quote_request) -> bool:
     """Decide from a ``QuoteRequest``'s manager/client pair, False when unknown.
 
     The first manager and the first client the request names are the ones that
     matter: ``assigned_manager`` (else ``created_by_manager``, else the partner
     who created it) against ``on_behalf_of`` (else a client-authored request).
+    A still-unclaimed manager invite counts as that manager's client record.
     """
     if quote_request is None:
         return False
@@ -104,7 +144,7 @@ def fee_waived_for_quote_request(quote_request) -> bool:
         for manager in managers:
             if manager is not None and is_client_origin_pair(client=client, manager=manager):
                 return True
-    return False
+    return _pending_invite_origin(quote_request)
 
 
 def fee_waived_for_quote(quote) -> bool:

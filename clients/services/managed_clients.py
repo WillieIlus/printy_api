@@ -98,6 +98,9 @@ def create_request_for_client(
             "created_by_manager_id": manager.id,
             "client_contact_permitted": True,
             "pending_client": pending_client,
+            # The manager captured these specs at intake; the prefill/pricing
+            # endpoints read them from the nested snapshot.
+            "request_snapshot": details or {},
             "request_details": details or {},
             "client_event_log": [
                 {

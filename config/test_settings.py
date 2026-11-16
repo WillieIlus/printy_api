@@ -19,6 +19,10 @@ PASSWORD_HASHERS = [
     "django.contrib.auth.hashers.MD5PasswordHasher",
 ]
 
+# The minimal test environment has no Django common-passwords list installed.
+# Validation is a user-input concern; tests create users programmatically.
+AUTH_PASSWORD_VALIDATORS = []
+
 # Tests must never run against live Daraja. Override whatever .env says so the
 # M-Pesa production guard (printy.E01x) stays quiet and no payment test can be
 # misread as moving real money.

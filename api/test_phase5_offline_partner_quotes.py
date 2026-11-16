@@ -117,6 +117,12 @@ class OfflinePartnerQuoteFlowTests(TestCase):
         self.assertEqual(send_response.status_code, 200, send_response.data)
         self.assertTrue(send_response.data["offline_client"])
         self.assertIsNotNone(send_response.data["claim_token"])
+        # The signed-in offline-claim token and the phone-first setup token are
+        # different flows; the manager link needs the ClientInvite token.
+        from accounts.models import ClientInvite
+
+        invite = ClientInvite.objects.get(token=send_response.data["client_invite_token"])
+        self.assertEqual(invite.status, ClientInvite.Status.PENDING)
         self.assertIsNotNone(send_response.data["payment"])
 
         quote_request = QuoteRequest.objects.get(pk=quote_request_id)
