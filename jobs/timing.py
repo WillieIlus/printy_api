@@ -19,6 +19,7 @@ from jobs.timing_config import (
     DUE_DATE_BUFFER_WORKING_HOURS,
     HOLIDAYS,
     MIN_JOBS_FOR_PUBLIC_SCORE,
+    OWNER_MANAGER,
     SHOP_TIMEZONE,
     STAGE_ORDER,
     STAGES,
@@ -158,7 +159,32 @@ def _anchor(managed_job: "ManagedJob") -> datetime:
 
 
 def current_stage_for_job(managed_job: "ManagedJob") -> str:
-    return stage_for_status(getattr(managed_job, "status", None))
+    stage_key = stage_for_status(getattr(managed_job, "status", None))
+    # Once the artwork is supplied and the job has been dispatched, the buyer's
+    # artwork step is done: the job is queued for production at the shop.
+    if stage_key == ARTWORK_STAGE_KEY and _artwork_satisfied(managed_job):
+        if getattr(managed_job, "dispatched_at", None) is not None:
+            return "production"
+    return stage_key
+
+
+ARTWORK_STAGE_KEY = "artwork_approval"
+ARTWORK_MANAGER_ACTION = "Check the artwork and send it to the printer"
+
+
+def _artwork_satisfied(managed_job) -> bool:
+    """True when the job has artwork from any accepted path (law 7.2).
+
+    Imported lazily because artwork_workflow imports this module.
+    """
+    try:
+        from jobs.artwork_workflow import artwork_satisfied
+    except Exception:  # pragma: no cover - import cycle guard
+        return False
+    try:
+        return bool(artwork_satisfied(managed_job))
+    except Exception:  # pragma: no cover - defensive
+        return False
 
 
 def _stage_window(managed_job: "ManagedJob", stage_key: str):
@@ -186,13 +212,19 @@ def job_timing(*, managed_job: "ManagedJob", now: datetime | None = None) -> dic
     if due is not None and now > due:
         late_minutes = int((now - due).total_seconds() // 60)
     stage_late = bool(stage_due is not None and now > stage_due)
+    owner = stage.owner if stage else ""
+    next_action = stage.next_action if stage else ""
+    if stage_key == ARTWORK_STAGE_KEY and _artwork_satisfied(managed_job):
+        # The buyer has supplied the file; the manager now checks and forwards it.
+        owner = OWNER_MANAGER
+        next_action = ARTWORK_MANAGER_ACTION
     return {
         "due_date": due,
         "current_stage": stage_key,
         "stage_label": stage.label if stage else "",
-        "stage_owner": stage.owner if stage else "",
+        "stage_owner": owner,
         "stage_sla_hours": str(stage.sla_working_hours) if stage else None,
-        "next_action": stage.next_action if stage else "",
+        "next_action": next_action,
         "stage_started_at": window_start,
         "stage_due_at": stage_due,
         "time_remaining_minutes": job_remaining_minutes,
@@ -242,7 +274,11 @@ def stage_timestamps(managed_job: "ManagedJob") -> dict[str, Any]:
             {
                 "stage": stage.key,
                 "label": stage.label,
-                "owner": stage.owner,
+                "owner": (
+                    OWNER_MANAGER
+                    if stage.key == ARTWORK_STAGE_KEY and _artwork_satisfied(managed_job)
+                    else stage.owner
+                ),
                 "sla_hours": str(stage.sla_working_hours),
                 "started_at": window_start,
                 "due_at": window_end,
@@ -275,6 +311,20 @@ def stage_timeline(
         allowed_minutes = int(Decimal(str(stage.sla_working_hours)) * 60)
         total_allowed_minutes += allowed_minutes
         completed_at = completions.get(stage.key)
+        artwork_done_here = (
+            stage.key == ARTWORK_STAGE_KEY
+            and _artwork_satisfied(managed_job)
+            and current_stage_for_job(managed_job) != ARTWORK_STAGE_KEY
+        )
+        if artwork_done_here and completed_at is None:
+            # The buyer supplied artwork (upload or accepted claim), so this
+            # step is complete even if the older event log has no explicit
+            # stage_completed entry for it.
+            completed_at = (
+                getattr(managed_job, "production_started_at", None)
+                or getattr(managed_job, "dispatched_at", None)
+                or getattr(managed_job, "updated_at", None)
+            )
         if completed_at is not None:
             taken = max(0, int((completed_at - window_start).total_seconds() // 60))
             state = "completed"
@@ -295,8 +345,16 @@ def stage_timeline(
             {
                 "key": stage.key,
                 "label": stage.label,
-                "owner": stage.owner,
-                "next_action": stage.next_action,
+                "owner": (
+                    OWNER_MANAGER
+                    if stage.key == ARTWORK_STAGE_KEY and _artwork_satisfied(managed_job)
+                    else stage.owner
+                ),
+                "next_action": (
+                    ARTWORK_MANAGER_ACTION
+                    if stage.key == ARTWORK_STAGE_KEY and _artwork_satisfied(managed_job)
+                    else stage.next_action
+                ),
                 "sla_hours": str(stage.sla_working_hours),
                 "started_at": window_start,
                 "due_at": window_end,
