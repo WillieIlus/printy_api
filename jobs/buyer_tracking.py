@@ -11,7 +11,10 @@ from django.db.models import Q
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 
+from jobs.artwork_confirmation import get_artwork_confirmation_payload
+from jobs.artwork_workflow import get_artwork_workflow_payload
 from jobs.choices import ManagedJobPaymentStatus, ManagedJobStatus
+from jobs.file_services import managed_job_artwork_state
 from jobs.job_codes import job_code
 from jobs.models import ManagedJob
 from jobs.timing_config import STAGES_BY_KEY
@@ -132,6 +135,7 @@ def build_tracked_job(job: ManagedJob, *, now: datetime | None = None) -> dict[s
 
     remaining = 0 if is_late else _remaining_sla_minutes(milestones)
     last_updated_at = _last_updated_at(job=job, stages=stages)
+    artwork_state = managed_job_artwork_state(managed_job=job)
 
     return {
         "id": job.id,
@@ -160,6 +164,15 @@ def build_tracked_job(job: ManagedJob, *, now: datetime | None = None) -> dict[s
         # buyer's own button is the canonical happy-path completion.
         "can_confirm_completion": job.status in {ManagedJobStatus.READY, ManagedJobStatus.DELIVERED},
         "last_updated_at": last_updated_at,
+        # Artwork is the buyer's own workflow step after payment: the timeline
+        # must be able to show the upload action and the approve/request-changes
+        # decision without exposing internal job metadata.
+        "artwork_uploaded": artwork_state["artwork_uploaded"],
+        "artwork_required": artwork_state["artwork_required"],
+        "artwork_missing": artwork_state["artwork_missing"],
+        "artwork_status_label": artwork_state["artwork_status_label"],
+        "artwork_confirmation": get_artwork_confirmation_payload(job),
+        "artwork_workflow": get_artwork_workflow_payload(job),
         "short_title": build_job_title(job, long_form=False),
         "_due_sort": due_at or datetime.max.replace(tzinfo=dt_timezone.utc),
         "_delivered_sort": _iso(milestones["delivered_at"]),

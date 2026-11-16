@@ -195,6 +195,32 @@ class BuyerTrackedJobsTestCase(TestCase):
         self.assertTrue(body["tracking_url"].endswith(f"/track/{job.managed_reference}"))
         self.assertTrue(body["timeline"]["stages"])
 
+    def test_detail_payload_exposes_the_buyer_artwork_step(self):
+        job = self._job()
+        self.api_client.force_authenticate(self.buyer)
+        body = self.api_client.get(f"/api/dashboard/client/tracked-jobs/{job.id}/").json()
+        payload = body["job"]
+
+        # The timeline needs enough to offer upload + sign-off without any
+        # internal fields (no shop, manager, cost or dispatch flags).
+        self.assertTrue(payload["artwork_missing"])
+        self.assertFalse(payload["artwork_uploaded"])
+        self.assertEqual(payload["artwork_confirmation"]["state"], "not_required")
+        self.assertIn("claim_state", payload["artwork_workflow"])
+        self.assertNotIn("can_dispatch", payload)
+        self.assertNotIn("assigned_shop", payload)
+
+    def test_detail_payload_reflects_a_requested_artwork_confirmation(self):
+        from jobs.artwork_confirmation import request_client_artwork_confirmation
+
+        job = self._job(artwork_required=False)
+        request_client_artwork_confirmation(managed_job=job, actor=self.manager, note="Check the bleed.")
+        self.api_client.force_authenticate(self.buyer)
+        payload = self.api_client.get(f"/api/dashboard/client/tracked-jobs/{job.id}/").json()["job"]
+
+        self.assertEqual(payload["artwork_confirmation"]["state"], "requested")
+        self.assertEqual(payload["artwork_confirmation"]["note"], "Check the bleed.")
+
     def test_unpaid_job_is_not_returned(self):
         self._job(payment_status=ManagedJobPaymentStatus.PENDING)
         response = self._get()
