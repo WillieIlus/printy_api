@@ -52,6 +52,12 @@ def accept_quote_for_payment(*, quote: Quote, accepted_by, payer_phone: str = ""
     ensure_quote_financial_split(quote=quote)
 
     quote_request = quote.quote_request
+    # The phone used to pay is the phone on the job: signed-out tracking
+    # (law 11) matches the job code + this phone. Persist it when the request
+    # has no customer phone yet.
+    if payer_phone and not str(quote_request.customer_phone or "").strip():
+        quote_request.customer_phone = str(payer_phone).strip()
+        quote_request.save(update_fields=["customer_phone", "updated_at"])
     if quote_request.status in {
         QuoteStatus.REJECTED,
         QuoteStatus.CANCELLED,

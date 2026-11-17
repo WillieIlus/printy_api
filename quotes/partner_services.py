@@ -362,6 +362,7 @@ def create_partner_quote(
     quote_request = QuoteRequest.objects.create(
         shop=shop,
         created_by=partner_user,
+        created_by_manager=partner_user,
         on_behalf_of=client_user if not save_as_draft else None,
         customer_name=client_name or client_email or client_phone or "Client",
         customer_email=client_email,

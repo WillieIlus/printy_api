@@ -2025,6 +2025,10 @@ class ClientQuoteRequestDetailSerializer(serializers.ModelSerializer):
 
     def to_representation(self, instance):
         data = super().to_representation(instance)
+        # Law 1.3 / buyer-manager relationship: the buyer never sees the
+        # production shop's identity on their request.
+        for key in ("shop", "shop_name", "shop_slug", "shop_currency"):
+            data.pop(key, None)
         data["request_snapshot"] = project_request_snapshot_for_client(instance.request_snapshot)
         return data
 
