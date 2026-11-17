@@ -8,8 +8,8 @@ from django.utils import timezone
 from rest_framework.test import APIClient
 
 from accounts.models import User
-from jobs.choices import ManagedJobStatus, ManagedJobPaymentStatus
-from jobs.models import ManagedJob
+from jobs.choices import JobAssignmentStatus, ManagedJobStatus, ManagedJobPaymentStatus
+from jobs.models import JobAssignment, ManagedJob
 from jobs.action_resolver import resolve_next_step, BUYER, MANAGER, PRINTER, NONE
 from quotes.models import QuoteRequest
 from shops.models import Shop
@@ -48,7 +48,58 @@ class NextStepResolverTestCase(TestCase):
         step = resolve_next_step(self.job, "buyer")
         self.assertEqual(step["owner_role"], "manager")
         self.assertFalse(step["is_mine"])
-        self.assertEqual(step["next_action"]["key"], "monitor_production")
+        self.assertEqual(step["next_action"]["key"], "none")
+        self.assertEqual(step["next_action"]["label"], "Your manager is running production")
+
+    def test_assigned_job_with_pending_assignment_belongs_to_printer(self):
+        self.job.status = ManagedJobStatus.ASSIGNED
+        self.job.assignment_status = "assigned"
+        self.job.workflow_metadata = {
+            "artwork_workflow": {"source": "manager_holds", "claim_state": "accepted"}
+        }
+        self.job.save(update_fields=["status", "assignment_status", "workflow_metadata", "updated_at"])
+        assignment = JobAssignment.objects.create(
+            managed_job=self.job,
+            assigned_shop=self.shop,
+            status=JobAssignmentStatus.PENDING,
+        )
+        step = resolve_next_step(self.job, "printer")
+        self.assertEqual(step["owner_role"], "printer")
+        self.assertTrue(step["is_mine"])
+        self.assertEqual(step["next_action"]["key"], "accept_job")
+        self.assertIn(f"?assignment={assignment.id}", step["next_action"]["target"] or "")
+        manager_step = resolve_next_step(self.job, "manager")
+        self.assertEqual(manager_step["owner_role"], "printer")
+        self.assertFalse(manager_step["is_mine"])
+        self.assertEqual(manager_step["next_action"]["key"], "none")
+
+    def test_accepted_assignment_asks_printer_to_start_printing(self):
+        self.job.status = ManagedJobStatus.ASSIGNED
+        self.job.assignment_status = "assigned"
+        self.job.workflow_metadata = {
+            "artwork_workflow": {"source": "manager_holds", "claim_state": "accepted"}
+        }
+        self.job.save(update_fields=["status", "assignment_status", "workflow_metadata", "updated_at"])
+        JobAssignment.objects.create(
+            managed_job=self.job,
+            assigned_shop=self.shop,
+            status=JobAssignmentStatus.ACCEPTED,
+        )
+        step = resolve_next_step(self.job, "printer")
+        self.assertEqual(step["next_action"]["key"], "start_printing")
+        self.assertTrue(step["is_mine"])
+
+    def test_payment_confirmed_without_shop_asks_manager_to_dispatch(self):
+        self.job.status = ManagedJobStatus.PAYMENT_CONFIRMED
+        self.job.assigned_shop = None
+        self.job.workflow_metadata = {
+            "artwork_workflow": {"source": "manager_holds", "claim_state": "accepted"}
+        }
+        self.job.save(update_fields=["status", "assigned_shop", "workflow_metadata", "updated_at"])
+        step = resolve_next_step(self.job, "manager")
+        self.assertEqual(step["owner_role"], "manager")
+        self.assertEqual(step["next_action"]["key"], "dispatch_job")
+        self.assertTrue(step["is_mine"])
 
     def test_resolver_marks_printer_mine_for_production_stage(self):
         self.job.status = ManagedJobStatus.IN_PRODUCTION

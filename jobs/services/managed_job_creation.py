@@ -49,6 +49,26 @@ def _manager_for_quote(*, quote, quote_request):
     return None
 
 
+def _is_direct_shop_intake(quote) -> bool:
+    """True only when the client chose this shop directly on the public intake.
+
+    The quote's production option always names a shop (the manager priced
+    against one), so the presence of ``assigned_shop`` is not evidence of
+    direct intake. Only the direct-shop submission stamps this marker into the
+    request/quote snapshot. Manager-sourced jobs must stay unassigned until the
+    manager explicitly dispatches (law: no auto-advance).
+    """
+    quote_request = getattr(quote, "quote_request", None)
+    request_snapshot = getattr(quote_request, "request_snapshot", None) or {}
+    response_snapshot = getattr(quote, "response_snapshot", None) or {}
+    return bool(
+        request_snapshot.get("direct_shop_intake")
+        or response_snapshot.get("direct_shop_intake")
+        or request_snapshot.get("source") == "direct_shop_submission"
+        or response_snapshot.get("source") == "direct_shop_submission"
+    )
+
+
 def _quote_request_title(quote_request) -> str:
     if quote_request is None:
         return "managed job"
@@ -238,6 +258,12 @@ def create_managed_job_from_payment(*, payment: Payment) -> ManagedJob:
             # Law 6.2: inherit the acceptance due date computed from the SLA config.
             due_date=quote_request.due_date,
         )
+        import_legacy_files_to_managed_job(
+            managed_job=managed_job,
+            quote_request=quote_request,
+            quote=quote,
+        )
+        sync_managed_job_artwork_requirement(managed_job=managed_job)
         from jobs.timing_services import sync_job_timing
 
         sync_job_timing(managed_job, due=quote_request.due_date)
@@ -250,12 +276,6 @@ def create_managed_job_from_payment(*, payment: Payment) -> ManagedJob:
             UserProfile.objects.filter(user_id=managed_job.broker_id).update(
                 last_assigned_at=timezone.now()
             )
-        import_legacy_files_to_managed_job(
-            managed_job=managed_job,
-            quote_request=quote_request,
-            quote=quote,
-        )
-        sync_managed_job_artwork_requirement(managed_job=managed_job)
         record_job_status_event(
             managed_job=managed_job,
             actor=payment.payer,
@@ -294,7 +314,11 @@ def create_managed_job_from_payment(*, payment: Payment) -> ManagedJob:
     # A paid job whose production shop is already known (direct-shop submissions)
     # goes straight to that shop. Manager-sourced jobs keep the explicit manager
     # dispatch choice: payment confirms, it never picks a printer on its own.
-    if managed_job.assigned_shop_id and managed_job.assignment_status == ManagedJobAssignmentStatus.UNASSIGNED:
+    if (
+        _is_direct_shop_intake(quote)
+        and managed_job.assigned_shop_id
+        and managed_job.assignment_status == ManagedJobAssignmentStatus.UNASSIGNED
+    ):
         dispatched_by = (
             managed_job.broker
             or getattr(getattr(quote, "quote_request", None), "assigned_manager", None)

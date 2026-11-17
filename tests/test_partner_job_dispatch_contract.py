@@ -157,6 +157,43 @@ class PartnerJobDispatchContractTestCase(TestCase):
         )
 
     @override_settings(MPESA_ENVIRONMENT="test")
+    def test_manager_sourced_job_waits_for_explicit_dispatch(self):
+        """A manager-priced quote must not skip the dispatch decision.
+
+        The production option names the shop the manager priced against, but
+        that is not a client direct-shop choice. Payment confirms the job; the
+        manager still chooses (and confirms) the printer.
+        """
+        with self.captureOnCommitCallbacks(execute=True):
+            managed_job = self._paid_managed_job()
+
+        managed_job.refresh_from_db()
+        self.assertIsNone(managed_job.dispatched_at)
+        self.assertEqual(
+            managed_job.assignment_status,
+            ManagedJobAssignmentStatus.UNASSIGNED,
+        )
+        self.assertFalse(JobAssignment.objects.filter(managed_job=managed_job).exists())
+
+    @override_settings(MPESA_ENVIRONMENT="test")
+    def test_direct_shop_intake_still_auto_dispatches_after_payment(self):
+        snapshot = dict(self.quote_request.request_snapshot or {})
+        snapshot["direct_shop_intake"] = True
+        self.quote_request.request_snapshot = snapshot
+        self.quote_request.save(update_fields=["request_snapshot", "updated_at"])
+
+        with self.captureOnCommitCallbacks(execute=True):
+            managed_job = self._paid_managed_job()
+
+        managed_job.refresh_from_db()
+        self.assertIsNotNone(managed_job.dispatched_at)
+        self.assertEqual(
+            managed_job.assignment_status,
+            ManagedJobAssignmentStatus.ASSIGNED,
+        )
+        self.assertTrue(JobAssignment.objects.filter(managed_job=managed_job).exists())
+
+    @override_settings(MPESA_ENVIRONMENT="test")
     def test_dispatch_response_carries_the_fields_the_manager_ui_reads(self):
         managed_job = self._paid_managed_job()
 

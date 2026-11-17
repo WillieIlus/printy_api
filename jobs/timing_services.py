@@ -89,6 +89,24 @@ def sync_job_timing(managed_job: ManagedJob, *, due: datetime | None = None) -> 
         update_fields.append("due_date")
     if update_fields:
         managed_job.save(update_fields=[*update_fields, "updated_at"])
+    # Law 6.4 / step 3: every time the ball moves, the new owner is notified
+    # once. notify_stage_owner is idempotent per (job, stage, owner), so this is
+    # safe on repeated syncs that do not change ownership.
+    try:
+        from jobs.action_resolver import resolve_next_step
+        from jobs.stage_notifications import notify_stage_owner
+
+        step = resolve_next_step(managed_job, "manager")
+        owner_role = step.get("owner_role")
+        if owner_role in {"buyer", "manager", "printer"}:
+            notify_stage_owner(
+                managed_job=managed_job,
+                stage=str(step.get("current_stage") or stage_key or ""),
+                owner_role=owner_role,
+            )
+    except Exception:
+        # Notification delivery must never block a stage transition.
+        pass
     return managed_job
 
 

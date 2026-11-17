@@ -2756,10 +2756,10 @@ class NeedsMyActionView(APIView):
             queryset = ManagedJob.objects.filter(Q(client=user) | Q(created_by=user))
         elif active_role == "partner":
             viewer_role = "manager"
-            queryset = ManagedJob.objects.filter(broker=user)
+            queryset = ManagedJob.objects.filter(_partner_managed_job_filter(user))
         elif active_role == "production":
             viewer_role = "printer"
-            queryset = ManagedJob.objects.filter(assigned_shop__owner=user)
+            queryset = ManagedJob.objects.filter(_production_shop_filter(user)).distinct()
         else:
             return Response({"detail": "Unsupported role."}, status=403)
 

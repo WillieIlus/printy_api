@@ -13,7 +13,7 @@ from typing import Any
 
 from django.utils import timezone
 
-from jobs.choices import ManagedJobStatus
+from jobs.choices import JobAssignmentStatus, ManagedJobStatus
 from jobs.models import ManagedJob
 from jobs.artwork_workflow import artwork_satisfied, artwork_payment_block_reason
 
@@ -56,6 +56,15 @@ _STATUS_OWNER = {
 # The artwork step transfers responsibility: once artwork is satisfied, the
 # manager owns the approval/forward step; once a claim is pending, the manager
 # owns the acceptance step too.
+def _active_assignment(job: ManagedJob):
+    return (
+        job.assignments.filter(reassigned_from__isnull=True)
+        .exclude(status__in=[JobAssignmentStatus.REJECTED, JobAssignmentStatus.CANCELLED])
+        .order_by("-id")
+        .first()
+    )
+
+
 def _status_owner(job: ManagedJob) -> str:
     status = getattr(job, "status", None)
     owner = _STATUS_OWNER.get(status, NONE)
@@ -63,11 +72,19 @@ def _status_owner(job: ManagedJob) -> str:
         if not _artwork_satisfied(job):
             return BUYER  # buyer must upload or claim
         confirmation_state = _artwork_confirmation_state(job)
-        if confirmation_state == "requested":
-            return BUYER  # buyer must approve/reject
-        if confirmation_state == "rejected":
-            return BUYER  # buyer must re-upload
-        return MANAGER  # manager checks/forwards
+        if confirmation_state in ("requested", "rejected"):
+            return BUYER  # buyer must approve/re-upload
+        if status == ManagedJobStatus.ASSIGNED:
+            assignment = _active_assignment(job)
+            if job.assigned_shop_id and assignment and assignment.status in {
+                JobAssignmentStatus.PENDING,
+                JobAssignmentStatus.ACCEPTED,
+                JobAssignmentStatus.IN_PRODUCTION,
+                JobAssignmentStatus.FINISHING,
+            }:
+                # Dispatch transferred the ball: the shop must accept/print.
+                return PRINTER
+        return MANAGER  # manager checks/forwards or dispatches
     return owner
 
 
@@ -95,7 +112,7 @@ def _artwork_satisfied_flag(job: ManagedJob) -> bool:
 
 
 def _assignment_id(job: ManagedJob):
-    assignment = job.assignments.filter(reassigned_from__isnull=True).order_by("-id").first()
+    assignment = _active_assignment(job)
     return getattr(assignment, "id", None)
 
 
@@ -113,8 +130,8 @@ def _role_for_owner(owner: str, viewer_role: str) -> str:
     return NONE
 
 
-def _next_action_key(stage_key: str, owner_role: str, job: ManagedJob) -> str:
-    if owner_role == NONE:
+def _next_action_key(stage_key: str, owner_role: str, job: ManagedJob, viewer_role: str) -> str:
+    if owner_role == NONE or owner_role != viewer_role:
         return "none"
     if stage_key in (ManagedJobStatus.DRAFT, ManagedJobStatus.QUOTED, ManagedJobStatus.AWAITING_PAYMENT):
         return "accept_quote" if owner_role == BUYER else "prepare_quote"
@@ -130,15 +147,30 @@ def _next_action_key(stage_key: str, owner_role: str, job: ManagedJob) -> str:
         if owner_role == MANAGER:
             if not _artwork_satisfied_flag(job):
                 return "none"
-            if _artwork_confirmation_state(job) == "requested":
-                return "none"  # waiting on buyer
-            return "review_artwork"
+            if _artwork_confirmation_state(job) in ("requested", "rejected"):
+                return "none"  # waiting on the buyer
+            assignment = _active_assignment(job)
+            if assignment is not None:
+                return "none"  # dispatch already handed the job to the printer
+            if getattr(job, "assignment_status", None) == "reassignment_required":
+                return "reassign_job"
+            return "dispatch_job"
+        if owner_role == PRINTER:
+            assignment = _active_assignment(job)
+            if assignment is not None:
+                if assignment.status == JobAssignmentStatus.PENDING:
+                    return "accept_job"
+                if assignment.status == JobAssignmentStatus.ACCEPTED:
+                    return "start_printing"
+                if assignment.status in (JobAssignmentStatus.IN_PRODUCTION, JobAssignmentStatus.FINISHING):
+                    return "advance_production"
+                if assignment.status == JobAssignmentStatus.READY:
+                    return "mark_delivered"
+            return "none"
         return "none"
     if stage_key in (ManagedJobStatus.IN_PRODUCTION, ManagedJobStatus.FINISHING):
         if owner_role == PRINTER:
             return "advance_production"
-        if owner_role == MANAGER:
-            return "monitor_production"
         return "none"
     if stage_key == ManagedJobStatus.READY:
         if owner_role == BUYER:
@@ -155,20 +187,40 @@ def _next_action_key(stage_key: str, owner_role: str, job: ManagedJob) -> str:
     return "none"
 
 
-def _next_action_label(key: str) -> str:
+def _next_action_label(key: str, status: str | None = None, viewer_role: str = "") -> str:
+    if key == "none":
+        if viewer_role == BUYER and status in (
+            ManagedJobStatus.ASSIGNED,
+            ManagedJobStatus.IN_PRODUCTION,
+            ManagedJobStatus.FINISHING,
+            ManagedJobStatus.READY,
+        ):
+            return "Your manager is running production"
+        if viewer_role == MANAGER and status in (
+            ManagedJobStatus.ASSIGNED,
+            ManagedJobStatus.IN_PRODUCTION,
+            ManagedJobStatus.FINISHING,
+        ):
+            return "Waiting on the printer"
+        if viewer_role == PRINTER and status in (
+            ManagedJobStatus.DRAFT,
+            ManagedJobStatus.QUOTED,
+            ManagedJobStatus.AWAITING_PAYMENT,
+        ):
+            return "Waiting on the buyer"
+        return "No action needed"
     return {
-        "none": "No action needed",
         "accept_quote": "Accept the quote and pay",
         "prepare_quote": "Prepare and send the quote",
         "upload_artwork": "Upload your artwork",
         "approve_artwork": "Approve the artwork",
         "review_artwork": "Check the artwork and send it to the printer",
+        "dispatch_job": "Assign a production printer",
+        "reassign_job": "Reassign a production printer",
+        "accept_job": "Accept the job",
+        "start_printing": "Start printing",
         "advance_production": "Advance the production stage",
-        "monitor_production": "Monitor production",
-        "mark_ready": "Mark the job ready",
-        "quality_check": "Run quality check",
-        "confirm_delivery": "Confirm delivery",
-        "mark_dispatched": "Dispatch the job",
+        "confirm_delivery": "Confirm the job is complete",
         "coordinate_delivery": "Coordinate delivery",
     }.get(key, "No action needed")
 
@@ -181,9 +233,15 @@ def _target_route(key: str, job: ManagedJob, viewer_role: str) -> str | None:
         return f"/app/buyer/requests/{request_id}" if request_id else "/app/buyer"
     if key in ("upload_artwork", "approve_artwork", "confirm_delivery"):
         return f"/app/buyer/jobs/{job_id}"
-    if key in ("prepare_quote", "review_artwork", "monitor_production", "quality_check", "coordinate_delivery"):
+    if key in (
+        "prepare_quote",
+        "review_artwork",
+        "dispatch_job",
+        "reassign_job",
+        "coordinate_delivery",
+    ):
         return f"/app/manager/jobs?job={job_id}"
-    if key in ("advance_production", "mark_ready", "mark_dispatched"):
+    if key in ("accept_job", "start_printing", "advance_production", "mark_dispatched"):
         return f"/app/printer?assignment={assignment_id}" if assignment_id else "/app/printer"
     return None
 
@@ -204,7 +262,7 @@ def resolve_next_step(job: ManagedJob, viewer_role: str) -> dict[str, Any]:
     now = timezone.now()
     status = getattr(job, "status", None)
     owner_role = _role_for_owner(_status_owner(job), viewer_role)
-    key = _next_action_key(status, owner_role, job)
+    key = _next_action_key(status, owner_role, job, viewer_role)
     # Terminal states: no further action for anyone except buyer confirming
     # delivery of a delivered job.
     if status in (ManagedJobStatus.COMPLETED, ManagedJobStatus.CANCELLED, ManagedJobStatus.DISPUTED):
@@ -219,7 +277,7 @@ def resolve_next_step(job: ManagedJob, viewer_role: str) -> dict[str, Any]:
         "is_mine": is_mine,
         "next_action": {
             "key": key,
-            "label": _next_action_label(key),
+            "label": _next_action_label(key, status, viewer_role),
             "target": _target_route(key, job, viewer_role),
         },
         "due_at": getattr(job, "due_date", None),

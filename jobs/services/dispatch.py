@@ -149,7 +149,7 @@ def dispatch_job_to_shop(*, managed_job: ManagedJob, dispatched_by, shop=None, n
     )
     notify_stage_owner(
         managed_job=managed_job,
-        stage="dispatched",
+        stage="assigned",
         owner_role="printer",
         actor=dispatched_by,
         note=f"Job {managed_job.managed_reference} dispatched to {target_shop.name}.",

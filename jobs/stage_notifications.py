@@ -101,10 +101,19 @@ def _owner_role_for_status(status: str) -> str:
     return ""
 
 
+def _owner_role_for(managed_job: ManagedJob) -> str:
+    try:
+        from jobs.action_resolver import resolve_next_step
+
+        return str(resolve_next_step(managed_job, "manager").get("owner_role") or "")
+    except Exception:  # pragma: no cover - resolver must never block reminders
+        return _owner_role_for_status(str(getattr(managed_job, "status", "") or ""))
+
+
 def ensure_stage_reminders(managed_job: ManagedJob, *, now=None) -> dict[str, int]:
     now = now or timezone.now()
     status = str(getattr(managed_job, "status", "") or "")
-    owner_role = _owner_role_for_status(status)
+    owner_role = _owner_role_for(managed_job)
     recipient = _recipient(managed_job, owner_role)
     if recipient is None:
         return {"reminder": 0, "escalation": 0}
