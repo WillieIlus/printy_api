@@ -34,6 +34,7 @@ from jobs.artwork_workflow import (
 from api.throttling import TrackLookupCodeThrottle, TrackLookupIPThrottle
 from jobs.job_codes import job_code, job_from_quote_ref, job_tracking_url
 from jobs.timing import stage_timeline, timing_fields
+from jobs.action_resolver import resolve_next_step
 from services.pricing.role_projection import (
     ROLE_BUYER,
     ROLE_MANAGER,
@@ -514,6 +515,8 @@ class JobTrackView(APIView):
             payload["assigned_shop_name"] = (
                 getattr(managed_job.assigned_shop, "name", "") if managed_job.assigned_shop_id else ""
             )
+        if role in {ROLE_BUYER, ROLE_MANAGER, ROLE_PRINTER}:
+            payload["next_step"] = resolve_next_step(managed_job, role)
         if role == ROLE_MANAGER:
             client = getattr(managed_job, "client", None)
             payload["client_name"] = (
@@ -554,8 +557,8 @@ class JobTrackView(APIView):
             "raw_status": managed_job.status,
             "current_stage": current_key,
             "current_stage_label": current.get("label"),
-            "who_has_the_ball": current.get("owner"),
-            "next_action": current.get("next_action"),
+            "who_has_the_ball": _buyer_owner_label(current.get("owner")),
+            "next_action": _buyer_next_action(current.get("next_action")),
             "due_date": timeline.get("due_date"),
             "is_late": timeline.get("is_late"),
             "stages": stages,

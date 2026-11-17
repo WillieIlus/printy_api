@@ -148,6 +148,7 @@ urlpatterns = [
     path("workflow/quote-responses/<int:pk>/", workflow_views.QuoteResponseDetailView.as_view(), name="workflow-quote-response-detail"),
     path("dashboard/shop-home/", workflow_views.ShopHomeDashboardView.as_view(), name="dashboard-shop-home"),
     path("dashboard/counts/", dashboard_views.DashboardCountsView.as_view(), name="dashboard-counts"),
+    path("dashboard/needs-my-action/", dashboard_views.NeedsMyActionView.as_view(), name="dashboard-needs-my-action"),
     path("dashboard/admin/", dashboard_views.AdminDashboardHomeView.as_view(), name="dashboard-admin-home"),
     path("dashboard/internal/production-analytics/", ProductionAnalyticsView.as_view(), name="dashboard-internal-production-analytics"),
     path("dashboard/internal/jobs/<int:job_id>/completion-actuals/", JobCompletionActualsView.as_view(), name="dashboard-internal-job-completion-actuals"),

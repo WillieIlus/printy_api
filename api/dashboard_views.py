@@ -73,6 +73,8 @@ from jobs.read_state import (
 )
 from services.pricing.role_projection import ROLE_MANAGER, project_canonical, projection_role_for_actor
 from .canonical_jobs import build_job_projection, current_job_override_state, preview_job_override
+from accounts.services.roles import get_request_active_role_raw, validate_active_role, ActiveRoleNotHeld
+from jobs.action_resolver import resolve_next_step
 from services.pricing.breakdown_projection import production_breakdown_from_preview
 from services.pricing.finishing_normalization import is_empty_finishing, normalize_finishing_slug
 from services.pricing.spec_normalization import normalize_color_mode, normalize_print_sides
@@ -1128,6 +1130,9 @@ class BaseRoleDetailView(BaseDashboardHomeView):
             row["assigned_shop_name"] = getattr(job.assigned_shop, "name", "") or "Production Shop"
             row["specs"] = self._production_specs_snapshot(job)
             row["source"] = _job_source(job)
+        _resolver_role = {"client": "buyer", "partner": "manager", "production": "printer"}.get(role)
+        if _resolver_role is not None:
+            row["next_step"] = resolve_next_step(job, _resolver_role)
         return row
 
 
@@ -2730,4 +2735,54 @@ class ProductionPaymentListView(BaseRoleDetailView):
                 ],
             }
         )
+
+
+
+class NeedsMyActionView(APIView):
+    """Per-role list of jobs where the viewer currently has the ball (STEP 4)."""
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        user = request.user
+        if not user or not getattr(user, "is_authenticated", False):
+            return Response({"detail": "Authentication required."}, status=401)
+        try:
+            active_role = validate_active_role(user, get_request_active_role_raw(request))
+        except ActiveRoleNotHeld as exc:
+            return Response({"detail": str(exc)}, status=403)
+        if active_role == "client":
+            viewer_role = "buyer"
+            queryset = ManagedJob.objects.filter(Q(client=user) | Q(created_by=user))
+        elif active_role == "partner":
+            viewer_role = "manager"
+            queryset = ManagedJob.objects.filter(broker=user)
+        elif active_role == "production":
+            viewer_role = "printer"
+            queryset = ManagedJob.objects.filter(assigned_shop__owner=user)
+        else:
+            return Response({"detail": "Unsupported role."}, status=403)
+
+        jobs = list(queryset.select_related("assigned_shop").order_by("-updated_at"))
+        items = []
+        for job in jobs:
+            step = resolve_next_step(job, viewer_role)
+            if not step.get("is_mine"):
+                continue
+            items.append(
+                {
+                    "job_id": job.id,
+                    "job_code": job.managed_reference,
+                    "current_stage": step["current_stage"],
+                    "stage_label": step["stage_label"],
+                    "owner_role": step["owner_role"],
+                    "next_action": step["next_action"],
+                    "due_at": step["due_at"],
+                    "waiting_since": step["waiting_since"],
+                    "overdue_level": step["overdue_level"],
+                }
+            )
+        order = {"late": 0, "warn": 1, "none": 2}
+        items.sort(key=lambda item: (order.get(item["overdue_level"], 3), item["due_at"] or timezone.now(), item["job_id"]))
+        return Response({"role": viewer_role, "count": len(items), "results": items})
 

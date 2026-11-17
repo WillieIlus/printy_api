@@ -13,6 +13,7 @@ from django.utils.dateparse import parse_datetime
 
 from jobs.artwork_confirmation import get_artwork_confirmation_payload
 from jobs.artwork_workflow import get_artwork_workflow_payload
+from jobs.action_resolver import resolve_next_step
 from jobs.choices import ManagedJobPaymentStatus, ManagedJobStatus
 from jobs.file_services import managed_job_artwork_state
 from jobs.job_codes import job_code
@@ -173,6 +174,7 @@ def build_tracked_job(job: ManagedJob, *, now: datetime | None = None) -> dict[s
         "artwork_status_label": artwork_state["artwork_status_label"],
         "artwork_confirmation": get_artwork_confirmation_payload(job),
         "artwork_workflow": get_artwork_workflow_payload(job),
+        "next_step": resolve_next_step(job, "buyer"),
         "short_title": build_job_title(job, long_form=False),
         "_due_sort": due_at or datetime.max.replace(tzinfo=dt_timezone.utc),
         "_delivered_sort": _iso(milestones["delivered_at"]),

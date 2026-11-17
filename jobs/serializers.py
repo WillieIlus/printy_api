@@ -265,6 +265,7 @@ class JobAssignmentSerializer(serializers.ModelSerializer):
     needs_attention = serializers.SerializerMethodField()
     muted = serializers.SerializerMethodField()
     timeline = serializers.SerializerMethodField()
+    next_step = serializers.SerializerMethodField()
     # Law Part 5 / prompt 4: one-action printer stage workflow. The label is
     # decided by the server; the client never invents an action.
     printer_action = serializers.SerializerMethodField()
@@ -307,6 +308,7 @@ class JobAssignmentSerializer(serializers.ModelSerializer):
             "needs_attention",
             "muted",
             "timeline",
+            "next_step",
             "printer_action",
             "printer_workflow",
             "can_undo",
@@ -457,6 +459,11 @@ class JobAssignmentSerializer(serializers.ModelSerializer):
         from services.pricing.role_projection import ROLE_PRINTER, project_canonical
 
         return project_canonical(timing_fields(obj.managed_job), ROLE_PRINTER)
+
+    def get_next_step(self, obj):
+        from jobs.action_resolver import resolve_next_step
+
+        return resolve_next_step(obj.managed_job, "printer")
 
     def _section_flags(self, obj):
         from jobs.listing import assignment_flags
