@@ -9,6 +9,7 @@ from django.utils import timezone
 from jobs.audit_services import EVENT_ASSIGNMENT_CREATED, record_job_status_event
 from jobs.artwork_confirmation import require_artwork_confirmation_dispatch_ready
 from jobs.artwork_workflow import artwork_blocks_dispatch
+from jobs.stage_notifications import notify_stage_owner
 from jobs.choices import (
     JobAssignmentStatus,
     JobFileType,
@@ -145,6 +146,13 @@ def dispatch_job_to_shop(*, managed_job: ManagedJob, dispatched_by, shop=None, n
             "assignment_status",
             "updated_at",
         ]
+    )
+    notify_stage_owner(
+        managed_job=managed_job,
+        stage="dispatched",
+        owner_role="printer",
+        actor=dispatched_by,
+        note=f"Job {managed_job.managed_reference} dispatched to {target_shop.name}.",
     )
     record_job_status_event(
         managed_job=managed_job,
