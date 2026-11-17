@@ -274,6 +274,8 @@ urlpatterns = [
     path("users/me/", views.UserMeCompatView.as_view(), name="user-me-compat"),
     path("profiles/me/", views.ProfileMeView.as_view(), name="profile-me"),
     path("profiles/me/avatar/", views.ProfileAvatarUploadView.as_view(), name="profile-avatar-upload"),
+    path("profiles/me/manager-profile/", views.ManagerProfileBundleView.as_view(), name="manager-profile-bundle"),
+    path("profiles/me/manager-profile/photos/", views.ManagerProfilePhotoUploadView.as_view(), name="manager-profile-photo-upload"),
     path("profiles/", views.ProfileCreateView.as_view(), name="profile-create"),
     path("profiles/<int:pk>/", views.ProfileDetailView.as_view(), name="profile-detail"),
     path("me/notifications/", include(notifications_router.urls)),

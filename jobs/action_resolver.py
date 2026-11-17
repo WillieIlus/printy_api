@@ -257,6 +257,45 @@ def _overdue_level(due_at, now) -> str:
     return "none"
 
 
+_ACTION_EXPLANATIONS = {
+    "accept_quote": "Review the manager-approved quote, then accept it to unlock payment.",
+    "prepare_quote": "Your itemised quote is ready to send. It locks once sent.",
+    "upload_artwork": "Attach your print-ready file, or tick that your manager already has it.",
+    "approve_artwork": "Check bleed, resolution and colour, then approve or request changes.",
+    "review_artwork": "Check bleed, resolution and colour, then approve or request changes.",
+    "dispatch_job": "Choose the production shop and dispatch the job.",
+    "reassign_job": "Choose a new production shop and dispatch the job again.",
+    "accept_job": "A production request is waiting for your shop.",
+    "start_printing": "Everything is checked — put the job on press.",
+    "advance_production": "Mark the next production stage as complete.",
+    "confirm_delivery": "You have your print — confirm delivery to release the payout.",
+    "coordinate_delivery": "Hand to the rider or courier and mark it out for delivery.",
+}
+
+
+def _waiting_label(owner_role: str, viewer_role: str) -> str:
+    if owner_role == BUYER:
+        return "Waiting on you"
+    if owner_role == MANAGER:
+        return "Waiting on your manager" if viewer_role == BUYER else "Waiting on the manager"
+    if owner_role == PRINTER:
+        return "Waiting on the printer"
+    return "Waiting on Printy"
+
+
+def _phase_for_status(status: str | None) -> str:
+    if status in (
+        ManagedJobStatus.DRAFT,
+        ManagedJobStatus.QUOTED,
+        ManagedJobStatus.AWAITING_PAYMENT,
+        ManagedJobStatus.PAYMENT_CONFIRMED,
+    ):
+        return "quote"
+    if status in (ManagedJobStatus.COMPLETED, ManagedJobStatus.DELIVERED):
+        return "outcome"
+    return "production"
+
+
 def resolve_next_step(job: ManagedJob, viewer_role: str) -> dict[str, Any]:
     """Return the single owner + next action for a job, role-aware."""
     now = timezone.now()
@@ -270,6 +309,19 @@ def resolve_next_step(job: ManagedJob, viewer_role: str) -> dict[str, Any]:
     if status == ManagedJobStatus.DELIVERED and viewer_role == BUYER:
         key = "confirm_delivery"
     is_mine = owner_role == viewer_role and owner_role != NONE and key != "none"
+    completed = status == ManagedJobStatus.COMPLETED
+    label = _next_action_label(key, status, viewer_role)
+    headline = "Job completed" if completed else label
+    explanation = (
+        "Payout released per the escrow rules."
+        if completed
+        else _ACTION_EXPLANATIONS.get(key, "This step is waiting.")
+    )
+    reassurance = (
+        "No payment here — your money stays in escrow until you confirm delivery"
+        if viewer_role == BUYER
+        else "Every step is timestamped and visible to the job's parties"
+    )
     return {
         "current_stage": status,
         "stage_label": STATUS_LABELS.get(status, str(status or "")),
@@ -277,7 +329,7 @@ def resolve_next_step(job: ManagedJob, viewer_role: str) -> dict[str, Any]:
         "is_mine": is_mine,
         "next_action": {
             "key": key,
-            "label": _next_action_label(key, status, viewer_role),
+            "label": label,
             "target": _target_route(key, job, viewer_role),
         },
         "due_at": getattr(job, "due_date", None),
@@ -286,4 +338,10 @@ def resolve_next_step(job: ManagedJob, viewer_role: str) -> dict[str, Any]:
         "payment_confirmed": bool(getattr(job, "payment_confirmed", False)),
         "artwork_satisfied": _artwork_satisfied_flag(job),
         "artwork_confirmation_state": _artwork_confirmation_state(job),
+        "headline": headline,
+        "explanation": explanation,
+        "reassurance": reassurance,
+        "waiting_label": None if completed else _waiting_label(owner_role, viewer_role),
+        "phase": _phase_for_status(status),
+        "completed": completed,
     }

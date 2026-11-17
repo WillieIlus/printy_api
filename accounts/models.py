@@ -222,6 +222,58 @@ class UserProfile(TimeStampedModel):
         default="",
         help_text="Name clients see. Falls back to the account name when empty.",
     )
+    manager_business_name = models.CharField(
+        max_length=160,
+        blank=True,
+        default="",
+        help_text="Optional business name shown on the manager's public profile.",
+    )
+    manager_specialties = models.JSONField(
+        default=list,
+        blank=True,
+        help_text="Product types this manager prints, e.g. ['Business cards', 'Booklets'].",
+    )
+    manager_areas = models.JSONField(
+        default=list,
+        blank=True,
+        help_text="Areas served by this manager.",
+    )
+    manager_delivery_options = models.JSONField(
+        default=list,
+        blank=True,
+        help_text="Delivery options offered by this manager.",
+    )
+    manager_languages = models.JSONField(
+        default=list,
+        blank=True,
+        help_text="Languages spoken by this manager.",
+    )
+    manager_years_in_print = models.PositiveSmallIntegerField(
+        null=True,
+        blank=True,
+        help_text="Years the manager has worked in print.",
+    )
+    manager_turnaround_hours = models.PositiveSmallIntegerField(
+        null=True,
+        blank=True,
+        help_text="Typical turnaround in hours shown on the public profile.",
+    )
+    manager_turnaround_is_estimate = models.BooleanField(
+        default=True,
+        help_text="Whether the public turnaround is an estimate rather than a promise.",
+    )
+    manager_availability = models.CharField(
+        max_length=24,
+        blank=True,
+        default="available",
+        help_text="Public availability label, e.g. available or busy.",
+    )
+    manager_whatsapp = models.CharField(
+        max_length=32,
+        blank=True,
+        default="",
+        help_text="WhatsApp number shown only to locked clients.",
+    )
     manager_photo = models.ImageField(
         upload_to="manager_photos/",
         blank=True,
@@ -312,6 +364,47 @@ class UserProfile(TimeStampedModel):
         if manager_id is None or self.origin_manager_id is None:
             return False
         return self.origin_manager_id == manager_id
+
+
+class ManagerWorkPhoto(TimeStampedModel):
+    """A manager's public work sample shown on the profile card."""
+
+    KIND_HEADSHOT = "headshot"
+    KIND_SAMPLE = "work"
+    KIND_CHOICES = [
+        (KIND_HEADSHOT, "Headshot"),
+        (KIND_SAMPLE, "Work photo"),
+    ]
+
+    STATUS_PENDING = "pending"
+    STATUS_APPROVED = "approved"
+    STATUS_REJECTED = "rejected"
+    STATUS_CHOICES = [
+        (STATUS_PENDING, "Pending"),
+        (STATUS_APPROVED, "Approved"),
+        (STATUS_REJECTED, "Rejected"),
+    ]
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="manager_work_photos",
+        verbose_name="manager",
+    )
+    kind = models.CharField(max_length=16, choices=KIND_CHOICES, default=KIND_SAMPLE)
+    status = models.CharField(max_length=16, choices=STATUS_CHOICES, default=STATUS_APPROVED)
+    image = models.ImageField(
+        upload_to="manager_photos/work/",
+        validators=[validate_manager_photo],
+    )
+    caption = models.CharField(max_length=160, blank=True, default="")
+    position = models.PositiveSmallIntegerField(default=0)
+
+    class Meta:
+        ordering = ["position", "id"]
+
+    def __str__(self):
+        return f"{self.kind} for {self.user_id}"
 
 
 class ManagerLock(TimeStampedModel):

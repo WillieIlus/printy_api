@@ -17,12 +17,12 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.views import APIView
-from rest_framework.parsers import FormParser, MultiPartParser
+from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework.serializers import ModelSerializer
 
 from api.permissions import PrintManagerMarketplaceAccess
-from accounts.models import User, UserProfile
+from accounts.models import ManagerWorkPhoto, User, UserProfile
 from accounts.serializers import UserSerializer
 from accounts.services.roles import CANONICAL_PARTNER_ROLE, resolve_user_roles
 from accounts.services.roles import promote_to_shop_owner
@@ -530,6 +530,169 @@ class ProfileAvatarUploadView(APIView):
         profile.save(update_fields=["avatar", "updated_at"])
 
         return Response(ProfileSerializer(profile).data, status=status.HTTP_200_OK)
+
+
+def _manager_profile_bundle(request, profile: UserProfile) -> dict:
+    photos = []
+    if profile.manager_photo:
+        try:
+            headshot_url = request.build_absolute_uri(profile.manager_photo.url)
+        except ValueError:
+            headshot_url = ""
+        photos.append(
+            {
+                "id": "headshot",
+                "kind": "headshot",
+                "status": "approved",
+                "caption": None,
+                "altCustom": None,
+                "position": 0,
+                "thumb": headshot_url,
+                "card": headshot_url,
+                "full": headshot_url,
+            }
+        )
+    for photo in ManagerWorkPhoto.objects.filter(user=profile.user).order_by("position", "id"):
+        try:
+            url = request.build_absolute_uri(photo.image.url)
+        except ValueError:
+            continue
+        photos.append(
+            {
+                "id": str(photo.id),
+                "kind": "sample" if photo.kind == ManagerWorkPhoto.KIND_SAMPLE else photo.kind,
+                "status": photo.status,
+                "caption": photo.caption or None,
+                "altCustom": None,
+                "position": photo.position,
+                "thumb": url,
+                "card": url,
+                "full": url,
+            }
+        )
+
+    user = profile.user
+    display_name = (
+        str(profile.public_display_name or "").strip()
+        or str(getattr(user, "name", "") or "").strip()
+        or "Print manager"
+    )
+    profile_payload = {
+        "managerId": str(profile.public_id),
+        "displayName": display_name,
+        "bio": profile.bio or None,
+        "businessName": profile.manager_business_name or None,
+        "specialties": profile.manager_specialties or [],
+        "areas": profile.manager_areas or [],
+        "deliveryOptions": profile.manager_delivery_options or [],
+        "languages": profile.manager_languages or [],
+        "yearsInPrint": profile.manager_years_in_print,
+        "turnaroundHours": profile.manager_turnaround_hours,
+        "turnaroundIsEstimate": bool(profile.manager_turnaround_is_estimate),
+        "availability": profile.manager_availability or "available",
+        "phone": profile.phone or None,
+        "whatsapp": profile.manager_whatsapp or None,
+        "verificationStatus": "verified" if profile.manager_verified else "pending",
+        "pendingHeadshotId": None,
+        "approvedHeadshotId": "headshot" if profile.manager_photo else None,
+    }
+    checks = [
+        (bool(profile.manager_photo), "add a profile photo"),
+        (bool(profile.bio), "write a short bio"),
+        (bool(profile.manager_specialties), "pick what you print"),
+        (bool(profile.manager_areas), "say where you deliver"),
+        (sum(1 for photo in photos if photo["kind"] == "sample") >= 3, "add work photos to reach 100%"),
+    ]
+    done = sum(1 for ok, _ in checks if ok)
+    missing = [label for ok, label in checks if not ok]
+    progress = {
+        "percent": round((done / len(checks)) * 100),
+        "missing": missing,
+        "nextAction": missing[0] if missing else None,
+    }
+    return {"profile": profile_payload, "photos": photos, "progress": progress, "publicView": profile_payload}
+
+
+class ManagerProfileBundleView(APIView):
+    """GET/PATCH /api/profiles/me/manager-profile/ — guided manager profile."""
+
+    permission_classes = [IsAuthenticated]
+    parser_classes = [JSONParser, MultiPartParser, FormParser]
+
+    def _profile(self, user):
+        profile, _ = UserProfile.objects.get_or_create(user=user)
+        return profile
+
+    def get(self, request):
+        return Response(_manager_profile_bundle(request, self._profile(request.user)))
+
+    def patch(self, request):
+        profile = self._profile(request.user)
+        mapping = {
+            "displayName": "public_display_name",
+            "bio": "bio",
+            "businessName": "manager_business_name",
+            "specialties": "manager_specialties",
+            "areas": "manager_areas",
+            "deliveryOptions": "manager_delivery_options",
+            "languages": "manager_languages",
+            "yearsInPrint": "manager_years_in_print",
+            "turnaroundHours": "manager_turnaround_hours",
+            "turnaroundIsEstimate": "manager_turnaround_is_estimate",
+            "availability": "manager_availability",
+            "phone": "phone",
+            "whatsapp": "manager_whatsapp",
+        }
+        update_fields = []
+        for key, field in mapping.items():
+            if key in request.data:
+                value = request.data.get(key)
+                if key in {"specialties", "areas", "deliveryOptions", "languages"}:
+                    if isinstance(value, str):
+                        value = [part.strip() for part in value.split(",") if part.strip()]
+                    elif not isinstance(value, list):
+                        value = []
+                if key in {"yearsInPrint", "turnaroundHours"} and value in ("", None):
+                    value = None
+                if key == "turnaroundIsEstimate":
+                    value = bool(value)
+                setattr(profile, field, value)
+                update_fields.append(field)
+        if update_fields:
+            profile.save(update_fields=[*update_fields, "updated_at"])
+        return Response(_manager_profile_bundle(request, profile))
+
+
+class ManagerProfilePhotoUploadView(APIView):
+    """POST /api/profiles/me/manager-profile/photos/ — headshot or work sample."""
+
+    permission_classes = [IsAuthenticated]
+    parser_classes = [MultiPartParser, FormParser]
+
+    def post(self, request):
+        profile, _ = UserProfile.objects.get_or_create(user=request.user)
+        upload = request.FILES.get("file")
+        if not upload:
+            return Response({"error": "Choose an image to upload."}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            validate_manager_photo(upload)
+        except ValidationError as exc:
+            return Response({"error": "; ".join(exc.messages)}, status=status.HTTP_400_BAD_REQUEST)
+        kind = str(request.data.get("kind") or "sample")
+        if kind == "headshot":
+            profile.manager_photo = upload
+            profile.save(update_fields=["manager_photo", "updated_at"])
+        else:
+            count = ManagerWorkPhoto.objects.filter(user=request.user, kind=ManagerWorkPhoto.KIND_SAMPLE).count()
+            ManagerWorkPhoto.objects.create(
+                user=request.user,
+                kind=ManagerWorkPhoto.KIND_SAMPLE,
+                status=ManagerWorkPhoto.STATUS_APPROVED,
+                image=upload,
+                caption=str(request.data.get("caption") or ""),
+                position=count,
+            )
+        return Response(_manager_profile_bundle(request, profile), status=status.HTTP_201_CREATED)
 
 
 class ProfileCreateView(APIView):
