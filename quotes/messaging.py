@@ -431,6 +431,10 @@ def create_quote_message(
     metadata=None,
     send_email_copy=False,
     create_failure_notice=False,
+    managed_job=None,
+    stage="",
+    visibility="",
+    shop=None,
 ):
     payload = dict(metadata or {})
     payload.setdefault(
@@ -444,9 +448,12 @@ def create_quote_message(
     message = QuoteRequestMessage.objects.create(
         quote_request=quote_request,
         quote=quote,
+        managed_job=managed_job,
+        stage=stage or "",
+        visibility=visibility or "",
         sender=sender,
         recipient=recipient,
-        shop=getattr(quote_request, "shop", None),
+        shop=shop if shop is not None else getattr(quote_request, "shop", None),
         recipient_email=recipient_email or getattr(recipient, "email", "") or "",
         sender_role=sender_role,
         recipient_role=recipient_role,
@@ -480,7 +487,7 @@ def create_quote_message(
                     quote=quote,
                     sender=None,
                     recipient=recipient,
-                    shop=getattr(quote_request, "shop", None),
+                    shop=shop if shop is not None else getattr(quote_request, "shop", None),
                     sender_role=QuoteRequestMessage.SenderRole.SYSTEM,
                     recipient_role=recipient_role,
                     message_kind=QuoteRequestMessage.MessageKind.STATUS,

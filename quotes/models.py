@@ -677,14 +677,18 @@ class QuoteFinancialSplit(models.Model):
 
 class QuoteRequestMessage(TimeStampedModel):
     """
-    DEPRECATED: transitional model kept only to satisfy legacy code.
-    Scheduled for removal in a later postponed batch (not MVP).
-    Do NOT add new fields, FKs, or features to this model.
+    Transitional model kept because it is the single persistent message store
+    used by the live client/shop inboxes. Do NOT create a second message model.
+
+    Stage-scoped managed-job messages reuse this table through ``managed_job``,
+    ``stage`` and ``visibility``; legacy quote messages leave those fields empty.
     """
 
     class SenderRole(models.TextChoices):
         CLIENT = "client", "Client"
         SHOP = "shop", "Shop"
+        MANAGER = "manager", "Manager"
+        PRINTER = "printer", "Printer"
         SYSTEM = "system", "System"
 
     class MessageKind(models.TextChoices):
@@ -698,8 +702,14 @@ class QuoteRequestMessage(TimeStampedModel):
     class RecipientRole(models.TextChoices):
         CLIENT = "client", "Client"
         SHOP_OWNER = "shop_owner", "Shop owner"
+        MANAGER = "manager", "Manager"
+        PRINTER = "printer", "Printer"
         ADMIN = "admin", "Admin"
         SYSTEM = "system", "System"
+
+    class JobVisibility(models.TextChoices):
+        CLIENT_MANAGER = "client_manager", "Client ↔ manager"
+        MANAGER_PRINTER = "manager_printer", "Manager ↔ printer"
 
     class MessageType(models.TextChoices):
         QUOTE_REQUEST_CREATED = "quote_request_created", "Quote request created"
@@ -744,6 +754,30 @@ class QuoteRequestMessage(TimeStampedModel):
         related_name="messages",
         verbose_name=_("shop quote"),
         help_text=_("Optional linked quote revision for this message."),
+    )
+    managed_job = models.ForeignKey(
+        "jobs.ManagedJob",
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="stage_messages",
+        verbose_name=_("managed job"),
+        help_text=_("Managed job this stage-scoped message belongs to."),
+    )
+    stage = models.CharField(
+        max_length=32,
+        blank=True,
+        default="",
+        verbose_name=_("job stage"),
+        help_text=_("Canonical managed-job stage key this message belongs to."),
+    )
+    visibility = models.CharField(
+        max_length=24,
+        choices=JobVisibility.choices,
+        blank=True,
+        default="",
+        verbose_name=_("job visibility"),
+        help_text=_("Which job conversation this message belongs to."),
     )
     sender = models.ForeignKey(
         settings.AUTH_USER_MODEL,

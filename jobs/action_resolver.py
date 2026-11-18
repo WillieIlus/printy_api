@@ -197,6 +197,10 @@ def _next_action_label(key: str, status: str | None = None, viewer_role: str = "
         ):
             return "Your manager is running production"
         if viewer_role == MANAGER and status in (
+            ManagedJobStatus.PAYMENT_CONFIRMED,
+        ):
+            return "Waiting on the buyer"
+        if viewer_role == MANAGER and status in (
             ManagedJobStatus.ASSIGNED,
             ManagedJobStatus.IN_PRODUCTION,
             ManagedJobStatus.FINISHING,
@@ -274,8 +278,10 @@ _ACTION_EXPLANATIONS = {
 
 
 def _waiting_label(owner_role: str, viewer_role: str) -> str:
-    if owner_role == BUYER:
+    if owner_role == viewer_role and owner_role != NONE:
         return "Waiting on you"
+    if owner_role == BUYER:
+        return "Waiting on the buyer"
     if owner_role == MANAGER:
         return "Waiting on your manager" if viewer_role == BUYER else "Waiting on the manager"
     if owner_role == PRINTER:

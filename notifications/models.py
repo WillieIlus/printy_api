@@ -42,6 +42,7 @@ class Notification(models.Model):
     ARTWORK_REQUIRED = "artwork_required"
     JOB_READY_TO_START = "job_ready_to_start"
     JOB_CREATED = "job_created"
+    JOB_MESSAGE_RECEIVED = "job_message_received"
     TYPE_CHOICES = [
         (QUOTE_REQUEST_SUBMITTED, _("New quote request")),
         (QUOTE_REQUEST_SENT, _("Request sent")),
@@ -57,6 +58,7 @@ class Notification(models.Model):
         (ARTWORK_REQUIRED, _("Artwork required")),
         (JOB_READY_TO_START, _("Job ready to start")),
         (JOB_CREATED, _("Job created")),
+        (JOB_MESSAGE_RECEIVED, _("Job message")),
     ]
 
     user = models.ForeignKey(

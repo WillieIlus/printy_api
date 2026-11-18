@@ -4,7 +4,7 @@ API URL configuration with DRF routers.
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 
-from . import account_admin_views, dashboard_views, manager_views, payment_views, pricing_views, public_matching_views, quote_views, speed_views, views, workflow_views
+from . import account_admin_views, dashboard_views, job_messaging_views, manager_views, payment_views, pricing_views, public_matching_views, quote_views, speed_views, views, workflow_views
 from .workflow_views import GuestQuoteRequestView
 from .seo_views import (
     SEOProductDetailView,
@@ -229,6 +229,8 @@ urlpatterns = [
     path("managed-jobs/<int:pk>/payments/mpesa/stk-push/", payment_views.ManagedJobMpesaSTKPushView.as_view(), name="managed-job-mpesa-stk-push"),
     path("managed-jobs/<int:pk>/payments/mpesa/query/", payment_views.ManagedJobMpesaQueryView.as_view(), name="managed-job-mpesa-query"),
     path("managed-jobs/<int:pk>/files/", ManagedJobFileListView.as_view(), name="managed-job-files"),
+    path("managed-jobs/<int:pk>/messages/", job_messaging_views.ManagedJobMessagesView.as_view(), name="managed-job-messages"),
+    path("managed-jobs/<int:pk>/messages/<int:message_id>/read/", job_messaging_views.ManagedJobMessageReadView.as_view(), name="managed-job-message-read"),
     path("managed-jobs/<int:pk>/artwork-confirmation/request/", ManagedJobArtworkConfirmationRequestView.as_view(), name="managed-job-artwork-confirmation-request"),
     path("managed-jobs/<int:pk>/artwork-confirmation/respond/", ManagedJobArtworkConfirmationResponseView.as_view(), name="managed-job-artwork-confirmation-respond"),
     path("managed-jobs/<int:pk>/artwork/workflow/", ManagedJobArtworkWorkflowView.as_view(), name="managed-job-artwork-workflow"),
