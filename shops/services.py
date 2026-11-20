@@ -60,54 +60,22 @@ def _has_standard_turnaround(shop: Shop) -> bool:
 def rate_card_missing_steps(shop: Shop) -> list[dict[str, str]]:
     """Structured list of what a shop still needs before its card is usable.
 
-    Mirrors the exact same live-data criteria as :func:`shop_rate_card_is_usable`
-    so owners get told precisely what to add. Empty list means ready to confirm.
-    Codes are stable machine strings; titles/hints are plain English.
+    The ordered definitions and the live-data checks live in
+    ``setup.services.build_rate_card_setup_status``. This function is a thin
+    compatibility projection of that one source, so the owner-guidance screen
+    and the missing-step checks can never drift apart.
     """
-    from inventory.models import Machine, Paper
-    from pricing.models import PrintingRate
+    from setup.services import build_rate_card_setup_status
 
-    missing: list[dict[str, str]] = []
-    if not Machine.objects.filter(shop=shop, is_active=True).exists():
-        missing.append(
-            {
-                "code": "machine",
-                "title": "Add your first machine",
-                "hint": "Tell us which press you print on so we can price jobs.",
-            }
-        )
-    if not Paper.objects.filter(shop=shop, is_active=True, selling_price__gt=0).exists():
-        missing.append(
-            {
-                "code": "paper",
-                "title": "Add priced paper stock",
-                "hint": "Add at least one paper with a selling price so we can quote jobs.",
-            }
-        )
-    if not PrintingRate.objects.filter(
-        machine__shop=shop,
-        machine__is_active=True,
-        is_active=True,
-    ).exists():
-        missing.append(
-            {
-                "code": "printing_rate",
-                "title": "Set a printing rate",
-                "hint": "Set your per-sheet price so jobs can be matched to you.",
-            }
-        )
-    if not _has_standard_turnaround(shop):
-        missing.append(
-            {
-                "code": "standard_turnaround",
-                "title": "Set your standard turnaround",
-                "hint": (
-                    "Tell buyers how many business hours a standard job takes; Faster and "
-                    "Fastest are calculated from it."
-                ),
-            }
-        )
-    return missing
+    status = build_rate_card_setup_status(shop)
+    return [
+        {
+            "code": step["code"],
+            "title": step["title"],
+            "hint": step["hint"],
+        }
+        for step in status.get("missing_steps", [])
+    ]
 
 
 def refresh_shop_pricing_ready(shop: Shop) -> bool:

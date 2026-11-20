@@ -112,9 +112,9 @@ STAGES: tuple[StageConfig, ...] = (
     StageConfig(
         "qc",
         "Quality check",
-        OWNER_MANAGER,
+        OWNER_PRINTER,
         Decimal("8"),
-        "Check quality before handoff",
+        "Pass the quality check",
     ),
     StageConfig(
         "delivery",
@@ -138,18 +138,8 @@ MIN_JOBS_FOR_PUBLIC_SCORE = 5
 
 
 # --- managed-job status -> stage ------------------------------------------
-_STAGE_FOR_STATUS = {
-    "draft": "quote_accepted",
-    "quoted": "quote_accepted",
-    "awaiting_payment": "quote_accepted",
-    "payment_confirmed": "artwork_approval",
-    "assigned": "artwork_approval",
-    "in_production": "production",
-    "finishing": "production",
-    "ready": "qc",
-    "delivered": "delivery",
-    "completed": "delivery",
-}
+# Law 25: the one status-to-stage mapping lives in jobs.stage_mapping.
+from jobs.stage_mapping import STATUS_TO_STAGE as _STAGE_FOR_STATUS  # noqa: E402
 
 
 def stage_for_status(status: str | None) -> str:

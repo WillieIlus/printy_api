@@ -405,6 +405,8 @@ def _buyer_safe_stage(stage: dict) -> dict:
     return safe
 
 
+# DEPRECATED (Stage 1A): legacy tracking view. The role-aware card endpoint
+# (managed-jobs/<pk>/card/) is the single projection going forward.
 class JobTrackView(APIView):
     """Law 7.7 / 10.1: the single track page, resolved by job code.
 
@@ -701,6 +703,8 @@ class ManagedJobArtworkUploadView(APIView):
         return Response(JobFileSerializer(job_file, context={"request": request}).data, status=status.HTTP_201_CREATED)
 
 
+# DEPRECATED (Stage 1A): legacy managed-job list. New clients use the card
+# envelope at managed-jobs/<pk>/card/.
 class ManagedJobListView(APIView):
     permission_classes = [IsAuthenticated]
 

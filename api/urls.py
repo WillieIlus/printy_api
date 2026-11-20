@@ -4,7 +4,7 @@ API URL configuration with DRF routers.
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 
-from . import account_admin_views, dashboard_views, job_messaging_views, manager_views, payment_views, pricing_views, public_matching_views, quote_views, speed_views, views, workflow_views
+from . import account_admin_views, admin_ops_views, dashboard_views, job_messaging_views, manager_views, payment_views, pricing_views, public_matching_views, quote_views, speed_views, views, workflow_views
 from .workflow_views import GuestQuoteRequestView
 from .seo_views import (
     SEOProductDetailView,
@@ -44,6 +44,8 @@ from jobs.views import (
     ShopAssignmentListView,
 )
 from jobs.analytics_views import ProductionAnalyticsView
+from jobs.card_views import ManagedJobCardView, ManagedJobNextActionView
+from quotes.quote_card_views import QuoteCardView
 from jobs.completion_actuals_views import JobCompletionActualsView
 from notifications.views import NotificationViewSet
 from api.public_range_views import PublicPriceRangeView
@@ -53,6 +55,9 @@ public_router = DefaultRouter()
 public_router.register(r"public/shops", views.PublicShopViewSet, basename="public-shop")
 
 # Quote marketplace — customer vs shop separation
+# DEPRECATED (Stage 1C): the legacy request/offer/response/draft projections
+# below remain for compatibility. New clients use
+# quote-cards/<legacy_type>/<pk>/ for the one Quote envelope.
 quote_router = DefaultRouter()
 quote_router.register(r"quote-requests", quote_views.CustomerQuoteRequestViewSet, basename="quote-request")
 quote_router.register(r"quote-drafts", views.CalculatorDraftViewSet, basename="quote-draft")
@@ -121,6 +126,11 @@ urlpatterns = [
     path("calculator/drafts/<int:pk>/send/", workflow_views.CalculatorDraftSendView.as_view(), name="calculator-draft-send"),
     path("calculator/drafts/<int:pk>/direct-shop/submit/", workflow_views.DirectShopDraftSubmitView.as_view(), name="calculator-draft-direct-shop-submit"),
     path("calculator/buyer-quotes/", workflow_views.BuyerQuotesListView.as_view(), name="calculator-buyer-quotes"),
+    path(
+        "quote-cards/<str:legacy_type>/<int:pk>/",
+        QuoteCardView.as_view(),
+        name="quote-card",
+    ),
     path("partner/quotes/", workflow_views.PartnerQuoteListView.as_view(), name="partner-quote-list"),
     path("partner/quotes/preview/", workflow_views.PartnerQuotePreviewView.as_view(), name="partner-quote-preview"),
     path("partner/production-matches/", workflow_views.PartnerProductionMatchView.as_view(), name="partner-production-matches"),
@@ -150,6 +160,39 @@ urlpatterns = [
     path("dashboard/counts/", dashboard_views.DashboardCountsView.as_view(), name="dashboard-counts"),
     path("dashboard/needs-my-action/", dashboard_views.NeedsMyActionView.as_view(), name="dashboard-needs-my-action"),
     path("dashboard/admin/", dashboard_views.AdminDashboardHomeView.as_view(), name="dashboard-admin-home"),
+    path(
+        "admin/verifications/managers/",
+        admin_ops_views.AdminManagerVerificationListView.as_view(),
+        name="admin-manager-verifications",
+    ),
+    path(
+        "admin/verifications/managers/<int:user_id>/decision/",
+        admin_ops_views.AdminManagerVerificationDecisionView.as_view(),
+        name="admin-manager-verification-decision",
+    ),
+    path(
+        "admin/verifications/printers/",
+        admin_ops_views.AdminPrinterVerificationListView.as_view(),
+        name="admin-printer-verifications",
+    ),
+    path(
+        "admin/verifications/printers/<int:shop_id>/decision/",
+        admin_ops_views.AdminPrinterVerificationDecisionView.as_view(),
+        name="admin-printer-verification-decision",
+    ),
+    path("admin/custody/", admin_ops_views.AdminCustodyListView.as_view(), name="admin-custody"),
+    path(
+        "admin/custody/<int:job_id>/release/",
+        admin_ops_views.AdminCustodyReleaseView.as_view(),
+        name="admin-custody-release",
+    ),
+    path("admin/disputes/", admin_ops_views.AdminDisputeListView.as_view(), name="admin-disputes"),
+    path(
+        "admin/disputes/<int:job_id>/resolve/",
+        admin_ops_views.AdminDisputeResolveView.as_view(),
+        name="admin-dispute-resolve",
+    ),
+    path("admin/reporting/", admin_ops_views.AdminReportingView.as_view(), name="admin-reporting"),
     path("dashboard/internal/production-analytics/", ProductionAnalyticsView.as_view(), name="dashboard-internal-production-analytics"),
     path("dashboard/internal/jobs/<int:job_id>/completion-actuals/", JobCompletionActualsView.as_view(), name="dashboard-internal-job-completion-actuals"),
     path(
@@ -164,6 +207,8 @@ urlpatterns = [
     path("dashboard/client/quotes/<int:pk>/", dashboard_views.ClientQuoteDetailView.as_view(), name="dashboard-client-quote-detail"),
     path("dashboard/client/jobs/", dashboard_views.ClientJobListView.as_view(), name="dashboard-client-jobs"),
     path("dashboard/client/jobs/<int:pk>/", dashboard_views.ClientJobDetailView.as_view(), name="dashboard-client-job-detail"),
+    # DEPRECATED (Stage 1A): legacy tracked-job projections remain for
+    # compatibility. New clients use managed-jobs/<pk>/card/.
     path("dashboard/client/tracked-jobs/", dashboard_views.ClientTrackedJobsView.as_view(), name="dashboard-client-tracked-jobs"),
     path("dashboard/client/jobs/tracked/", dashboard_views.ClientTrackedJobsView.as_view(), name="dashboard-client-jobs-tracked"),
     path("dashboard/client/tracked-jobs/<int:pk>/", dashboard_views.ClientTrackedJobDetailView.as_view(), name="dashboard-client-tracked-job-detail"),
@@ -223,6 +268,14 @@ urlpatterns = [
     path("", include(quote_router.urls)),
     path("", include(quotes_router.urls)),
     path("managed-jobs/", ManagedJobListView.as_view(), name="managed-job-list"),
+    # Stage 1A: the one card envelope. Legacy job projections below remain for
+    # compatibility and are DEPRECATED; new clients use this endpoint.
+    path("managed-jobs/<int:pk>/card/", ManagedJobCardView.as_view(), name="managed-job-card"),
+    path(
+        "managed-jobs/<int:pk>/actions/next/",
+        ManagedJobNextActionView.as_view(),
+        name="managed-job-next-action",
+    ),
     path("managed-jobs/<int:pk>/payments/", payment_views.ManagedJobPaymentsListView.as_view(), name="managed-job-payments"),
     path("managed-jobs/<int:pk>/settlement/", payment_views.ManagedJobSettlementView.as_view(), name="managed-job-settlement"),
     path("managed-jobs/<int:pk>/payouts/release/", payment_views.ManagedJobPayoutReleaseView.as_view(), name="managed-job-payout-release"),
@@ -269,6 +322,8 @@ urlpatterns = [
     path("public/managed-jobs/track/<str:token>/", PublicManagedJobTrackingView.as_view(), name="public-managed-job-track"),
     path("managed-jobs/public/<str:token>/", PublicManagedJobTrackingView.as_view(), name="managed-job-public-track"),
     # Law 7.7 / 10.1: the one track page, resolved by job code (QR-... or MJ-...).
+    # DEPRECATED (Stage 1A): the one track page remains for compatibility.
+    # New clients use managed-jobs/<pk>/card/ for the full card.
     path("track/<str:code>/", JobTrackView.as_view(), name="job-track"),
     path("public/job/<str:token>/", PublicJobView.as_view(), name="public-job"),
     path("share/<str:token>/", views.QuoteSharePublicView.as_view(), name="quote-share-public"),

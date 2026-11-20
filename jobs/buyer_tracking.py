@@ -22,6 +22,8 @@ from jobs.timing_config import STAGES_BY_KEY
 from services.pricing.spec_title import build_job_title
 
 
+# DEPRECATED (Stage 1A): legacy buyer seven-milestone timeline. New clients
+# read the five-stage card thread instead.
 BUYER_STAGES: tuple[tuple[str, str], ...] = (
     ("payment_received", "Payment received"),
     ("artwork_check", "Artwork check"),

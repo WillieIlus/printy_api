@@ -175,6 +175,8 @@ class QuoteItemShopSerializer(serializers.ModelSerializer):
         return snapshot.get("explanations", [])
 
 
+# DEPRECATED (Stage 1C): legacy quote summary shape. New clients use the one
+# Quote envelope at quote-cards/<legacy_type>/<pk>/.
 class QuoteSummarySerializer(serializers.ModelSerializer):
     """Minimal shop quote for embedding in QuoteRequest responses."""
 

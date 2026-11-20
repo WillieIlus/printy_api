@@ -101,7 +101,7 @@ def sync_job_timing(managed_job: ManagedJob, *, due: datetime | None = None) -> 
         if owner_role in {"buyer", "manager", "printer"}:
             notify_stage_owner(
                 managed_job=managed_job,
-                stage=str(step.get("current_stage") or stage_key or ""),
+                stage=str(step.get("canonical_stage") or step.get("current_stage") or stage_key or ""),
                 owner_role=owner_role,
             )
     except Exception:

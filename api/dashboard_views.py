@@ -1181,6 +1181,8 @@ class ClientJobListView(BaseRoleDetailView):
         return Response({"role": "client", "results": order_jobs(rows)})
 
 
+# DEPRECATED (Stage 1A): legacy buyer 7-milestone tracker. New clients use the
+# five-stage card envelope (managed-jobs/<pk>/card/).
 class ClientTrackedJobsView(BaseRoleDetailView):
     dashboard_role = "client"
     allowed_roles = (CANONICAL_CLIENT_ROLE,)
@@ -2738,6 +2740,8 @@ class ProductionPaymentListView(BaseRoleDetailView):
 
 
 
+# DEPRECATED (Stage 1A): legacy per-role next-action list. New clients use the
+# card envelope at managed-jobs/<pk>/card/.
 class NeedsMyActionView(APIView):
     """Per-role list of jobs where the viewer currently has the ball (STEP 4)."""
 

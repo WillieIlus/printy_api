@@ -16,6 +16,7 @@ from django.utils import timezone
 from jobs.choices import JobAssignmentStatus, ManagedJobStatus
 from jobs.models import ManagedJob
 from jobs.artwork_workflow import artwork_satisfied, artwork_payment_block_reason
+from jobs.stage_mapping import canonical_stage_for_job, stage_label as canonical_stage_label
 
 BUYER = "buyer"
 MANAGER = "manager"
@@ -133,6 +134,26 @@ def _role_for_owner(owner: str, viewer_role: str) -> str:
 def _next_action_key(stage_key: str, owner_role: str, job: ManagedJob, viewer_role: str) -> str:
     if owner_role == NONE or owner_role != viewer_role:
         return "none"
+    if (
+        owner_role == PRINTER
+        and viewer_role == PRINTER
+        and stage_key == ManagedJobStatus.FINISHING
+    ):
+        # printer_workflow.py is the authority for the printer's real stage.
+        # When its next step is the quality check, return that action by name
+        # instead of the generic production advance (law 28). Only the
+        # finishing status can be at QC, so the other printer taps do not pay
+        # for this extra projection.
+        assignment = _active_assignment(job)
+        if assignment is not None:
+            try:
+                from jobs.printer_workflow import build_printer_progress
+
+                printer_action = build_printer_progress(assignment).get("next_action") or {}
+            except Exception:  # pragma: no cover - projection must never crash
+                printer_action = {}
+            if printer_action.get("stage_key") == "quality_check":
+                return "pass_qc"
     if stage_key in (ManagedJobStatus.DRAFT, ManagedJobStatus.QUOTED, ManagedJobStatus.AWAITING_PAYMENT):
         return "accept_quote" if owner_role == BUYER else "prepare_quote"
     if stage_key in (ManagedJobStatus.PAYMENT_CONFIRMED, ManagedJobStatus.ASSIGNED):
@@ -224,6 +245,7 @@ def _next_action_label(key: str, status: str | None = None, viewer_role: str = "
         "accept_job": "Accept the job",
         "start_printing": "Start printing",
         "advance_production": "Advance the production stage",
+        "pass_qc": "QC passed",
         "confirm_delivery": "Confirm the job is complete",
         "coordinate_delivery": "Coordinate delivery",
     }.get(key, "No action needed")
@@ -245,7 +267,7 @@ def _target_route(key: str, job: ManagedJob, viewer_role: str) -> str | None:
         "coordinate_delivery",
     ):
         return f"/app/manager/jobs?job={job_id}"
-    if key in ("accept_job", "start_printing", "advance_production", "mark_dispatched"):
+    if key in ("accept_job", "start_printing", "advance_production", "pass_qc", "mark_dispatched"):
         return f"/app/printer?assignment={assignment_id}" if assignment_id else "/app/printer"
     return None
 
@@ -272,6 +294,7 @@ _ACTION_EXPLANATIONS = {
     "accept_job": "A production request is waiting for your shop.",
     "start_printing": "Everything is checked — put the job on press.",
     "advance_production": "Mark the next production stage as complete.",
+    "pass_qc": "Check the print against the approved artwork, then pass QC.",
     "confirm_delivery": "You have your print — confirm delivery to release the payout.",
     "coordinate_delivery": "Hand to the rider or courier and mark it out for delivery.",
 }
@@ -302,6 +325,28 @@ def _phase_for_status(status: str | None) -> str:
     return "production"
 
 
+def _action_params(key: str, job: ManagedJob, owner_role: str) -> dict[str, Any]:
+    """Small, non-sensitive parameter bag for the one primary action."""
+    params: dict[str, Any] = {"job_id": job.id}
+    request_id = getattr(job, "source_quote_request_id", None)
+    assignment_id = _assignment_id(job)
+    if key == "accept_quote" and request_id:
+        params["request_id"] = request_id
+    if key in {
+        "accept_job",
+        "start_printing",
+        "advance_production",
+        "pass_qc",
+        "mark_dispatched",
+    } and assignment_id:
+        params["assignment_id"] = assignment_id
+    if key == "pass_qc":
+        params["printer_stage"] = "quality_check"
+    if owner_role:
+        params["owner_role"] = owner_role
+    return params
+
+
 def resolve_next_step(job: ManagedJob, viewer_role: str) -> dict[str, Any]:
     """Return the single owner + next action for a job, role-aware."""
     now = timezone.now()
@@ -328,15 +373,20 @@ def resolve_next_step(job: ManagedJob, viewer_role: str) -> dict[str, Any]:
         if viewer_role == BUYER
         else "Every step is timestamped and visible to the job's parties"
     )
+    canonical_stage = canonical_stage_for_job(job)
     return {
         "current_stage": status,
         "stage_label": STATUS_LABELS.get(status, str(status or "")),
+        "canonical_stage": canonical_stage,
+        "canonical_stage_label": canonical_stage_label(canonical_stage),
         "owner_role": owner_role,
         "is_mine": is_mine,
         "next_action": {
             "key": key,
             "label": label,
             "target": _target_route(key, job, viewer_role),
+            "actor": owner_role,
+            "params": _action_params(key, job, owner_role),
         },
         "due_at": getattr(job, "due_date", None),
         "waiting_since": getattr(job, "updated_at", None) or getattr(job, "created_at", None),

@@ -939,6 +939,8 @@ class PartnerQuoteAttachClientSerializer(serializers.Serializer):
         return attrs
 
 
+# DEPRECATED (Stage 1C): legacy draft shape. New clients use the one Quote
+# envelope at quote-cards/<legacy_type>/<pk>/.
 class CalculatorDraftReadSerializer(serializers.ModelSerializer):
     generated_request_ids = serializers.SerializerMethodField()
     shop_name = serializers.SerializerMethodField()
@@ -1171,6 +1173,8 @@ class IntakeSubmitSerializer(serializers.Serializer):
         return attrs
 
 
+# DEPRECATED (Stage 1C): legacy request shape. New clients use the one Quote
+# envelope at quote-cards/<legacy_type>/<pk>/.
 class QuoteRequestReadSerializer(serializers.ModelSerializer):
     source_draft_reference = serializers.CharField(source="source_draft.draft_reference", read_only=True)
     latest_response = serializers.SerializerMethodField()
@@ -1410,6 +1414,8 @@ class QuoteResponseUpdateSerializer(serializers.Serializer):
         return normalized
 
 
+# DEPRECATED (Stage 1C): legacy quote response shape. New clients use the one
+# Quote envelope at quote-cards/<legacy_type>/<pk>/.
 class QuoteResponseReadSerializer(serializers.ModelSerializer):
     request_reference = serializers.CharField(source="quote_request.request_reference", read_only=True)
     shop_name = serializers.SerializerMethodField()

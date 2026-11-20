@@ -163,6 +163,9 @@ class ManagedJobSerializer(serializers.ModelSerializer):
         return get_artwork_workflow_payload(obj)
 
 
+# DEPRECATED (Stage 1A): legacy public tracking projection. Use the role-aware
+# card endpoint (managed-jobs/<pk>/card/) for one stage/owner/next action and
+# the single thread. This serializer remains for compatibility.
 class ManagedJobPublicTrackingSerializer(serializers.ModelSerializer):
     tracking_reference = serializers.SerializerMethodField()
     code = serializers.SerializerMethodField()
@@ -237,6 +240,9 @@ class ManagedJobPublicTrackingSerializer(serializers.ModelSerializer):
         return stage_timeline(obj, events=list(obj.job_events.all()))
 
 
+# DEPRECATED (Stage 1A): legacy printer/assignment projection. It still carries
+# production_stage, next_allowed_actions, printer_action and next_step for
+# compatibility; new clients read the single card projection instead.
 class JobAssignmentSerializer(serializers.ModelSerializer):
     assignment_reference = serializers.SerializerMethodField()
     shop_name = serializers.SerializerMethodField()

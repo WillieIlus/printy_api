@@ -194,6 +194,7 @@ def _build_status_for_shop(shop: Shop | None) -> dict:
             "completed_steps": [],
             "pending_steps": ["shop"],
             "steps": _build_steps_payload(shop=None, state={}, next_step="shop"),
+            "missing_steps": [],
             "setup_status": build_rate_card_setup_status(None),
         }
 
@@ -292,6 +293,7 @@ def _build_status_for_shop(shop: Shop | None) -> dict:
         "shop_published": shop_published,
     }
     steps = _build_steps_payload(shop=shop, state=state, next_step=next_step)
+    rate_card_status = build_rate_card_setup_status(shop)
 
     return {
         "has_shop": True,
@@ -322,7 +324,8 @@ def _build_status_for_shop(shop: Shop | None) -> dict:
         "completed_steps": completed_steps,
         "pending_steps": pending_steps,
         "steps": steps,
-        "setup_status": build_rate_card_setup_status(shop),
+        "missing_steps": rate_card_status["missing_steps"],
+        "setup_status": rate_card_status,
     }
 
 
@@ -356,6 +359,7 @@ def build_rate_card_setup_status(shop: Shop | None) -> dict:
             "total_steps": len(RATE_CARD_STEP_DEFINITIONS),
             "next_step": None,
             "steps": [],
+            "missing_steps": [],
         }
 
     has_machine = Machine.objects.filter(shop=shop, is_active=True).exists()
@@ -397,6 +401,9 @@ def build_rate_card_setup_status(shop: Shop | None) -> dict:
             next_step = step
 
     completed_steps = sum(1 for code in done_by_code if done_by_code[code])
+    missing_steps = [
+        step for step in steps if step["code"] != "confirm" and not step.get("done")
+    ]
     return {
         "is_confirmed": is_confirmed,
         "is_ready_to_confirm": is_ready_to_confirm,
@@ -404,6 +411,7 @@ def build_rate_card_setup_status(shop: Shop | None) -> dict:
         "total_steps": len(RATE_CARD_STEP_DEFINITIONS),
         "next_step": next_step,
         "steps": steps,
+        "missing_steps": missing_steps,
     }
 
 
