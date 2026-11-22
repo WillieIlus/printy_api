@@ -117,6 +117,19 @@ def _assignment_id(job: ManagedJob):
     return getattr(assignment, "id", None)
 
 
+def _printer_next_action(job: ManagedJob) -> dict:
+    """The printer workflow's real next step, if this job has an active assignment."""
+    assignment = _active_assignment(job)
+    if assignment is None:
+        return {}
+    try:
+        from jobs.printer_workflow import build_printer_progress
+
+        return build_printer_progress(assignment).get("next_action") or {}
+    except Exception:  # pragma: no cover - projection must never crash
+        return {}
+
+
 def _role_for_owner(owner: str, viewer_role: str) -> str:
     owner = (owner or "").strip().lower()
     if viewer_role == BUYER:
@@ -137,23 +150,30 @@ def _next_action_key(stage_key: str, owner_role: str, job: ManagedJob, viewer_ro
     if (
         owner_role == PRINTER
         and viewer_role == PRINTER
-        and stage_key == ManagedJobStatus.FINISHING
+        and stage_key in (
+            ManagedJobStatus.ASSIGNED,
+            ManagedJobStatus.IN_PRODUCTION,
+            ManagedJobStatus.FINISHING,
+        )
     ):
         # printer_workflow.py is the authority for the printer's real stage.
-        # When its next step is the quality check, return that action by name
-        # instead of the generic production advance (law 28). Only the
-        # finishing status can be at QC, so the other printer taps do not pay
-        # for this extra projection.
-        assignment = _active_assignment(job)
-        if assignment is not None:
-            try:
-                from jobs.printer_workflow import build_printer_progress
-
-                printer_action = build_printer_progress(assignment).get("next_action") or {}
-            except Exception:  # pragma: no cover - projection must never crash
-                printer_action = {}
-            if printer_action.get("stage_key") == "quality_check":
-                return "pass_qc"
+        # The assignment status says "accepted" for the whole run, so it cannot
+        # decide between artwork check, printing, finishing and QC on its own.
+        printer_action = _printer_next_action(job)
+        printer_stage = str(printer_action.get("stage_key") or "")
+        if printer_stage == "accept":
+            return "accept_job"
+        if printer_stage == "printing":
+            return "start_printing"
+        if printer_stage == "quality_check":
+            return "pass_qc"
+        if printer_stage == "ready_for_dispatch":
+            return "mark_dispatched"
+        if printer_stage:
+            return "advance_production"
+        if stage_key in (ManagedJobStatus.IN_PRODUCTION, ManagedJobStatus.FINISHING):
+            return "advance_production"
+        return "none"
     if stage_key in (ManagedJobStatus.DRAFT, ManagedJobStatus.QUOTED, ManagedJobStatus.AWAITING_PAYMENT):
         return "accept_quote" if owner_role == BUYER else "prepare_quote"
     if stage_key in (ManagedJobStatus.PAYMENT_CONFIRMED, ManagedJobStatus.ASSIGNED):
@@ -177,16 +197,6 @@ def _next_action_key(stage_key: str, owner_role: str, job: ManagedJob, viewer_ro
                 return "reassign_job"
             return "dispatch_job"
         if owner_role == PRINTER:
-            assignment = _active_assignment(job)
-            if assignment is not None:
-                if assignment.status == JobAssignmentStatus.PENDING:
-                    return "accept_job"
-                if assignment.status == JobAssignmentStatus.ACCEPTED:
-                    return "start_printing"
-                if assignment.status in (JobAssignmentStatus.IN_PRODUCTION, JobAssignmentStatus.FINISHING):
-                    return "advance_production"
-                if assignment.status == JobAssignmentStatus.READY:
-                    return "mark_delivered"
             return "none"
         return "none"
     if stage_key in (ManagedJobStatus.IN_PRODUCTION, ManagedJobStatus.FINISHING):
@@ -361,7 +371,10 @@ def resolve_next_step(job: ManagedJob, viewer_role: str) -> dict[str, Any]:
         key = "confirm_delivery"
     is_mine = owner_role == viewer_role and owner_role != NONE and key != "none"
     completed = status == ManagedJobStatus.COMPLETED
+    printer_action = _printer_next_action(job) if viewer_role == PRINTER else {}
     label = _next_action_label(key, status, viewer_role)
+    if key != "none" and printer_action.get("label"):
+        label = str(printer_action["label"])
     headline = "Job completed" if completed else label
     explanation = (
         "Payout released per the escrow rules."

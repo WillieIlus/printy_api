@@ -73,7 +73,7 @@ class NextStepResolverTestCase(TestCase):
         self.assertFalse(manager_step["is_mine"])
         self.assertEqual(manager_step["next_action"]["key"], "none")
 
-    def test_accepted_assignment_asks_printer_to_start_printing(self):
+    def test_accepted_assignment_asks_printer_to_check_artwork(self):
         self.job.status = ManagedJobStatus.ASSIGNED
         self.job.assignment_status = "assigned"
         self.job.workflow_metadata = {
@@ -86,7 +86,8 @@ class NextStepResolverTestCase(TestCase):
             status=JobAssignmentStatus.ACCEPTED,
         )
         step = resolve_next_step(self.job, "printer")
-        self.assertEqual(step["next_action"]["key"], "start_printing")
+        self.assertEqual(step["next_action"]["key"], "advance_production")
+        self.assertEqual(step["next_action"]["label"], "Artwork checked")
         self.assertTrue(step["is_mine"])
 
     def test_payment_confirmed_without_shop_asks_manager_to_dispatch(self):

@@ -477,6 +477,24 @@ class ProfileMeView(APIView):
         return Response(ProfileSerializer(profile).data)
 
 
+def _sync_avatar_from_manager_photo(profile: UserProfile) -> None:
+    """Keep the legacy avatar URL aligned with the public manager headshot.
+
+    The featured-managers list and `is_public_profile` read `avatar`; the guided
+    profile uploads `manager_photo`. Without this sync a manager can upload a
+    valid public photo and still be invisible.
+    """
+    if not profile.manager_photo:
+        return
+    try:
+        url = profile.manager_photo.url
+    except ValueError:
+        return
+    if url and profile.avatar != url:
+        profile.avatar = url
+        profile.save(update_fields=["avatar", "updated_at"])
+
+
 class ProfileAvatarUploadView(APIView):
     """POST /api/profiles/me/avatar/ - upload the signed-in user's profile image.
 
@@ -509,6 +527,7 @@ class ProfileAvatarUploadView(APIView):
                 )
             profile.manager_photo = manager_photo
             profile.save(update_fields=["manager_photo", "updated_at"])
+            _sync_avatar_from_manager_photo(profile)
             return Response(ProfileSerializer(profile).data, status=status.HTTP_200_OK)
 
         content_type = getattr(uploaded_file, "content_type", "") or ""
@@ -593,6 +612,15 @@ def _manager_profile_bundle(request, profile: UserProfile) -> dict:
         "phone": profile.phone or None,
         "whatsapp": profile.manager_whatsapp or None,
         "verificationStatus": "verified" if profile.manager_verified else "pending",
+        "publicOptIn": bool(profile.manager_public_opt_in),
+        "speciality": profile.manager_speciality or "",
+        "acceptsNewJobs": bool(profile.accepts_new_jobs),
+        "maxConcurrentJobs": int(profile.max_concurrent_jobs or 0),
+        "isPublic": bool(
+            profile.manager_verified
+            and profile.is_public_profile
+            and getattr(user, "is_active", False)
+        ),
         "pendingHeadshotId": None,
         "approvedHeadshotId": "headshot" if profile.manager_photo else None,
     }
@@ -602,6 +630,8 @@ def _manager_profile_bundle(request, profile: UserProfile) -> dict:
         (bool(profile.manager_specialties), "pick what you print"),
         (bool(profile.manager_areas), "say where you deliver"),
         (sum(1 for photo in photos if photo["kind"] == "sample") >= 3, "add work photos to reach 100%"),
+        (bool(profile.manager_public_opt_in), "opt in to the public manager list"),
+        (bool(str(profile.manager_speciality or "").strip()), "add a one-line public speciality"),
     ]
     done = sum(1 for ok, _ in checks if ok)
     missing = [label for ok, label in checks if not ok]
@@ -642,6 +672,10 @@ class ManagerProfileBundleView(APIView):
             "availability": "manager_availability",
             "phone": "phone",
             "whatsapp": "manager_whatsapp",
+            "publicOptIn": "manager_public_opt_in",
+            "speciality": "manager_speciality",
+            "acceptsNewJobs": "accepts_new_jobs",
+            "maxConcurrentJobs": "max_concurrent_jobs",
         }
         update_fields = []
         for key, field in mapping.items():
@@ -656,6 +690,15 @@ class ManagerProfileBundleView(APIView):
                     value = None
                 if key == "turnaroundIsEstimate":
                     value = bool(value)
+                if key in {"publicOptIn", "acceptsNewJobs"}:
+                    value = value in (True, "true", "True", "1", 1)
+                if key == "speciality":
+                    value = str(value or "").strip()[:120]
+                if key == "maxConcurrentJobs":
+                    try:
+                        value = max(0, int(value))
+                    except (TypeError, ValueError):
+                        value = 0
                 setattr(profile, field, value)
                 update_fields.append(field)
         if update_fields:
@@ -682,6 +725,7 @@ class ManagerProfilePhotoUploadView(APIView):
         if kind == "headshot":
             profile.manager_photo = upload
             profile.save(update_fields=["manager_photo", "updated_at"])
+            _sync_avatar_from_manager_photo(profile)
         else:
             count = ManagerWorkPhoto.objects.filter(user=request.user, kind=ManagerWorkPhoto.KIND_SAMPLE).count()
             ManagerWorkPhoto.objects.create(

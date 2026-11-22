@@ -509,7 +509,7 @@ def respond_to_assigned_quote_request(
         pricing_snapshot=pricing_snapshot,
         partner_brand_name=partner_brand_name,
         split=split,
-        note=note or "Your Print Manager prepared an exact quote in Printy.",
+        note=note or "Your Print Manager has done the pricing for you. Review the price and delivery date, then accept when you are ready - your money stays safe in escrow until you confirm delivery.",
     )
     response_snapshot["internal_pricing_snapshot"] = _internal_pricing_snapshot(split=split)
     if preview.get("quantity_pricing"):
@@ -525,7 +525,7 @@ def respond_to_assigned_quote_request(
         response_snapshot=response_snapshot,
         revised_pricing_snapshot=None,
         total=split["client_total"],
-        note=note or "Your Print Manager prepared an exact quote in Printy.",
+        note=note or "Your Print Manager has done the pricing for you. Review the price and delivery date, then accept when you are ready - your money stays safe in escrow until you confirm delivery.",
     )
     _persist_quote_split(quote=response, split=split)
     return {

@@ -61,3 +61,32 @@ class ManagerProfileBundleTests(TestCase):
         response = self.get_bundle()
         self.assertGreaterEqual(response.data["progress"]["percent"], 0)
         self.assertIn("add a profile photo", response.data["progress"]["missing"])
+
+    def test_patch_persists_public_listing_controls(self):
+        response = self.api.patch(
+            "/api/profiles/me/manager-profile/",
+            {
+                "publicOptIn": True,
+                "speciality": "Same-day business cards in Nairobi CBD",
+                "acceptsNewJobs": False,
+                "maxConcurrentJobs": 5,
+            },
+            format="json",
+            HTTP_HOST="localhost",
+        )
+        self.assertEqual(response.status_code, 200)
+        profile = response.data["profile"]
+        self.assertTrue(profile["publicOptIn"])
+        self.assertEqual(
+            profile["speciality"], "Same-day business cards in Nairobi CBD"
+        )
+        self.assertFalse(profile["acceptsNewJobs"])
+        self.assertEqual(profile["maxConcurrentJobs"], 5)
+        # Verification and a photo are still missing, so the profile is not public.
+        self.assertFalse(profile["isPublic"])
+        self.assertNotIn(
+            "opt in to the public manager list", response.data["progress"]["missing"]
+        )
+        self.assertNotIn(
+            "add a one-line public speciality", response.data["progress"]["missing"]
+        )

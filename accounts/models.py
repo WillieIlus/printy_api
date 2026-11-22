@@ -352,9 +352,10 @@ class UserProfile(TimeStampedModel):
         fields it is supposed to describe, and a half-filled public profile is worse for
         the homepage than no profile at all.
         """
+        has_photo = bool(self.manager_photo) or bool(str(self.avatar or "").strip())
         return bool(
             self.manager_public_opt_in
-            and str(self.avatar or "").strip()
+            and has_photo
             and str(self.manager_speciality or "").strip()
         )
 

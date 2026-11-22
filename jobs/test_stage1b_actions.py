@@ -180,6 +180,32 @@ class NextActionExecutionTests(Stage1BActionBase):
         self.assertIn("stage", types)
         self.assertIn("note", types)
 
+    def test_after_accept_the_next_printer_action_is_artwork_check(self):
+        job = self.make_job()
+        assignment = self.make_assignment(job, status=JobAssignmentStatus.PENDING)
+        accepted = self.post_action(
+            user=self.printer, role="production", job=job, code="accept_job"
+        )
+        self.assertEqual(accepted.status_code, 200, accepted.content)
+
+        job.refresh_from_db()
+        assignment.refresh_from_db()
+        step = resolve_next_step(job, "printer")
+        self.assertEqual(step["next_action"]["key"], "advance_production")
+        self.assertEqual(step["next_action"]["label"], "Artwork checked")
+
+        advanced = self.post_action(
+            user=self.printer,
+            role="production",
+            job=job,
+            code="advance_production",
+        )
+        self.assertEqual(advanced.status_code, 200, advanced.content)
+        self.assertEqual(
+            build_printer_progress(assignment)["next_action"]["stage_key"],
+            "printing",
+        )
+
     def test_double_call_is_idempotent(self):
         job = self.make_job()
         assignment = self.make_assignment(job, status=JobAssignmentStatus.PENDING)

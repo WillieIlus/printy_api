@@ -1545,15 +1545,20 @@ def _featured_manager_rows() -> list[dict[str, object]]:
             user__is_active=True,
             user__role__in=[AccountsUser.Role.BROKER, AccountsUser.Role.PARTNER],
         )
-        .exclude(avatar="")
-        .exclude(manager_speciality="")
     )
     rows: list[dict[str, object]] = []
     for profile in profiles:
         first_name = str(profile.user.first_name or "").strip()
         if not first_name:
             first_name = (str(profile.user.name or "").strip().split() or [""])[0]
-        photo = str(profile.avatar or "").strip()
+        photo = ""
+        if profile.manager_photo:
+            try:
+                photo = profile.manager_photo.url
+            except ValueError:
+                photo = ""
+        if not photo:
+            photo = str(profile.avatar or "").strip()
         speciality = str(profile.manager_speciality or "").strip()
         if not first_name or not photo or not speciality:
             continue

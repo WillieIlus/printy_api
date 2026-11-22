@@ -42,7 +42,8 @@ DEFAULT_PAPER_DEFINITIONS: list[dict[str, Any]] = [
 
 DEFAULT_FINISHING_DEFINITIONS: list[dict[str, Any]] = [
     {"key": "perfect_binding", "id": "finishing-perfect-binding", "label": "Perfect Bind", "name": "Perfect Bind", "pricing_mode": "per_piece", "unit": "piece", "price": "50.00", "minimum_charge": "200.00", "active": False},
-    {"key": "ivory_duplex", "id": "finishing-ivory-duplex", "label": "Ivory 300 Duplex", "name": "Ivory 300 Duplex", "pricing_mode": "per_sheet", "unit": "sheet", "price": "100.00", "minimum_charge": None, "active": False},
+    # Ivory is a paper/grammage choice (Ivory 300gsm), never a finishing line.
+    # The paper row lives in DEFAULT_PAPER_DEFINITIONS as the 300gsm alternative.
     {"key": "creasing", "id": "finishing-creasing", "label": "Creasing", "name": "Creasing", "pricing_mode": "flat_per_job", "unit": "job", "price": "300.00", "minimum_charge": "300.00", "active": False},
     {"key": "wire_o", "id": "finishing-wire-o", "label": "Wire-O-Wire", "name": "Wire-O-Wire", "pricing_mode": "per_book", "unit": "book", "price": "30.00", "minimum_charge": "100.00", "active": False},
     {"key": "potch_lamination", "id": "finishing-potch-lamination", "label": "Potch Lamination", "name": "Potch Lamination", "pricing_mode": "per_sheet", "unit": "sheet", "price": "100.00", "minimum_charge": "100.00", "active": False},
