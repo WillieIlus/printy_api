@@ -1347,8 +1347,8 @@ def _ensure_default_machine(shop) -> Machine:
         shop=shop,
         name="Digital Press",
         machine_type=MachineType.DIGITAL,
-        max_width_mm=450,
-        max_height_mm=320,
+        max_width_mm=320,
+        max_height_mm=450,
         is_active=True,
     )
 

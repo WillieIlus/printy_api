@@ -137,7 +137,30 @@ def _parse_finished_size(payload: dict[str, Any]) -> tuple[Decimal | None, Decim
     height = _millimetres(payload.get("height_mm"))
     if width and height:
         return width, height
-    raw = _normal(payload.get("finished_size") or payload.get("size"))
+    raw_value = payload.get("finished_size") or payload.get("size")
+    if isinstance(raw_value, dict):
+        raw_value = raw_value.get("value") or raw_value.get("label") or raw_value.get("key") or ""
+    raw = _normal(raw_value)
+    if not raw:
+        return None, None
+    # The calculator sends catalogue values such as "A5" and "90x55mm". Resolve
+    # a catalogue name to its real millimetres before the imposition check, so a
+    # named size can never be reported as 0x0.
+    from services.pricing.calculator_config import resolve_request_finished_size
+
+    resolved, _is_custom = resolve_request_finished_size(
+        _normal(payload.get("product_type")),
+        raw,
+        width_mm=width,
+        height_mm=height,
+    )
+    if resolved:
+        resolved_width = _millimetres(resolved.get("width_mm"))
+        resolved_height = _millimetres(resolved.get("height_mm"))
+        if resolved_width and resolved_height:
+            return resolved_width, resolved_height
+    # Tolerate labels that embed a dimension (for example
+    # "business_card_90x54") even when the product has no catalogue entry.
     match = re.search(r"(\d+(?:\.\d+)?)\s*[xX×]\s*(\d+(?:\.\d+)?)", raw)
     if not match:
         return None, None
@@ -537,6 +560,14 @@ def _match_shop(shop: Shop, payload: dict[str, Any]) -> dict[str, Any]:
         return _diagnostic_row(shop=shop, payload=payload, missing=missing_finishings, available=available, reason="Required finishing is not configured for this shop.")
 
     width, height = _parse_finished_size(payload)
+    if width is None or height is None:
+        return _diagnostic_row(
+            shop=shop,
+            payload=payload,
+            missing=["size"],
+            available=available,
+            reason="Size missing. Add the finished width and height.",
+        )
     result = calculate_sheet_pricing(
         shop=shop,
         product=None,
@@ -551,12 +582,21 @@ def _match_shop(shop: Shop, payload: dict[str, Any]) -> dict[str, Any]:
     )
     preview = result.to_dict()
     if not result.can_calculate:
+        if result.copies_per_sheet <= 0:
+            missing = ["size"]
+            reason = "This finished size does not fit a standard sheet. Check the size."
+        else:
+            missing = ["pricing"]
+            reason = (
+                "Add your price for printing on a standard sheet "
+                "(320 x 450 mm) to price this job."
+            )
         return _diagnostic_row(
             shop=shop,
             payload=payload,
-            missing=["pricing"],
+            missing=missing,
             available=available,
-            reason=result.reason or "No active canonical printing rate matches this shop configuration.",
+            reason=reason,
         )
     row = _priced_row(shop=shop, payload=payload, paper=paper, machine=machine, preview=preview)
     row["available_reasons"] = available + row["available_reasons"]

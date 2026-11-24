@@ -754,7 +754,7 @@ class DashboardCalculatorPreviewView(APIView):
         
         if not machine:
             return Response({
-                "detail": f"No active printing rate found for {paper.sheet_size} in {color_mode}. Please add this to your Pricing Setup first."
+                "detail": "Add your price for printing on a standard sheet to price this job."
             }, status=status.HTTP_400_BAD_REQUEST)
 
         # Ensure finishings belong to shop

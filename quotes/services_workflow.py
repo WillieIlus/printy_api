@@ -25,6 +25,7 @@ from api.visibility import (
 )
 from pricing.choices import ColorMode, Sides
 from pricing.models import FinishingRate
+from services.pricing.calculator_config import resolve_request_finished_size
 from services.pricing.role_projection import ROLE_BUYER
 from services.pricing.spec_title import build_calculator_spec_text
 
@@ -92,6 +93,40 @@ def _coerce_positive_int(value):
     except (TypeError, ValueError):
         return None
     return normalized if normalized > 0 else None
+
+
+def _resolve_calculator_dimensions(calculator_inputs: dict, *, product=None, custom_snapshot: dict | None = None) -> tuple[int | None, int | None]:
+    """Resolve a calculator size name to real millimetres before it is stored.
+
+    The calculator sends catalogue values such as "A5" and "90x55mm". A stored
+    name alone is not enough for the shop's imposition check, so resolve it via
+    the one calculator catalogue first, then fall back to the product defaults.
+    """
+    product_type = str(calculator_inputs.get("product_type") or getattr(product, "slug", "") or "")
+    raw_size = calculator_inputs.get("finished_size") or calculator_inputs.get("size")
+    if isinstance(raw_size, dict):
+        raw_size = raw_size.get("value") or raw_size.get("label") or raw_size.get("key") or ""
+    custom_snapshot = custom_snapshot or {}
+    resolved, _is_custom = resolve_request_finished_size(
+        product_type,
+        raw_size,
+        width_mm=(
+            calculator_inputs.get("width_mm")
+            or calculator_inputs.get("custom_width_mm")
+            or custom_snapshot.get("width_mm")
+        ),
+        height_mm=(
+            calculator_inputs.get("height_mm")
+            or calculator_inputs.get("custom_height_mm")
+            or custom_snapshot.get("height_mm")
+        ),
+    )
+    if resolved:
+        return _coerce_positive_int(resolved.get("width_mm")), _coerce_positive_int(resolved.get("height_mm"))
+    return (
+        _coerce_positive_int(getattr(product, "default_finished_width_mm", None)),
+        _coerce_positive_int(getattr(product, "default_finished_height_mm", None)),
+    )
 
 
 def _resolve_shop_resource(model, shop: Shop, candidate, *, active_only: bool = False):
@@ -200,10 +235,18 @@ def _build_buyer_snapshot(*, draft: CalculatorDraft, merged_request_details: dic
 def _build_request_snapshot(*, draft: CalculatorDraft, shop: Shop, merged_request_details: dict):
     pricing_snapshot = _draft_pricing_snapshot(draft)
     selected_shop_preview = _extract_shop_preview(pricing_snapshot, shop) or {}
+    calculator_inputs = draft.calculator_inputs_snapshot or {}
+    width_mm, height_mm = _resolve_calculator_dimensions(
+        calculator_inputs,
+        product=getattr(draft, "selected_product", None),
+        custom_snapshot=draft.custom_product_snapshot,
+    )
     return {
         "source": "calculator_draft_send",
         "draft_reference": draft.draft_reference,
-        "calculator_inputs": draft.calculator_inputs_snapshot or {},
+        "calculator_inputs": calculator_inputs,
+        "width_mm": width_mm,
+        "height_mm": height_mm,
         "production_preview_snapshot": pricing_snapshot.get("production_preview"),
         "pricing_preview_snapshot": pricing_snapshot.get("pricing_preview"),
         "selected_shop_preview": selected_shop_preview,
@@ -236,10 +279,18 @@ def _build_request_snapshot(*, draft: CalculatorDraft, shop: Shop, merged_reques
 
 def _build_manager_intake_snapshot(*, draft: CalculatorDraft, merged_request_details: dict, assigned_manager=None):
     pricing_snapshot = _draft_pricing_snapshot(draft)
+    calculator_inputs = draft.calculator_inputs_snapshot or {}
+    width_mm, height_mm = _resolve_calculator_dimensions(
+        calculator_inputs,
+        product=getattr(draft, "selected_product", None),
+        custom_snapshot=draft.custom_product_snapshot,
+    )
     snapshot = {
         "source": "manager_led_intake",
         "draft_reference": draft.draft_reference,
-        "calculator_inputs": draft.calculator_inputs_snapshot or {},
+        "calculator_inputs": calculator_inputs,
+        "width_mm": width_mm,
+        "height_mm": height_mm,
         "production_preview_snapshot": pricing_snapshot.get("production_preview"),
         "pricing_preview_snapshot": pricing_snapshot.get("pricing_preview"),
         "matched_specs": [],
@@ -372,15 +423,8 @@ def _build_quote_item(*, quote_request: QuoteRequest, draft: CalculatorDraft, sh
         calculator_inputs.get("machine_id") or shop_selection.get("machine_id"),
         active_only=True,
     )
-    width_mm = _coerce_positive_int(
-        calculator_inputs.get("width_mm")
-        or custom_snapshot.get("width_mm")
-        or getattr(product, "default_finished_width_mm", None)
-    )
-    height_mm = _coerce_positive_int(
-        calculator_inputs.get("height_mm")
-        or custom_snapshot.get("height_mm")
-        or getattr(product, "default_finished_height_mm", None)
+    width_mm, height_mm = _resolve_calculator_dimensions(
+        calculator_inputs, product=product, custom_snapshot=custom_snapshot
     )
 
     item = QuoteItem.objects.create(
@@ -457,13 +501,8 @@ def _build_manager_intake_quote_item(*, quote_request: QuoteRequest, draft: Calc
         or calculator_inputs.get("pricing_mode")
         or "SHEET"
     )
-    width_mm = _coerce_positive_int(
-        calculator_inputs.get("width_mm")
-        or custom_snapshot.get("width_mm")
-    )
-    height_mm = _coerce_positive_int(
-        calculator_inputs.get("height_mm")
-        or custom_snapshot.get("height_mm")
+    width_mm, height_mm = _resolve_calculator_dimensions(
+        calculator_inputs, custom_snapshot=custom_snapshot
     )
 
     return QuoteItem.objects.create(

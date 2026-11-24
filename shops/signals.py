@@ -22,8 +22,11 @@ def create_default_machine(sender, instance, created, **kwargs):
             shop=instance,
             name="Primary Digital Press",
             is_active=True,
-            max_width_mm=330,
-            max_height_mm=488,
+            # The calculator imposes every sheet-fed product on the standard
+            # 320 x 450 mm (SRA3) sheet. New shops start on that same sheet so
+            # onboarding only needs the shop's printing price.
+            max_width_mm=320,
+            max_height_mm=450,
         )
 
 

@@ -918,3 +918,136 @@ class ProductionMatchingPhaseD1TestCase(TestCase):
         Paper.objects.filter(shop=shop, selling_price__gt=0).update(selling_price=Decimal("0"))
         self.assertFalse(refresh_shop_pricing_ready(shop))
         self.assertFalse(Shop.objects.get(pk=shop.pk).pricing_ready)
+
+class NamedCalculatorSizeHandoffTests(ProductionMatchingPhaseD1TestCase):
+    """Stage 9B: a named calculator size must reach the shop's imposition.
+
+    The calculator sends values such as "A5" (a catalogue entry), not always a
+    "148x210" string. Production matching must resolve that name to the real
+    millimetres before the fit check, otherwise the shop is told a 0x0 piece does
+    not fit.
+    """
+
+    def _named_size_request(self, *, product_type: str, finished_size: str):
+        return QuoteRequest.objects.create(
+            shop=None,
+            created_by=self.end_client,
+            assigned_manager=self.manager,
+            customer_name="End Client",
+            customer_email=self.end_client.email,
+            status=QuoteStatus.SUBMITTED,
+            request_snapshot={
+                "source": "calculator_draft_send",
+                "calculator_inputs": {
+                    "product_type": product_type,
+                    "quantity": 100,
+                    "finished_size": finished_size,
+                    "requested_paper_category": "gloss",
+                    "requested_gsm": 300,
+                    "print_sides": "SIMPLEX",
+                    "color_mode": "COLOR",
+                },
+            },
+        )
+
+    def test_named_a5_flyer_size_reaches_the_shop_imposition(self):
+        request = self._named_size_request(product_type="flyer", finished_size="A5")
+        response = self._shop_options(self.manager, request)
+
+        self.assertEqual(response.status_code, 200, response.content)
+        payload = response.json()
+        priced = next(
+            (row for row in payload["results"] if row["price_status"] == "priced"),
+            None,
+        )
+        self.assertIsNotNone(priced, payload)
+        imposition = priced["preview_snapshot"]["breakdown"]["imposition"]
+        self.assertEqual(imposition["finished_width_mm"], 148, priced)
+        self.assertEqual(imposition["finished_height_mm"], 210, priced)
+        self.assertGreater(imposition["copies_per_sheet"], 0, priced)
+
+    def test_new_shop_defaults_to_the_standard_sra3_sheet(self):
+        owner = User.objects.create_user(
+            email="default-sheet-shop@test.com", password="pass12345", role="shop_owner"
+        )
+        shop = Shop.objects.create(owner=owner, name="Default Sheet Shop", slug="default-sheet-shop")
+        machine = Machine.objects.filter(shop=shop, is_active=True).first()
+        self.assertIsNotNone(machine)
+        self.assertEqual((machine.max_width_mm, machine.max_height_mm), (320, 450))
+
+    def test_unpriced_shop_gets_plain_price_wording_not_technical_sheet_text(self):
+        request = self._named_size_request(product_type="flyer", finished_size="A5")
+        response = self._shop_options(self.manager, request)
+        payload = response.json()
+        unpriced = next(
+            row for row in payload["results"] if row["shop_id"] == self.unpriced_shop.id
+        )
+        reason = unpriced["ineligible_reason"]
+        self.assertIn("Add your price", reason)
+        self.assertNotIn("SRA3", reason)
+        self.assertNotIn("bleed", reason)
+        self.assertNotIn("backend", reason)
+
+    def test_unknown_size_reports_size_missing_instead_of_no_fit(self):
+        request = self._named_size_request(product_type="flyer", finished_size="custom")
+        response = self._shop_options(self.manager, request)
+        payload = response.json()
+        self.assertEqual(response.status_code, 200, payload)
+        reason = payload["results"][0]["ineligible_reason"]
+        self.assertIn("Size missing", reason)
+        self.assertNotIn("does not fit", reason)
+
+    def test_named_sizes_for_each_supported_calculator_product_reach_shop(self):
+        cases = [
+            ("business_card", "90x55mm", 90, 55),
+            ("flyer", "A5", 148, 210),
+            ("letterhead", "A4", 210, 297),
+        ]
+        for product_type, finished_size, expected_width, expected_height in cases:
+            with self.subTest(product_type=product_type, finished_size=finished_size):
+                request = self._named_size_request(
+                    product_type=product_type, finished_size=finished_size
+                )
+                response = self._shop_options(self.manager, request)
+                self.assertEqual(response.status_code, 200, response.content)
+                priced = next(
+                    (row for row in response.json()["results"] if row["price_status"] == "priced"),
+                    None,
+                )
+                self.assertIsNotNone(priced, response.json())
+                imposition = priced["preview_snapshot"]["breakdown"]["imposition"]
+                self.assertEqual(imposition["finished_width_mm"], expected_width, priced)
+                self.assertEqual(imposition["finished_height_mm"], expected_height, priced)
+
+    def test_dict_shaped_finished_size_is_tolerated(self):
+        request = QuoteRequest.objects.create(
+            shop=None,
+            created_by=self.end_client,
+            assigned_manager=self.manager,
+            customer_name="End Client",
+            customer_email=self.end_client.email,
+            status=QuoteStatus.SUBMITTED,
+            request_snapshot={
+                "source": "calculator_draft_send",
+                "calculator_inputs": {
+                    "product_type": "flyer",
+                    "quantity": 100,
+                    "finished_size": {"value": "A5", "label": "A5"},
+                    "requested_paper_category": "gloss",
+                    "requested_gsm": 300,
+                    "print_sides": "SIMPLEX",
+                    "color_mode": "COLOR",
+                },
+            },
+        )
+        response = self._shop_options(self.manager, request)
+        self.assertEqual(response.status_code, 200, response.content)
+        priced = next(
+            (row for row in response.json()["results"] if row["price_status"] == "priced"),
+            None,
+        )
+        self.assertIsNotNone(priced, response.json())
+        self.assertEqual(
+            priced["preview_snapshot"]["breakdown"]["imposition"]["finished_width_mm"],
+            148,
+        )

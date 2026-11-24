@@ -1169,6 +1169,9 @@ class PaperSerializer(serializers.ModelSerializer):
         extra_kwargs = {
             "name": {"required": False, "allow_blank": True},
             "paper_type": {"required": False},
+            # The calculator imposes on SRA3 (320 x 450 mm); a shop paper
+            # created without an explicit sheet starts on that same sheet.
+            "sheet_size": {"required": False, "default": "SRA3"},
         }
 
     def get_use_for_flat_jobs(self, obj):

@@ -144,9 +144,7 @@ def build_imposition_breakdown(
     if not fits:
         cols = rows = 0
         explanation = (
-            f"No fit: {finished_width_mm}x{finished_height_mm} mm (plus {bleed_mm} mm bleed each "
-            f"side) does not fit on a {sheet_width_mm}x{sheet_height_mm} mm sheet in either "
-            "orientation."
+            "No fit: this finished size does not fit a standard sheet. Check the size."
         )
     else:
         if orientation == "rotated":

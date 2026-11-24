@@ -361,10 +361,9 @@ def calculate_sheet_pricing(
     }
     if imposition.copies_per_sheet <= 0:
         reason = (
-            f"{imposition.finished_width_mm}x{imposition.finished_height_mm} mm finished size "
-            f"(with {imposition.bleed_mm} mm bleed each side) does not fit on the configured "
-            f"{imposition.sheet_width_mm}x{imposition.sheet_height_mm} mm sheet "
-            f"({paper.sheet_size}) in either orientation."
+            f"This finished size ({imposition.finished_width_mm} x "
+            f"{imposition.finished_height_mm} mm) does not fit a standard sheet. "
+            "Check the size."
         )
         return PricingEngineResult(
             pricing_mode=PricingMode.SHEET,
@@ -411,8 +410,8 @@ def calculate_sheet_pricing(
     )
     if machine and print_rate is None:
         reason = (
-            f"No active printing rate matches {getattr(machine, 'name', 'this machine')} for "
-            f"{paper.sheet_size}, {color_mode}, and {sides}. Add the backend printing rate first."
+            "Add your price for printing on a standard sheet "
+            "(320 x 450 mm) to price this job."
         )
         return PricingEngineResult(
             pricing_mode=PricingMode.SHEET,
