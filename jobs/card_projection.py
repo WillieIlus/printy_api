@@ -36,6 +36,7 @@ from jobs.messaging import (
 )
 from jobs.stage_mapping import canonical_stage_for_job, STAGE_LABELS
 from jobs.timing import timing_fields
+from jobs.workflow_projection import build_workflow
 from services.pricing.role_projection import (
     ROLE_BUYER,
     ROLE_MANAGER,
@@ -563,6 +564,7 @@ def build_job_card(job, *, viewer_role: str, user) -> dict[str, Any]:
         },
         "next_action": next_action,
         "due": _due_block(job, viewer_role),
+        "workflow": build_workflow(job, viewer_role=viewer_role),
         "thread": build_thread(job, viewer_role=viewer_role, user=user),
         "secondary_actions": SECONDARY_ACTIONS[viewer_role],
         "intake_path": _intake_path(job),
