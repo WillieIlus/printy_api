@@ -962,6 +962,9 @@ class QuoteRequestAttachmentViewSet(viewsets.ModelViewSet):
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         att = serializer.save(quote_request=qr)
+        from quotes.artwork_review import mark_pending
+
+        mark_pending(qr, att)
         return Response(
             QuoteRequestAttachmentSerializer(att).data,
             status=status.HTTP_201_CREATED,
@@ -974,7 +977,15 @@ class QuoteRequestAttachmentViewSet(viewsets.ModelViewSet):
                 {"detail": "Only the customer can remove attachments, and only when the request is in draft."},
                 status=status.HTTP_403_FORBIDDEN,
             )
-        return super().destroy(request, *args, **kwargs)
+        response = super().destroy(request, *args, **kwargs)
+        from quotes.artwork_review import clear_review, latest_attachment, mark_pending
+
+        remaining = latest_attachment(qr)
+        if remaining is None:
+            clear_review(qr)
+        else:
+            mark_pending(qr, remaining)
+        return response
 
 
 def _can_access_quote_request_attachment(*, user, quote_request: QuoteRequest) -> bool:

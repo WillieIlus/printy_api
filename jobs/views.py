@@ -26,8 +26,10 @@ from jobs.artwork_workflow import (
     claim_artwork_with_manager,
     get_artwork_workflow_payload,
     manager_accept_artwork_claim,
+    manager_approve_artwork,
     manager_decline_artwork_claim,
     manager_mark_holds_artwork,
+    manager_request_artwork_changes,
     printer_acknowledge_artwork,
     record_artwork_uploaded,
 )
@@ -998,6 +1000,8 @@ class ManagedJobArtworkWorkflowView(APIView):
     ACTION_MANAGER_ACCEPT = "manager_accept"
     ACTION_MANAGER_HOLDS = "manager_holds"
     ACTION_MANAGER_DECLINE = "manager_decline"
+    ACTION_MANAGER_APPROVE = "manager_approve"
+    ACTION_MANAGER_CHANGES = "manager_request_changes"
     ACTION_PRINTER_ACKNOWLEDGE = "printer_acknowledge"
 
     def post(self, request, pk):
@@ -1029,6 +1033,23 @@ class ManagedJobArtworkWorkflowView(APIView):
                 if effective_actor not in {OPS_ACTOR, PARTNER_ACTOR}:
                     return Response({"detail": _("Only the manager can decline the artwork claim.")}, status=status.HTTP_403_FORBIDDEN)
                 managed_job = manager_decline_artwork_claim(managed_job=managed_job, actor=request.user, reason=reason or note)
+            elif action_name == self.ACTION_MANAGER_APPROVE:
+                if effective_actor not in {OPS_ACTOR, PARTNER_ACTOR}:
+                    return Response({"detail": _("Only the manager can approve the artwork.")}, status=status.HTTP_403_FORBIDDEN)
+                managed_job = manager_approve_artwork(
+                    managed_job=managed_job,
+                    actor=request.user,
+                    file_id=request.data.get("file_id"),
+                    note=note,
+                )
+            elif action_name == self.ACTION_MANAGER_CHANGES:
+                if effective_actor not in {OPS_ACTOR, PARTNER_ACTOR}:
+                    return Response({"detail": _("Only the manager can request artwork changes.")}, status=status.HTTP_403_FORBIDDEN)
+                managed_job = manager_request_artwork_changes(
+                    managed_job=managed_job,
+                    actor=request.user,
+                    reason=reason or note,
+                )
             elif action_name == self.ACTION_PRINTER_ACKNOWLEDGE:
                 if effective_actor not in {OPS_ACTOR, SHOP_ACTOR}:
                     return Response({"detail": _("Only the printer can acknowledge the artwork.")}, status=status.HTTP_403_FORBIDDEN)

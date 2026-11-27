@@ -271,8 +271,28 @@ def _quote_substate(job: Any, status: str) -> str:
 def _artwork_substate(job: Any, *, artwork_satisfied: bool) -> str:
     if _artwork_confirmation_state(job) == "rejected":
         return "Artwork changes requested"
+    review_state = ""
+    try:
+        from jobs.artwork_workflow import get_artwork_workflow_payload
+
+        review_state = str(get_artwork_workflow_payload(job).get("review_state") or "")
+    except Exception:
+        review_state = ""
+    if review_state == "changes_requested":
+        return "Artwork changes requested"
     if artwork_satisfied:
-        return "Artwork received"
+        return "Artwork approved"
+    if review_state == "pending":
+        try:
+            latest = (
+                job.job_files.filter(file_type__in=["artwork", "customer_upload"])
+                .exclude(status="replaced")
+                .exists()
+            )
+        except Exception:
+            latest = False
+        if latest:
+            return "Artwork under review"
     if _artwork_claim_state(job) == "claimed":
         return "Waiting for manager to confirm artwork"
     return "Awaiting artwork"

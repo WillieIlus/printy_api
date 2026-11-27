@@ -29,7 +29,7 @@ from django.core.exceptions import ValidationError
 from django.db import transaction
 from django.utils import timezone
 
-from jobs.choices import JobFileType
+from jobs.choices import JobFileStatus, JobFileType
 from jobs.models import JobEvent, ManagedJob
 from jobs.timing import current_stage_for_job
 from jobs.timing_config import OWNER_BUYER, OWNER_MANAGER, OWNER_PRINTER
@@ -56,6 +56,15 @@ EVENT_ARTWORK_PRINTER_ACKNOWLEDGED = "artwork_printer_acknowledged"
 # Rendered verbatim by the UI on the disabled pay button (prompt 7.2).
 PAYMENT_BLOCK_UPLOAD = "Upload your artwork to pay"
 PAYMENT_BLOCK_AWAITING_MANAGER = "Waiting for your manager to confirm they have the artwork"
+PAYMENT_BLOCK_AWAITING_APPROVAL = "Waiting for your manager to approve the artwork"
+PAYMENT_BLOCK_CHANGES = "Your manager asked for changes to the artwork"
+
+REVIEW_PENDING = "pending"
+REVIEW_APPROVED = "approved"
+REVIEW_CHANGES_REQUESTED = "changes_requested"
+
+EVENT_ARTWORK_MANAGER_APPROVED = "artwork_manager_approved"
+EVENT_ARTWORK_MANAGER_CHANGES_REQUESTED = "artwork_manager_changes_requested"
 
 
 def _metadata(managed_job: ManagedJob) -> dict:
@@ -68,15 +77,43 @@ def _workflow_raw(managed_job: ManagedJob) -> dict:
     return dict(raw) if isinstance(raw, dict) else {}
 
 
+def _latest_artwork_file(managed_job: ManagedJob):
+    job_files = getattr(managed_job, "job_files", None)
+    if job_files is None or not hasattr(job_files, "filter"):
+        return None
+    return (
+        job_files.filter(
+            file_type__in=[JobFileType.ARTWORK, JobFileType.CUSTOMER_UPLOAD],
+        )
+        .exclude(status=JobFileStatus.REPLACED)
+        .order_by("-id", "-created_at")
+        .first()
+    )
+
+
 def _artwork_file_present(managed_job: ManagedJob) -> bool:
     # Mirrors jobs.file_services.managed_job_has_artwork but avoids a circular
     # import (file_services imports this module).
-    job_files = getattr(managed_job, "job_files", None)
-    if job_files is None or not hasattr(job_files, "filter"):
+    return _latest_artwork_file(managed_job) is not None
+
+
+def _request_artwork_approved(managed_job: ManagedJob) -> bool:
+    request = getattr(managed_job, "source_quote_request", None)
+    if request is None:
         return False
-    return job_files.filter(
-        file_type__in=[JobFileType.ARTWORK, JobFileType.CUSTOMER_UPLOAD],
-    ).exists()
+    try:
+        from quotes.artwork_review import is_approved
+
+        return bool(is_approved(request))
+    except Exception:
+        return False
+
+
+def _review_state(raw: dict) -> str:
+    state = str(raw.get("review_state") or REVIEW_PENDING)
+    if state not in {REVIEW_PENDING, REVIEW_APPROVED, REVIEW_CHANGES_REQUESTED}:
+        state = REVIEW_PENDING
+    return state
 
 
 def _save(managed_job: ManagedJob, raw: dict) -> ManagedJob:
@@ -109,20 +146,35 @@ def _log(
 
 
 def artwork_satisfied(managed_job: ManagedJob) -> bool:
-    """True when the job has artwork by way of (a) upload or (b) manager acceptance."""
-    if _artwork_file_present(managed_job):
-        return True
+    """True when artwork is present and the current version is approved.
+
+    A manager-held claim counts once the manager accepts it. An uploaded file
+    counts only when the manager approved that exact JobFile id. If the managed
+    job predates review metadata, a manager approval recorded on the source
+    quote request is accepted as the current approval.
+    """
     raw = _workflow_raw(managed_job)
-    return raw.get("source") == SOURCE_MANAGER_HOLDS and raw.get("claim_state") == CLAIM_ACCEPTED
+    if raw.get("source") == SOURCE_MANAGER_HOLDS and raw.get("claim_state") == CLAIM_ACCEPTED:
+        return True
+    latest = _latest_artwork_file(managed_job)
+    if latest is None:
+        return False
+    if _review_state(raw) == REVIEW_APPROVED and int(raw.get("review_file_id") or 0) == int(latest.id):
+        return True
+    return _request_artwork_approved(managed_job)
 
 
 def artwork_payment_block_reason(managed_job: ManagedJob) -> str | None:
-    """The reason payment initiation is refused, or None when artwork is satisfied."""
+    """The reason payment initiation is refused, or None when artwork is approved."""
     if artwork_satisfied(managed_job):
         return None
     raw = _workflow_raw(managed_job)
+    if _review_state(raw) == REVIEW_CHANGES_REQUESTED:
+        return PAYMENT_BLOCK_CHANGES
     if raw.get("source") == SOURCE_MANAGER_HOLDS and raw.get("claim_state") == CLAIM_CLAIMED:
         return PAYMENT_BLOCK_AWAITING_MANAGER
+    if _latest_artwork_file(managed_job) is not None:
+        return PAYMENT_BLOCK_AWAITING_APPROVAL
     return PAYMENT_BLOCK_UPLOAD
 
 
@@ -160,6 +212,11 @@ def get_artwork_workflow_payload(managed_job: ManagedJob) -> dict[str, Any]:
     return {
         "source": source,
         "claim_state": claim_state,
+        "review_state": _review_state(raw),
+        "review_file_id": raw.get("review_file_id"),
+        "review_note": raw.get("review_note", ""),
+        "reviewed_at": raw.get("reviewed_at"),
+        "reviewed_by": raw.get("reviewed_by"),
         "claimed_at": raw.get("claimed_at"),
         "claimed_by": raw.get("claimed_by"),
         "accepted_at": raw.get("accepted_at"),
@@ -179,7 +236,18 @@ def get_artwork_workflow_payload(managed_job: ManagedJob) -> dict[str, Any]:
 def record_artwork_uploaded(managed_job: ManagedJob, *, actor=None) -> ManagedJob:
     """Mark the artwork as supplied by upload and log it (law 6.3/7.2)."""
     raw = _workflow_raw(managed_job)
-    raw.update({"source": SOURCE_BUYER_UPLOAD, "claim_state": CLAIM_NONE})
+    latest = _latest_artwork_file(managed_job)
+    raw.update(
+        {
+            "source": SOURCE_BUYER_UPLOAD,
+            "claim_state": CLAIM_NONE,
+            "review_state": REVIEW_PENDING,
+            "review_file_id": getattr(latest, "id", None),
+            "review_note": "",
+            "reviewed_at": None,
+            "reviewed_by": None,
+        }
+    )
     managed_job = _save(managed_job, raw)
     _log(
         managed_job,
@@ -338,6 +406,97 @@ def printer_acknowledge_artwork(managed_job: ManagedJob, *, actor=None, note: st
     return managed_job
 
 
+@transaction.atomic
+def manager_approve_artwork(managed_job: ManagedJob, *, actor=None, file_id: int | None = None, note: str = "") -> ManagedJob:
+    """Approve the current uploaded artwork version for payment."""
+    latest = _latest_artwork_file(managed_job)
+    if latest is None:
+        raise ValidationError("There is no uploaded artwork to approve.")
+    if file_id is not None and int(file_id) != int(latest.id):
+        raise ValidationError("That artwork version is no longer current. Refresh and review the latest file.")
+    raw = _workflow_raw(managed_job)
+    raw.update(
+        {
+            "source": SOURCE_BUYER_UPLOAD,
+            "review_state": REVIEW_APPROVED,
+            "review_file_id": latest.id,
+            "review_note": note or "",
+            "reviewed_at": timezone.now().isoformat(),
+            "reviewed_by": getattr(actor, "id", None),
+        }
+    )
+    managed_job = _save(managed_job, raw)
+    _log(
+        managed_job,
+        event=EVENT_ARTWORK_MANAGER_APPROVED,
+        actor=actor,
+        actor_role=OWNER_MANAGER,
+        source=JobEvent.SOURCE_MANAGER,
+        summary="Manager approved the current artwork.",
+        metadata={"file_id": latest.id, "note": note or ""},
+    )
+    return managed_job
+
+
+@transaction.atomic
+def manager_request_artwork_changes(managed_job: ManagedJob, *, actor=None, reason: str = "") -> ManagedJob:
+    """Reject the current artwork version; the buyer must upload a new one."""
+    latest = _latest_artwork_file(managed_job)
+    if latest is None:
+        raise ValidationError("There is no uploaded artwork to review.")
+    raw = _workflow_raw(managed_job)
+    raw.update(
+        {
+            "source": SOURCE_BUYER_UPLOAD,
+            "review_state": REVIEW_CHANGES_REQUESTED,
+            "review_file_id": latest.id,
+            "review_note": reason or "",
+            "reviewed_at": timezone.now().isoformat(),
+            "reviewed_by": getattr(actor, "id", None),
+        }
+    )
+    managed_job = _save(managed_job, raw)
+    _log(
+        managed_job,
+        event=EVENT_ARTWORK_MANAGER_CHANGES_REQUESTED,
+        actor=actor,
+        actor_role=OWNER_MANAGER,
+        source=JobEvent.SOURCE_MANAGER,
+        summary="Manager requested changes to the current artwork.",
+        metadata={"file_id": latest.id, "reason": reason or ""},
+    )
+    return managed_job
+
+
+@transaction.atomic
+def seed_artwork_review_from_request(managed_job: ManagedJob) -> ManagedJob:
+    """Carry a quote-request artwork approval into the managed job."""
+    request = getattr(managed_job, "source_quote_request", None)
+    if request is None:
+        return managed_job
+    try:
+        from quotes.artwork_review import get_review
+
+        review = get_review(request)
+    except Exception:
+        return managed_job
+    latest = _latest_artwork_file(managed_job)
+    if latest is None:
+        return managed_job
+    raw = _workflow_raw(managed_job)
+    raw.update(
+        {
+            "source": SOURCE_BUYER_UPLOAD,
+            "review_state": review.get("state") or REVIEW_PENDING,
+            "review_file_id": latest.id,
+            "review_note": review.get("note", ""),
+            "reviewed_at": review.get("reviewed_at"),
+            "reviewed_by": review.get("reviewed_by"),
+        }
+    )
+    return _save(managed_job, raw)
+
+
 __all__ = [
     "ARTWORK_WORKFLOW_KEY",
     "SOURCE_BUYER_UPLOAD",
@@ -348,6 +507,11 @@ __all__ = [
     "CLAIM_DECLINED",
     "PAYMENT_BLOCK_UPLOAD",
     "PAYMENT_BLOCK_AWAITING_MANAGER",
+    "PAYMENT_BLOCK_AWAITING_APPROVAL",
+    "PAYMENT_BLOCK_CHANGES",
+    "REVIEW_PENDING",
+    "REVIEW_APPROVED",
+    "REVIEW_CHANGES_REQUESTED",
     "artwork_satisfied",
     "artwork_payment_block_reason",
     "artwork_blocks_dispatch",
@@ -358,4 +522,7 @@ __all__ = [
     "manager_mark_holds_artwork",
     "manager_decline_artwork_claim",
     "printer_acknowledge_artwork",
+    "manager_approve_artwork",
+    "manager_request_artwork_changes",
+    "seed_artwork_review_from_request",
 ]

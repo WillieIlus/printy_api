@@ -8,10 +8,12 @@ from rest_framework.test import APIClient
 
 from accounts.models import User
 from jobs.artwork_workflow import (
+    PAYMENT_BLOCK_AWAITING_APPROVAL,
     PAYMENT_BLOCK_AWAITING_MANAGER,
     PAYMENT_BLOCK_UPLOAD,
     artwork_payment_block_reason,
     artwork_satisfied,
+    manager_approve_artwork,
 )
 from jobs.choices import JobFileType, ManagedJobPaymentStatus, ManagedJobStatus
 from jobs.models import JobAssignment, JobEvent, JobFile, ManagedJob
@@ -163,14 +165,54 @@ class ArtworkWorkflowLaw72TestCase(TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.json()["detail"], PAYMENT_BLOCK_AWAITING_MANAGER)
 
-    def test_uploaded_artwork_satisfies_and_clears_block(self):
+    def test_uploaded_artwork_needs_manager_approval_then_clears_block(self):
         self._upload_artwork()
 
+        self.assertFalse(artwork_satisfied(self.managed_job))
+        self.assertEqual(
+            artwork_payment_block_reason(self.managed_job),
+            PAYMENT_BLOCK_AWAITING_APPROVAL,
+        )
+        manager_approve_artwork(managed_job=self.managed_job, actor=self.manager)
+        self.managed_job.refresh_from_db()
         self.assertTrue(artwork_satisfied(self.managed_job))
         self.assertIsNone(artwork_payment_block_reason(self.managed_job))
         response = self._stk_push()
         # Past the artwork gate: no pending payment exists yet.
         self.assertEqual(response.json()["detail"], "No pending or processing payment found for this managed job.")
+
+    def test_replacing_approved_artwork_requires_a_new_approval(self):
+        self._upload_artwork()
+        manager_approve_artwork(managed_job=self.managed_job, actor=self.manager)
+        self.assertTrue(artwork_satisfied(self.managed_job))
+
+        JobFile.objects.create(
+            managed_job=self.managed_job,
+            uploaded_by=self.client_user,
+            file_type=JobFileType.ARTWORK,
+            original_filename="artwork-v2.pdf",
+        )
+        self.managed_job.refresh_from_db()
+        self.assertFalse(artwork_satisfied(self.managed_job))
+        self.assertEqual(
+            artwork_payment_block_reason(self.managed_job),
+            PAYMENT_BLOCK_AWAITING_APPROVAL,
+        )
+
+    def test_manager_can_approve_uploaded_artwork_through_the_api(self):
+        self._upload_artwork()
+        response = self._workflow(self.manager, "manager_approve")
+        self.assertEqual(response.status_code, 200, response.content)
+        payload = response.json()["artwork_workflow"]
+        self.assertEqual(payload["review_state"], "approved")
+        self.managed_job.refresh_from_db()
+        self.assertTrue(artwork_satisfied(self.managed_job))
+        self.assertIsNone(artwork_payment_block_reason(self.managed_job))
+
+    def test_buyer_cannot_approve_their_own_artwork(self):
+        self._upload_artwork()
+        response = self._workflow(self.client_user, "manager_approve")
+        self.assertEqual(response.status_code, 403, response.content)
 
     # --- buyer claim / manager accept (law 7.2) ---------------------------
 
@@ -250,6 +292,7 @@ class ArtworkWorkflowLaw72TestCase(TestCase):
 
     def test_uploaded_artwork_dispatch_needs_no_printer_acknowledgement(self):
         self._upload_artwork()
+        manager_approve_artwork(managed_job=self.managed_job, actor=self.manager)
         assignment = dispatch_job_to_shop(managed_job=self.managed_job, dispatched_by=self.manager)
         self.assertEqual(assignment.managed_job_id, self.managed_job.id)
 

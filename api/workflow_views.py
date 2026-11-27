@@ -1725,6 +1725,13 @@ class QuoteRequestArtworkView(APIView):
     def _is_buyer(self, quote_request, user):
         return quote_request.created_by_id == user.id or quote_request.on_behalf_of_id == user.id
 
+    def _is_manager(self, quote_request, user):
+        if user.is_staff:
+            return True
+        if quote_request.assigned_manager_id == user.id:
+            return True
+        return bool(quote_request.shop_id and quote_request.shop.owner_id == user.id)
+
     def get(self, request, quote_request_pk):
         quote_request = self._get_request(request, quote_request_pk)
         if not (
@@ -1737,9 +1744,53 @@ class QuoteRequestArtworkView(APIView):
 
     def post(self, request, quote_request_pk):
         quote_request = self._get_request(request, quote_request_pk)
+        from quotes.artwork_review import (
+            approve_artwork,
+            mark_manager_holds,
+            mark_pending,
+            request_changes,
+        )
+
+        is_manager_action = self._is_manager(quote_request, request.user) and bool(
+            str(request.data.get("action") or "").strip()
+        )
+        if is_manager_action:
+            action = str(request.data.get("action") or "").strip().lower()
+            note = str(request.data.get("note") or request.data.get("reason") or "").strip()[:500]
+            attachment_id = request.data.get("attachment_id")
+            try:
+                attachment_id = int(attachment_id) if attachment_id not in (None, "") else None
+                if action in {"approve", "accept_claim"}:
+                    approve_artwork(
+                        quote_request,
+                        actor=request.user,
+                        attachment_id=attachment_id,
+                        note=note,
+                    )
+                elif action in {"manager_holds", "hold"}:
+                    mark_manager_holds(quote_request, actor=request.user, note=note)
+                elif action in {"request_changes", "changes_requested"}:
+                    request_changes(quote_request, actor=request.user, note=note)
+                else:
+                    return Response(
+                        {"detail": "Choose 'approve', 'manager_holds' or 'request_changes'."},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+            except (TypeError, ValueError):
+                return Response(
+                    {"detail": "That artwork version is not valid."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            except ValidationError as exc:
+                return Response(
+                    {"detail": "; ".join(exc.messages)},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            return Response(build_request_artwork_payload(quote_request, request))
+
         if not self._is_buyer(quote_request, request.user):
             return Response(
-                {"detail": "Only the client can declare artwork for this request."},
+                {"detail": "Only the client or the assigned manager can manage artwork for this request."},
                 status=status.HTTP_403_FORBIDDEN,
             )
         if quote_request.status in self._CLOSED_STATUSES:
@@ -1762,6 +1813,7 @@ class QuoteRequestArtworkView(APIView):
         }
         quote_request.request_snapshot = snapshot
         quote_request.save(update_fields=["request_snapshot", "updated_at"])
+        mark_pending(quote_request, None)
         return Response(build_request_artwork_payload(quote_request, request))
 
 

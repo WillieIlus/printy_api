@@ -75,6 +75,7 @@ from services.pricing.role_projection import ROLE_MANAGER, project_canonical, pr
 from .canonical_jobs import build_job_projection, current_job_override_state, preview_job_override
 from accounts.services.roles import get_request_active_role_raw, validate_active_role, ActiveRoleNotHeld
 from jobs.action_resolver import resolve_next_step
+from jobs.workflow_projection import build_workflow
 from services.pricing.breakdown_projection import production_breakdown_from_preview
 from services.pricing.finishing_normalization import is_empty_finishing, normalize_finishing_slug
 from services.pricing.spec_normalization import normalize_color_mode, normalize_print_sides
@@ -1133,6 +1134,7 @@ class BaseRoleDetailView(BaseDashboardHomeView):
         _resolver_role = {"client": "buyer", "partner": "manager", "production": "printer"}.get(role)
         if _resolver_role is not None:
             row["next_step"] = resolve_next_step(job, _resolver_role)
+            row["workflow"] = build_workflow(job, viewer_role=_resolver_role)
         return row
 
 

@@ -264,6 +264,9 @@ def create_managed_job_from_payment(*, payment: Payment) -> ManagedJob:
             quote=quote,
         )
         sync_managed_job_artwork_requirement(managed_job=managed_job)
+        from jobs.artwork_workflow import seed_artwork_review_from_request
+
+        seed_artwork_review_from_request(managed_job)
         from jobs.timing_services import sync_job_timing
 
         sync_job_timing(managed_job, due=quote_request.due_date)

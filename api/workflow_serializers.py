@@ -129,7 +129,7 @@ def build_request_artwork_payload(quote_request, request=None):
     declared that the manager/printer already holds the artwork. Both are real
     states the manager must see before quoting; neither is a placeholder.
     """
-    attachments = list(quote_request.attachments.all())
+    attachments = list(quote_request.attachments.order_by("-id", "-created_at"))
     files = [
         QuoteRequestAttachmentSerializer(attachment, context={"request": request}).data
         for attachment in attachments
@@ -140,18 +140,24 @@ def build_request_artwork_payload(quote_request, request=None):
     if files:
         state = "uploaded"
         reference = files[0].get("name") or "Artwork uploaded"
-    elif declared_state == "with_manager":
+    elif declared_state in {"with_manager", "accepted"}:
         state = "with_manager"
         reference = "Client says the manager already has the artwork"
     else:
         state = "missing"
         reference = ""
+    from quotes.artwork_review import get_review, is_approved, payment_block_reason
+
+    review = get_review(quote_request)
     return {
         "state": state,
         "reference": reference,
         "files": files,
         "declared_at": claim.get("declared_at") or None,
         "message": str(claim.get("message") or ""),
+        "review": review,
+        "approved": is_approved(quote_request),
+        "payment_block_reason": payment_block_reason(quote_request),
     }
 
 

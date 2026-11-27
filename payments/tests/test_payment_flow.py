@@ -8,6 +8,7 @@ from django.contrib.auth import get_user_model
 from django.contrib.messages import get_messages
 from django.contrib.messages.storage.fallback import FallbackStorage
 from django.core.exceptions import ValidationError
+from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import RequestFactory, TestCase, override_settings
 from django.urls import reverse
 from django.utils import timezone
@@ -34,7 +35,8 @@ from payments.services import (
 from pricing.models import PlatformFeePolicy
 from pricing.services.platform_fee_policy import create_quote_financial_split
 from quotes.choices import QuoteOfferStatus
-from quotes.models import ProductionOption, Quote, QuoteRequest
+from quotes.models import ProductionOption, Quote, QuoteRequest, QuoteRequestAttachment
+from quotes.artwork_review import approve_artwork, mark_pending
 from quotes.acceptance import accept_quote_for_payment
 from shops.models import Shop
 
@@ -86,6 +88,13 @@ class CanonicalPaymentFlowTestCase(TestCase):
             production_option=self.production_option,
             policy=self.policy,
         )
+        artwork = QuoteRequestAttachment.objects.create(
+            quote_request=self.quote_request,
+            file=SimpleUploadedFile("artwork.pdf", b"pdf", content_type="application/pdf"),
+            name="artwork.pdf",
+        )
+        mark_pending(self.quote_request, artwork)
+        approve_artwork(self.quote_request, actor=self.broker)
 
     def _success_callback(self, stk, amount="1750.00", receipt="QGH7XXX"):
         return {

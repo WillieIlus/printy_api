@@ -89,10 +89,19 @@ def managed_job_artwork_state(*, managed_job: ManagedJob) -> dict[str, Any]:
     }
     artwork_missing = not has_artwork
     artwork_required = bool(managed_job.artwork_required or artwork_missing)
-    can_dispatch = payment_confirmed and has_artwork and managed_job.dispatched_at is None
+    artwork_approved = False
+    try:
+        from jobs.artwork_workflow import artwork_satisfied
 
-    if has_artwork:
-        status_label = "Artwork uploaded"
+        artwork_approved = bool(artwork_satisfied(managed_job))
+    except Exception:
+        artwork_approved = False
+    can_dispatch = payment_confirmed and artwork_approved and managed_job.dispatched_at is None
+
+    if artwork_approved:
+        status_label = "Artwork approved"
+    elif has_artwork:
+        status_label = "Artwork awaiting manager approval"
     elif payment_confirmed:
         status_label = "Artwork required before dispatch"
     elif artwork_required:
@@ -102,6 +111,7 @@ def managed_job_artwork_state(*, managed_job: ManagedJob) -> dict[str, Any]:
 
     return {
         "artwork_uploaded": has_artwork,
+        "artwork_approved": artwork_approved,
         "artwork_required": artwork_required,
         "artwork_missing": artwork_missing,
         "can_dispatch": can_dispatch,

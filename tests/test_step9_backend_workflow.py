@@ -4,6 +4,7 @@ from decimal import Decimal
 from django.contrib import admin
 from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError
+from django.core.files.uploadedfile import SimpleUploadedFile
 from django.urls import NoReverseMatch
 from django.test import TestCase, override_settings
 from django.urls import reverse
@@ -30,7 +31,8 @@ from quotes.financial_split_actor_serializers import (
     QuoteFinancialSplitClientSerializer,
     QuoteFinancialSplitShopSerializer,
 )
-from quotes.models import CalculatorDraft, ProductionOption, Quote, QuoteFinancialSplit, QuoteRequest
+from quotes.models import CalculatorDraft, ProductionOption, Quote, QuoteFinancialSplit, QuoteRequest, QuoteRequestAttachment
+from quotes.artwork_review import approve_artwork, mark_pending
 from quotes.services_workflow import (
     create_production_option_from_calculator,
     create_quote_response,
@@ -490,6 +492,14 @@ class Step9BackendWorkflowTestCase(TestCase):
         )
         self.assertEqual(split.shop_payout, Decimal("1050.00"))
         self.assertEqual(split.client_total, Decimal("1500.00"))
+
+        artwork = QuoteRequestAttachment.objects.create(
+            quote_request=quote_request,
+            file=SimpleUploadedFile("checkout-artwork.pdf", b"pdf", content_type="application/pdf"),
+            name="checkout-artwork.pdf",
+        )
+        mark_pending(quote_request, artwork)
+        approve_artwork(quote_request, actor=self.broker)
 
         accepted_quote, payment = accept_quote_for_payment(quote=quote, accepted_by=signed_up_client)
         self.assertEqual(accepted_quote.status, QuoteOfferStatus.ACCEPTED)

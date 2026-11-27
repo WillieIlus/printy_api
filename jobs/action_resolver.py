@@ -144,6 +144,17 @@ def _role_for_owner(owner: str, viewer_role: str) -> str:
     return NONE
 
 
+def _artwork_file_present(job: ManagedJob) -> bool:
+    try:
+        from jobs.choices import JobFileStatus, JobFileType
+
+        return job.job_files.filter(
+            file_type__in=[JobFileType.ARTWORK, JobFileType.CUSTOMER_UPLOAD],
+        ).exclude(status=JobFileStatus.REPLACED).exists()
+    except Exception:
+        return False
+
+
 def _next_action_key(stage_key: str, owner_role: str, job: ManagedJob, viewer_role: str) -> str:
     if owner_role == NONE or owner_role != viewer_role:
         return "none"
@@ -179,7 +190,7 @@ def _next_action_key(stage_key: str, owner_role: str, job: ManagedJob, viewer_ro
     if stage_key in (ManagedJobStatus.PAYMENT_CONFIRMED, ManagedJobStatus.ASSIGNED):
         if owner_role == BUYER:
             if not _artwork_satisfied_flag(job):
-                return "upload_artwork"
+                return "none" if _artwork_file_present(job) else "upload_artwork"
             if _artwork_confirmation_state(job) == "requested":
                 return "approve_artwork"
             if _artwork_confirmation_state(job) == "rejected":
@@ -187,7 +198,7 @@ def _next_action_key(stage_key: str, owner_role: str, job: ManagedJob, viewer_ro
             return "none"
         if owner_role == MANAGER:
             if not _artwork_satisfied_flag(job):
-                return "none"
+                return "review_artwork" if _artwork_file_present(job) else "none"
             if _artwork_confirmation_state(job) in ("requested", "rejected"):
                 return "none"  # waiting on the buyer
             assignment = _active_assignment(job)
@@ -249,7 +260,7 @@ def _next_action_label(key: str, status: str | None = None, viewer_role: str = "
         "prepare_quote": "Prepare and send the quote",
         "upload_artwork": "Upload your artwork",
         "approve_artwork": "Approve the artwork",
-        "review_artwork": "Check the artwork and send it to the printer",
+        "review_artwork": "Approve the artwork",
         "dispatch_job": "Assign a production printer",
         "reassign_job": "Reassign a production printer",
         "accept_job": "Accept the job",

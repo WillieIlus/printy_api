@@ -19,6 +19,7 @@ from accounts.services.roles import (
 )
 from jobs.action_resolver import resolve_next_step
 from jobs.artwork_confirmation import respond_to_client_artwork_confirmation
+from jobs.artwork_workflow import manager_approve_artwork
 from jobs.audit_services import record_job_status_event
 from jobs.card_projection import build_job_card
 from jobs.choices import JobAssignmentStatus
@@ -209,7 +210,11 @@ def _perform_next_action(*, job: ManagedJob, request, code: str, note: str) -> b
             "Upload the artwork file first; the card action cannot carry a file."
         )
 
-    if code in {"accept_quote", "prepare_quote", "review_artwork"}:
+    if code == "review_artwork":
+        manager_approve_artwork(managed_job=job, actor=user, note=note)
+        return True
+
+    if code in {"accept_quote", "prepare_quote"}:
         raise ValidationError("Use the quote workflow for this action.")
 
     raise ValidationError("That action is not supported by the job card.")

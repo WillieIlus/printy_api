@@ -22,6 +22,7 @@ from payments.serializers import PaymentSerializer
 from payments.services import handle_stk_callback, initiate_stk_push, normalize_mpesa_phone
 from quotes.models import Quote
 from quotes.acceptance import accept_quote_for_payment
+from quotes.artwork_review import payment_block_reason as request_artwork_payment_block_reason
 from shops.models import Shop
 
 
@@ -38,6 +39,32 @@ def _validation_detail(exc) -> str:
     if messages:
         return "; ".join(str(message) for message in messages)
     return str(exc)
+
+
+def _request_artwork_block(quote_request) -> str | None:
+    if quote_request is None:
+        return None
+    return request_artwork_payment_block_reason(quote_request)
+
+
+def _managed_job_artwork_block(managed_job: ManagedJob) -> str | None:
+    """Gate a managed job on its current artwork approval.
+
+    A job-level file is authoritative once it exists; otherwise the source
+    quote request's review is the gate. A manager-held artwork claim counts as
+    job-level artwork because there is no file to compare versions against.
+    """
+    workflow = (managed_job.workflow_metadata or {}).get("artwork_workflow") or {}
+    has_job_artwork = (
+        managed_job.job_files.filter(file_type__in=["artwork", "customer_upload"])
+        .exclude(status="replaced")
+        .exists()
+        or workflow.get("source") == "manager_holds"
+    )
+    job_block = artwork_payment_block_reason(managed_job)
+    if has_job_artwork:
+        return job_block
+    return _request_artwork_block(managed_job.source_quote_request) or job_block
 
 
 def _is_platform_actor(user) -> bool:
@@ -380,6 +407,14 @@ class PaymentInitiateSTKView(APIView):
             return Response({"detail": "payment_id or quote_id is required."}, status=400)
         if not _can_use_payment(request.user, payment):
             raise PermissionDenied("Only the payer or platform staff can initiate this payment.")
+        artwork_block = _request_artwork_block(
+            getattr(getattr(payment, "quote", None), "quote_request", None)
+        )
+        if artwork_block:
+            return Response(
+                {"detail": artwork_block, "artwork_payment_block_reason": artwork_block},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         try:
             _remember_payment_phone(payment, phone)
             stk_request = initiate_stk_push(payment=payment, phone_number=phone)
@@ -427,6 +462,12 @@ class ManagedJobPaymentInitiateSTKView(APIView):
         except ValidationError as exc:
             return Response({"detail": _validation_detail(exc)}, status=400)
         try:
+            artwork_block = _managed_job_artwork_block(managed_job)
+            if artwork_block:
+                return Response(
+                    {"detail": artwork_block, "artwork_payment_block_reason": artwork_block},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
             quote, payment = accept_quote_for_payment(
                 quote=managed_job.source_quote,
                 accepted_by=request.user,
@@ -563,7 +604,7 @@ class ManagedJobMpesaSTKPushView(APIView):
             )
             if not _can_trigger_managed_job_payment(request.user, managed_job):
                 return Response({"detail": "Only the client who owns this job can initiate payment."}, status=status.HTTP_403_FORBIDDEN)
-            artwork_block = artwork_payment_block_reason(managed_job)
+            artwork_block = _managed_job_artwork_block(managed_job)
             if artwork_block:
                 return Response(
                     {"detail": artwork_block, "artwork_payment_block_reason": artwork_block},

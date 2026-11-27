@@ -108,6 +108,9 @@ def claim_pending_artwork_to_quote_request(
         )
     if delete_after_claim:
         delete_pending_artwork(upload)
+    from quotes.artwork_review import mark_pending
+
+    mark_pending(quote_request, attachment)
     return attachment
 
 

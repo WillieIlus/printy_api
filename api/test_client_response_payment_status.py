@@ -2,6 +2,7 @@ from decimal import Decimal
 from unittest.mock import MagicMock, patch
 
 from django.contrib.auth import get_user_model
+from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import TestCase, override_settings
 from django.urls import reverse
 from django.utils import timezone
@@ -12,7 +13,8 @@ from pricing.models import PlatformFeePolicy
 from pricing.services.platform_fee_policy import create_quote_financial_split
 from quotes.acceptance import accept_quote_for_payment
 from quotes.choices import QuoteOfferStatus
-from quotes.models import ProductionOption, Quote, QuoteRequest
+from quotes.models import ProductionOption, Quote, QuoteRequest, QuoteRequestAttachment
+from quotes.artwork_review import approve_artwork, mark_pending
 from shops.models import Shop
 
 
@@ -80,6 +82,13 @@ class ClientResponsePaymentStatusTestCase(TestCase):
             production_option=self.production_option,
             policy=self.policy,
         )
+        artwork = QuoteRequestAttachment.objects.create(
+            quote_request=self.quote_request,
+            file=SimpleUploadedFile("artwork.pdf", b"pdf", content_type="application/pdf"),
+            name="artwork.pdf",
+        )
+        mark_pending(self.quote_request, artwork)
+        approve_artwork(self.quote_request, actor=self.broker)
 
     def _responses(self):
         response = self.client.get(reverse("client-response-list"))

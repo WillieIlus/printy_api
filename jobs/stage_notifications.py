@@ -51,6 +51,20 @@ def notify_stage_owner(
         if stage in ACTION_REQUIRED_STAGES or owner_role in {"buyer", "manager", "printer"}
         else Notification.PRIORITY_INFORMATIONAL
     )
+    workflow = {}
+    try:
+        from jobs.workflow_projection import build_workflow
+
+        viewer_role = owner_role if owner_role in {"buyer", "manager", "printer"} else "manager"
+        workflow = build_workflow(managed_job, viewer_role=viewer_role)
+    except Exception:
+        workflow = {}
+    workflow_stage = str((workflow.get("current") or {}).get("label") or stage)
+    action_label = str((workflow.get("next_action") or {}).get("label") or "")
+    message = note or (
+        f"{managed_job.managed_reference}: {workflow_stage}"
+        + (f" - {action_label}." if action_label and action_label != "No action needed" else ".")
+    )
     notification_created = 0
     try:
         _, created = Notification.objects.get_or_create(
@@ -61,9 +75,15 @@ def notify_stage_owner(
                 "notification_type": Notification.JOB_STATUS_UPDATED,
                 "object_type": "managed_job",
                 "object_id": managed_job.id,
-                "message": note or f"Job {managed_job.managed_reference} is now in stage '{stage}'.",
+                "message": message,
                 "template_key": "stage_owner_entry",
-                "params": {"stage": stage, "owner_role": owner_role, "job_id": managed_job.id},
+                "params": {
+                    "stage": stage,
+                    "workflow_stage": (workflow.get("current") or {}).get("key"),
+                    "workflow_substate": (workflow.get("current") or {}).get("substate"),
+                    "owner_role": owner_role,
+                    "job_id": managed_job.id,
+                },
                 "priority": priority,
             },
         )
@@ -78,7 +98,7 @@ def notify_stage_owner(
             recipient=recipient,
             recipient_email=recipient.email,
             subject=f"Printy: action needed on {managed_job.managed_reference}",
-            body=note or f"Job {managed_job.managed_reference} is now in stage '{stage}'.",
+            body=message,
             status=EmailOutbox.Status.PENDING,
             quote_request=getattr(managed_job, "source_quote_request", None),
             context={"idempotency_key": key, "stage": stage, "owner_role": owner_role},
