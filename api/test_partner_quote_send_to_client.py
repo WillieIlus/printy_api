@@ -10,6 +10,7 @@ from accounts.models import User
 from pricing.models import QuantityPricingTier
 from quotes.choices import QuoteOfferStatus, QuoteStatus
 from payments.models import Payment
+from quotes.artwork_review import mark_manager_holds
 from quotes.models import EmailOutbox, Quote, QuoteRequest
 from shops.models import Shop
 
@@ -126,6 +127,7 @@ class PartnerQuoteSendToClientTestCase(TestCase):
             total=Decimal("1000.00"),
             response_snapshot={"production_cost_inputs": self._production_cost_inputs()},
         )
+        mark_manager_holds(quote_request, actor=self.partner, note="Walk-in artwork held by the shop.")
         self.client.force_authenticate(user=self.partner)
 
         response = self.client.post(

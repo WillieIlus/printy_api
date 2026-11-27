@@ -11,6 +11,7 @@ from pricing.models import PlatformFeePolicy
 from pricing.services.platform_fee_policy import create_quote_financial_split
 from quotes.choices import QuoteOfferStatus
 from quotes.models import ProductionOption, Quote
+from payments.models import Payment
 from shops.models import Shop
 from quotes.artwork_review import (
     PAYMENT_BLOCK_AWAITING_MANAGER,
@@ -206,6 +207,29 @@ class QuotePaymentArtworkGateTests(TestCase):
         response = self._pay()
         self.assertEqual(response.status_code, 400, response.content)
         self.assertEqual(response.json()["detail"], PAYMENT_BLOCK_UPLOAD)
+
+    def test_replacing_approved_artwork_blocks_a_payment_retry(self):
+        self._upload_and_approve()
+        first = self._pay()
+        self.assertNotEqual(first.status_code, 400, first.content)
+        payment = Payment.objects.filter(quote=self.quote).order_by("-id").first()
+        self.assertIsNotNone(payment)
+
+        replacement = QuoteRequestAttachment.objects.create(
+            quote_request=self.request,
+            file=SimpleUploadedFile("artwork-v2.pdf", b"pdf", content_type="application/pdf"),
+            name="artwork-v2.pdf",
+        )
+        mark_pending(self.request, replacement)
+
+        self.api.force_authenticate(self.buyer)
+        retry = self.api.post(
+            "/api/payments/stk-push/",
+            {"payment_id": payment.id, "phone_number": "+254700000000"},
+            format="json",
+        )
+        self.assertEqual(retry.status_code, 400, retry.content)
+        self.assertEqual(retry.json()["detail"], PAYMENT_BLOCK_AWAITING_MANAGER)
 
     def test_quote_payment_passes_the_artwork_gate_after_approval(self):
         self._upload_and_approve()

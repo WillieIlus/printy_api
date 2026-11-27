@@ -198,6 +198,9 @@ class ArtworkWorkflowLaw72TestCase(TestCase):
             artwork_payment_block_reason(self.managed_job),
             PAYMENT_BLOCK_AWAITING_APPROVAL,
         )
+        response = self._stk_push()
+        self.assertEqual(response.status_code, 400, response.content)
+        self.assertEqual(response.json()["detail"], PAYMENT_BLOCK_AWAITING_APPROVAL)
 
     def test_manager_can_approve_uploaded_artwork_through_the_api(self):
         self._upload_artwork()
