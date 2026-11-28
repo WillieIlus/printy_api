@@ -26,6 +26,13 @@ class PublicShopQuotePreviewTestCase(TestCase):
             partner_profile_enabled=True,
             name="Preview Manager",
         )
+        # Audit #3: the marketplace gate now requires a verified, active manager.
+        from accounts.models import UserProfile
+
+        UserProfile.objects.update_or_create(
+            user=self.manager,
+            defaults={"manager_verified": True, "broker_profile_active": True},
+        )
         self.shop = self._create_shop_with_pricing()
         PlatformFeePolicy.objects.update(is_active=False)
         PlatformFeePolicy.objects.create(

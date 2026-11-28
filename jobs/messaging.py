@@ -1,4 +1,4 @@
-﻿"""Stage-scoped job messages built on the existing quote conversation store.
+"""Stage-scoped job messages built on the existing quote conversation store.
 
 There is one message table in Printy: ``QuoteRequestMessage``. This module
 links those rows to a ManagedJob and a canonical job stage, and exposes only

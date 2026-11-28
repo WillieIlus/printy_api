@@ -45,6 +45,7 @@ from jobs.views import (
 )
 from jobs.analytics_views import ProductionAnalyticsView
 from jobs.card_views import ManagedJobCardView, ManagedJobNextActionView
+from jobs import payout_views
 from quotes.quote_card_views import QuoteCardView
 from jobs.completion_actuals_views import JobCompletionActualsView
 from notifications.views import NotificationViewSet
@@ -150,6 +151,26 @@ urlpatterns = [
     path("payments/stk-push/", payment_views.PaymentInitiateSTKView.as_view(), name="payment-stk-push"),
     path("payments/<int:pk>/", payment_views.PaymentDetailView.as_view(), name="payment-detail"),
     path("payments/mpesa-callback/", payment_views.MpesaCallbackView.as_view(), name="payment-mpesa-callback"),
+    path(
+        "payments/mpesa-callback/<str:callback_token>/",
+        payment_views.MpesaCallbackView.as_view(),
+        name="payment-mpesa-callback-signed",
+    ),
+    # Prompt 7 PART 2: Daraja B2C ResultURL / QueueTimeOutURL (before the
+    # mpesa_payments include so they resolve here).
+    path("payments/mpesa/b2c/result/", payout_views.B2CResultCallbackView.as_view(), name="mpesa-b2c-result"),
+    path(
+        "payments/mpesa/b2c/result/<str:callback_token>/",
+        payout_views.B2CResultCallbackView.as_view(),
+        name="mpesa-b2c-result-signed",
+    ),
+    path("payments/mpesa/b2c/timeout/", payout_views.B2CTimeoutCallbackView.as_view(), name="mpesa-b2c-timeout"),
+    path(
+        "payments/mpesa/b2c/timeout/<str:callback_token>/",
+        payout_views.B2CTimeoutCallbackView.as_view(),
+        name="mpesa-b2c-timeout-signed",
+    ),
+    path("payouts/mine/", payout_views.MyPayoutsView.as_view(), name="my-payouts"),
     path("payments/mpesa/", include("mpesa_payments.urls")),
     path("client/responses/<int:response_id>/reject/", workflow_views.ClientResponseRejectView.as_view(), name="client-response-reject"),
     path("client/responses/<int:response_id>/reply/", workflow_views.ClientResponseReplyView.as_view(), name="client-response-reply"),
@@ -193,6 +214,38 @@ urlpatterns = [
         name="admin-dispute-resolve",
     ),
     path("admin/reporting/", admin_ops_views.AdminReportingView.as_view(), name="admin-reporting"),
+    path(
+        "admin/payments/needs-review/",
+        admin_ops_views.AdminNeedsReviewPaymentListView.as_view(),
+        name="admin-payments-needs-review",
+    ),
+    path(
+        "admin/payments/<int:payment_id>/resolve-review/",
+        admin_ops_views.AdminResolveReviewPaymentView.as_view(),
+        name="admin-payment-resolve-review",
+    ),
+    path("admin/payouts/", payout_views.AdminPayoutListView.as_view(), name="admin-payouts"),
+    path("admin/payouts/<int:payout_id>/retry/", payout_views.AdminPayoutRetryView.as_view(), name="admin-payout-retry"),
+    path(
+        "admin/payouts/<int:payout_id>/approve/",
+        payout_views.AdminPayoutApproveView.as_view(),
+        name="admin-payout-approve",
+    ),
+    path(
+        "admin/jobs/<int:job_id>/money-summary/",
+        payout_views.AdminJobMoneySummaryView.as_view(),
+        name="admin-job-money-summary",
+    ),
+    path(
+        "admin/payments/<int:payment_id>/recover/",
+        admin_ops_views.AdminRecoverPaymentView.as_view(),
+        name="admin-payment-recover",
+    ),
+    path(
+        "admin/mpesa-payments/<int:payment_id>/resolve-review/",
+        admin_ops_views.AdminResolveReviewMpesaPaymentView.as_view(),
+        name="admin-mpesa-payment-resolve-review",
+    ),
     path("dashboard/internal/production-analytics/", ProductionAnalyticsView.as_view(), name="dashboard-internal-production-analytics"),
     path("dashboard/internal/jobs/<int:job_id>/completion-actuals/", JobCompletionActualsView.as_view(), name="dashboard-internal-job-completion-actuals"),
     path(

@@ -11,15 +11,30 @@ class PrinterShopNamePersistenceTestCase(TestCase):
         self.client = APIClient()
 
     def _register_printer(self, *, email, shop_name="North Press Co.", **extra):
+        """Printer applicant sign-up, then shop creation (audit #3 flow).
+
+        Registration never grants production or creates a shop any more: the
+        applicant signs up via /api/auth/register/production/ and creates the
+        shop through POST /api/shops/ (private until an admin approves it).
+        """
         payload = {
             "email": email,
             "password": "Pass12345",
             "name": "Press Operator",
-            "role": "production",
             "shop_name": shop_name,
         }
         payload.update(extra)
-        return self.client.post("/api/auth/register/", payload, format="json")
+        response = self.client.post("/api/auth/register/production/", payload, format="json")
+        if response.status_code == 201 and shop_name and "role" not in extra:
+            token = self._login(email)
+            created = self.client.post(
+                "/api/shops/",
+                {"name": shop_name},
+                format="json",
+                HTTP_AUTHORIZATION=f"Bearer {token}",
+            )
+            assert created.status_code == 201, created.content
+        return response
 
     def _login(self, email, password="Pass12345"):
         response = self.client.post(
@@ -33,9 +48,24 @@ class PrinterShopNamePersistenceTestCase(TestCase):
         response = self._register_printer(email="north@test.com", shop_name="North Press Co.")
 
         self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.json().get("signup_intent"), "printer_applicant")
         user = User.objects.get(email="north@test.com")
         shop = Shop.objects.get(owner=user)
         self.assertEqual(shop.name, "North Press Co.")
+        # Self-created shops start private until an admin approves them.
+        self.assertFalse(shop.is_public)
+
+    def test_printer_signup_alone_creates_no_shop_and_no_production_role(self):
+        response = self.client.post(
+            "/api/auth/register/production/",
+            {"email": "applicant@test.com", "password": "Pass12345", "shop_name": "Applicant Press"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 201, response.content)
+        user = User.objects.get(email="applicant@test.com")
+        self.assertEqual(user.role, User.Role.CLIENT)
+        self.assertFalse(Shop.objects.filter(owner=user).exists())
 
     def test_blank_company_name_does_not_create_shop(self):
         response = self._register_printer(email="blank-shop@test.com", shop_name="")

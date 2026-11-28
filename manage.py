@@ -6,6 +6,10 @@ import sys
 
 def main():
     """Run administrative tasks."""
+    # Audit #10a: `manage.py test` needs no setup. It uses the test settings
+    # unless DJANGO_SETTINGS_MODULE is set explicitly.
+    if sys.argv[1:2] == ['test']:
+        os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'config.test_settings')
     os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'config.settings')
     try:
         from django.core.management import execute_from_command_line

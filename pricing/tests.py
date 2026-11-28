@@ -81,14 +81,25 @@ class PlatformFeePolicyServiceTestCase(SimpleTestCase):
         self.assertEqual(split["pricing_tier"], "tier_b")
 
     def test_10001_uses_high_production_policy(self):
+        # Audit #6: this used to assert markup_fee_component == -150, i.e. a
+        # negative Printy fee (Printy paying out more than the client paid).
+        # A 1,000 markup is now below the tier C floor and is rejected.
+        from pricing.services.platform_fee_policy import MarginFloorError
+
+        with self.assertRaises(MarginFloorError):
+            calculate_financial_split(
+                production_cost=Decimal("10001.00"),
+                manager_markup=Decimal("1000.00"),
+                policy=self.policy,
+            )
         split = calculate_financial_split(
             production_cost=Decimal("10001.00"),
-            manager_markup=Decimal("1000.00"),
+            manager_markup=Decimal("2000.00"),
             policy=self.policy,
         )
 
         self.assert_money(split["production_fee_component"], "800.00")
-        self.assert_money(split["markup_fee_component"], "-150.00")
+        self.assert_money(split["markup_fee_component"], "500.00")
         self.assertEqual(split["pricing_tier"], "tier_c")
 
     def test_client_price_above_tier_cap_is_rejected(self):
@@ -118,15 +129,17 @@ class PlatformFeePolicyServiceTestCase(SimpleTestCase):
         # 2500.50 down to 2500).
         self.assertEqual(whole_kes("0.50"), Decimal("1"))
 
+        # Audit #6: an 80 markup on 1,000 (tier B) is below the margin floor and
+        # used to produce markup_fee_component == -6. Use a markup above the floor.
         split = calculate_financial_split(
             production_cost=Decimal("1000.025"),
-            manager_markup=Decimal("80.025"),
+            manager_markup=Decimal("300.025"),
             policy=self.policy,
         )
 
         self.assert_money(split["production_cost"], "1000")
-        self.assert_money(split["manager_markup"], "80")
-        self.assert_money(split["markup_fee_component"], "-6")
+        self.assert_money(split["manager_markup"], "300")
+        self.assert_money(split["markup_fee_component"], "115")
         for field in ("production_cost", "manager_markup", "production_fee_component",
                       "markup_fee_component", "printy_fee", "shop_payout",
                       "manager_payout", "client_total"):

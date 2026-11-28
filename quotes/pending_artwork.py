@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import mimetypes
 import os
 import secrets
 from datetime import timedelta
@@ -12,6 +11,7 @@ from django.utils import timezone
 from quotes.models import PendingArtworkUpload, QuoteRequestAttachment
 
 ALLOWED_PENDING_ARTWORK_EXTENSIONS = {".pdf", ".jpg", ".jpeg", ".png", ".ai", ".eps"}
+# Only validated raster images get an inline preview; PDF/AI/EPS are downloads.
 IMAGE_PENDING_ARTWORK_EXTENSIONS = {".jpg", ".jpeg", ".png"}
 MAX_PENDING_ARTWORK_BYTES = 50 * 1024 * 1024
 PENDING_ARTWORK_EXPIRY_HOURS = 72
@@ -26,26 +26,29 @@ def generate_pending_artwork_token() -> str:
 
 
 def validate_pending_artwork_file(uploaded_file) -> tuple[str, str]:
-    filename = os.path.basename(getattr(uploaded_file, "name", "") or "")
-    extension = os.path.splitext(filename)[1].lower()
-    if extension not in ALLOWED_PENDING_ARTWORK_EXTENSIONS:
-        raise ValueError("Unsupported artwork file type. Use pdf, jpg, png, ai, or eps.")
-    size = int(getattr(uploaded_file, "size", 0) or 0)
-    if size <= 0:
-        raise ValueError("Artwork file is empty.")
-    if size > MAX_PENDING_ARTWORK_BYTES:
-        raise ValueError("Artwork file cannot exceed 50MB.")
-    return filename, extension
+    """Audit #9: extension allowlist, 50MB cap and a magic-byte check.
+
+    Returns ``(filename, ".ext")`` as before; raises ``ValueError``
+    (``common.uploads.UploadRejected``) on a bad file.
+    """
+    from common.uploads import ARTWORK, validate_upload
+
+    checked = validate_upload(uploaded_file, ARTWORK)
+    return checked.filename, f".{checked.extension}"
 
 
 def create_pending_artwork_upload(*, uploaded_file, session_key: str) -> PendingArtworkUpload:
-    filename, _ = validate_pending_artwork_file(uploaded_file)
+    from common.uploads import ARTWORK, validate_upload
+
+    checked = validate_upload(uploaded_file, ARTWORK)
+    filename = checked.filename
     upload = PendingArtworkUpload(
         token=generate_pending_artwork_token(),
         session_key=session_key,
         original_filename=filename,
-        file_size=int(getattr(uploaded_file, "size", 0) or 0),
-        content_type=getattr(uploaded_file, "content_type", "") or mimetypes.guess_type(filename)[0] or "",
+        file_size=checked.size,
+        # The checked extension decides the type, never the client's header.
+        content_type=checked.content_type,
         expires_at=build_pending_artwork_expiry(),
     )
     upload.file.save(filename, uploaded_file, save=False)

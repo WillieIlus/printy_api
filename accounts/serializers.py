@@ -8,8 +8,7 @@ from rest_framework_simplejwt.settings import api_settings
 from django.core.exceptions import ValidationError as DjangoValidationError
 
 from .models import User, UserProfile
-from shops.models import Shop
-from .services.capabilities import capability_keys, get_account_capabilities, normalize_capability_overrides
+from .services.capabilities import get_account_capabilities
 from payments.services import normalize_mpesa_phone
 from .services.roles import (
     assign_role,
@@ -17,7 +16,6 @@ from .services.roles import (
     get_public_assignable_roles,
     get_request_active_role,
     normalize_role_value,
-    set_account_role,
 )
 
 logger = logging.getLogger("api.auth")
@@ -60,10 +58,20 @@ def get_or_create_profile(user: User) -> UserProfile:
 
 
 def _normalize_public_role(value: str) -> str:
+    """Audit #3: sign-up may only pick a role from the self-service allowlist."""
     normalized = normalize_role_value(value)
-    if normalized not in get_public_assignable_roles():
-        raise serializers.ValidationError("Role must be one of: client, partner, production.")
+    allowed = get_public_assignable_roles()
+    if normalized not in allowed:
+        raise serializers.ValidationError(
+            f"Role must be one of: {', '.join(sorted(allowed))}."
+        )
     return normalized
+
+
+# Audit #3: privilege-bearing account fields. Self-service endpoints
+# (PATCH /api/auth/me/, /api/users/me/, registration) expose them read-only;
+# only admin surfaces (Django admin, /api/admin/...) may change them.
+PRIVILEGED_USER_FIELDS = ("role", "partner_profile_enabled", "capability_overrides")
 
 
 class UserSerializer(serializers.ModelSerializer):
@@ -133,7 +141,15 @@ class UserSerializer(serializers.ModelSerializer):
             "country",
             "postal_code",
         ]
-        read_only_fields = ["id", "is_active", "is_staff", "is_superuser", "date_joined", "last_login"]
+        read_only_fields = [
+            "id",
+            "is_active",
+            "is_staff",
+            "is_superuser",
+            "date_joined",
+            "last_login",
+            *PRIVILEGED_USER_FIELDS,
+        ]
 
     def get_is_email_verified(self, instance):
         from allauth.account.models import EmailAddress
@@ -167,6 +183,15 @@ class UserSerializer(serializers.ModelSerializer):
                     "Email cannot be changed once set. Contact support for help."
                 )
             return self.instance.email
+        # Audit #4b: an address already used by another account (in any case)
+        # is refused. Before, a case variant created a case-duplicate (which
+        # then blocks Google sign-in for the real owner with a 409) and an
+        # exact duplicate hit the unique constraint as a 500.
+        others = User.objects.filter(email__iexact=value)
+        if self.instance is not None:
+            others = others.exclude(pk=self.instance.pk)
+        if others.exists():
+            raise serializers.ValidationError("A user with that email already exists.")
         return value
 
     def get_capabilities(self, instance):
@@ -220,27 +245,26 @@ class UserSerializer(serializers.ModelSerializer):
         data["social_links"] = []
         return data
 
-    def validate_role(self, value):
-        return _normalize_public_role(value)
+    def validate_phone(self, value):
+        """Normalise here so a bad number is a 400, not a 500 from the save."""
+        raw = str(value or "").strip()
+        if raw:
+            from accounts.services.phone import normalize_phone
 
-    def validate_capability_overrides(self, value):
-        if value in (None, ""):
-            return {}
-        if not isinstance(value, dict):
-            raise serializers.ValidationError("Capability overrides must be an object keyed by capability name.")
-        normalized = normalize_capability_overrides(value)
-        unknown_keys = sorted(set(value.keys()) - set(capability_keys()))
-        if unknown_keys:
-            raise serializers.ValidationError(f"Unsupported capability override keys: {', '.join(unknown_keys)}.")
-        return normalized
+            normalize_phone(raw)
+        return raw
 
     def update(self, instance, validated_data):
+        # Audit #3: role / partner_profile_enabled / capability_overrides are
+        # read-only here; drop them defensively in case a subclass re-enables them.
+        for field in PRIVILEGED_USER_FIELDS:
+            validated_data.pop(field, None)
         new_email = validated_data.pop("email", serializers.empty)
         if new_email is not serializers.empty and new_email and not instance.email:
             instance.email = new_email
             instance.save(update_fields=["email", "updated_at"])
             self._provision_email_address(instance, new_email)
-        next_role = validated_data.pop("role", None)
+        phone_value = validated_data.pop("phone", serializers.empty)
         profile_data = {
             field: validated_data.pop(field)
             for field in PROFILE_FIELDS
@@ -257,15 +281,19 @@ class UserSerializer(serializers.ModelSerializer):
                 part for part in [instance.first_name.strip(), instance.last_name.strip()] if part
             )
         instance.save()
-        if next_role is not None:
-            set_account_role(instance, next_role)
-            instance.refresh_from_db(fields=["role"])
 
         if profile_data:
             profile = get_or_create_profile(instance)
             for field, value in profile_data.items():
                 setattr(profile, field, value or "")
             profile.save()
+
+        if phone_value is not serializers.empty:
+            # Audit #3: every phone write goes through set_profile_phone so the
+            # normalised form is kept and a changed number loses its verification.
+            from accounts.services.phone import set_profile_phone
+
+            set_profile_phone(instance, phone_value or "", verified=False)
 
         return instance
 
@@ -330,11 +358,11 @@ class UserCreateSerializer(serializers.ModelSerializer):
             "shop_name",
             "phone",
         ]
-        read_only_fields = ["id"]
+        # Audit #3: partner_profile_enabled / capability_overrides are never
+        # self-service. ``role`` stays writable but only from the allowlist.
+        read_only_fields = ["id", "partner_profile_enabled", "capability_overrides"]
         extra_kwargs = {
             "role": {"required": False},
-            "partner_profile_enabled": {"required": False},
-            "capability_overrides": {"required": False},
         }
 
     def validate_email(self, value):
@@ -342,17 +370,6 @@ class UserCreateSerializer(serializers.ModelSerializer):
 
     def validate_role(self, value):
         return _normalize_public_role(value)
-
-    def validate_capability_overrides(self, value):
-        if value in (None, ""):
-            return {}
-        if not isinstance(value, dict):
-            raise serializers.ValidationError("Capability overrides must be an object keyed by capability name.")
-        normalized = normalize_capability_overrides(value)
-        unknown_keys = sorted(set(value.keys()) - set(capability_keys()))
-        if unknown_keys:
-            raise serializers.ValidationError(f"Unsupported capability override keys: {', '.join(unknown_keys)}.")
-        return normalized
 
     def validate_phone(self, value):
         if value in (None, ""):
@@ -372,26 +389,26 @@ class UserCreateSerializer(serializers.ModelSerializer):
             or ""
         )
         guest_draft_id = validated_data.pop("guest_draft_id", None)
-        shop_name = validated_data.pop("shop_name", "")
+        # Audit #3: printer applicants no longer get a shop (and with it the
+        # production role) at sign-up; they create it later via POST /api/shops/,
+        # which starts private until an admin approves it. Accepted and ignored
+        # so older clients that still send it do not get a 400.
+        validated_data.pop("shop_name", "")
+        for field in PRIVILEGED_USER_FIELDS[1:]:
+            validated_data.pop(field, None)
         requested_role = validated_data.pop("role", None) or self.context.get("default_role") or User.Role.CLIENT
         normalized_role = _normalize_public_role(requested_role)
         validated_data["role"] = normalized_role
         if normalized_role == User.Role.PARTNER:
             validated_data["partner_profile_enabled"] = True
         user = User.objects.create_user(**validated_data)
-        if normalized_role == User.Role.PRODUCTION and shop_name:
-            shop = Shop.objects.filter(owner=user).first()
-            if shop is None:
-                Shop.objects.create(
-                    owner=user,
-                    name=str(shop_name).strip(),
-                    business_email=user.email or "shop@printy.ke",
-                    public_email=user.email or "",
-                    description="Created from print shop signup.",
-                    is_active=True,
-                    is_public=True,
-                )
         assign_role(user, normalized_role, source=self.context.get("role_source", "signup"))
+        if normalized_role == User.Role.PARTNER:
+            # Manager applicant: explicitly unverified until Printy staff decide.
+            UserProfile.objects.update_or_create(
+                user=user,
+                defaults={"manager_verified": False, "manager_verified_at": None},
+            )
         from allauth.account.models import EmailAddress
         from django.conf import settings as django_settings
         email_verification = getattr(django_settings, "ACCOUNT_EMAIL_VERIFICATION", "none")
@@ -436,7 +453,11 @@ class UserCreateSerializer(serializers.ModelSerializer):
             ).order_by("-updated_at", "-created_at")
             if guest_draft_id:
                 drafts = drafts.filter(pk=guest_draft_id)
-            if normalized_role == User.Role.CLIENT:
+            is_buyer_signup = (
+                normalized_role == User.Role.CLIENT
+                and self.context.get("signup_intent") != "printer_applicant"
+            )
+            if is_buyer_signup:
                 draft = drafts.first()
                 if draft is not None:
                     draft.user = user

@@ -2,7 +2,6 @@
 DRF viewsets and API views.
 """
 import math
-import os
 import uuid
 
 from django.shortcuts import get_object_or_404
@@ -530,19 +529,18 @@ class ProfileAvatarUploadView(APIView):
             _sync_avatar_from_manager_photo(profile)
             return Response(ProfileSerializer(profile).data, status=status.HTTP_200_OK)
 
-        content_type = getattr(uploaded_file, "content_type", "") or ""
-        if content_type and not content_type.startswith("image/"):
-            return Response(
-                {"avatar": ["Avatar uploads must be image files."]},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+        # Audit #9: extension allowlist, 5MB cap and a magic-byte check. The
+        # old code trusted the client's Content-Type and renamed any unknown
+        # extension (including .svg/.html) to .jpg, then stored it publicly.
+        from common.uploads import AVATAR, validate_upload
 
-        extension = os.path.splitext(uploaded_file.name or "")[1].lower()
-        if extension not in {".jpg", ".jpeg", ".png", ".webp", ".gif"}:
-            extension = ".jpg"
+        try:
+            checked = validate_upload(uploaded_file, AVATAR)
+        except ValueError as exc:
+            return Response({"avatar": [str(exc)]}, status=status.HTTP_400_BAD_REQUEST)
 
         saved_path = default_storage.save(
-            f"avatars/{request.user.id}/{uuid.uuid4().hex}{extension}",
+            f"avatars/{request.user.id}/{uuid.uuid4().hex}.{checked.extension}",
             uploaded_file,
         )
         profile.avatar = default_storage.url(saved_path)
@@ -670,13 +668,18 @@ class ManagerProfileBundleView(APIView):
             "turnaroundHours": "manager_turnaround_hours",
             "turnaroundIsEstimate": "manager_turnaround_is_estimate",
             "availability": "manager_availability",
-            "phone": "phone",
             "whatsapp": "manager_whatsapp",
             "publicOptIn": "manager_public_opt_in",
             "speciality": "manager_speciality",
             "acceptsNewJobs": "accepts_new_jobs",
             "maxConcurrentJobs": "max_concurrent_jobs",
         }
+        if "phone" in request.data:
+            # Audit #3: phone goes through the canonical writer, never a raw setattr.
+            from accounts.services.phone import set_profile_phone
+
+            set_profile_phone(request.user, request.data.get("phone") or "", verified=False)
+            profile.refresh_from_db()
         update_fields = []
         for key, field in mapping.items():
             if key in request.data:

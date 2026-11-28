@@ -75,12 +75,27 @@ def origin_manager_for_phone(normalized: str):
 
 
 def set_profile_phone(user, value, *, verified: bool = False):
-    """Store the raw phone plus its normalised form on the user profile."""
+    """Store the raw phone plus its normalised form on the user profile.
+
+    This is the ONLY place that may write ``UserProfile.phone`` (audit #3).
+    Changing to a different number (or clearing it) drops the previous
+    verification: proof of owning the old number says nothing about the new
+    one. Re-saving the same number keeps it.
+    """
     from accounts.models import UserProfile
 
     profile, _ = UserProfile.objects.get_or_create(user=user)
     raw = str(value or "").strip()
     normalized = normalize_phone(raw) if raw else ""
+    previous = profile.phone_normalized or ""
+    if not previous and profile.phone:
+        # Legacy row written before phone_normalized existed.
+        try:
+            previous = normalize_phone(profile.phone)
+        except serializers.ValidationError:
+            previous = ""
+    if normalized != previous:
+        profile.phone_verified_at = None
     profile.phone = raw
     profile.phone_normalized = normalized
     if verified and normalized:

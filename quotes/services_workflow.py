@@ -801,27 +801,18 @@ def send_calculator_draft_to_shops(*, draft: CalculatorDraft, shops: list[Shop],
                         object_type="quote_request",
                         object_id=quote_request.id,
                     )
-                    from django.conf import settings
-                    from django.core.mail import send_mail
+                    # Audit #10b: this runs inside the submission transaction;
+                    # the reminder goes out after commit, failures are logged.
+                    from notifications.services import send_mail_after_commit
 
-                    try:
-                        send_mail(
-                            subject="Upload your artwork to keep your Printy request moving",
-                            message=(
-                                "Your quote request was sent. Don't forget to upload your artwork so production can begin "
-                                "as soon as you accept a quote."
-                            ),
-                            from_email=getattr(settings, "DEFAULT_FROM_EMAIL", None),
-                            recipient_list=[draft.user.email],
-                            fail_silently=False,
-                        )
-                    except Exception:
-                        logger.warning(
-                            "Failed to send missing-artwork reminder for calculator_draft=%s user=%s",
-                            draft.id,
-                            getattr(draft.user, "email", ""),
-                            exc_info=True,
-                        )
+                    send_mail_after_commit(
+                        subject="Upload your artwork to keep your Printy request moving",
+                        message=(
+                            "Your quote request was sent. Don't forget to upload your artwork so production can begin "
+                            "as soon as you accept a quote."
+                        ),
+                        recipient_list=[draft.user.email],
+                    )
             created_requests.append(quote_request)
             draft.status = CalculatorDraftStatus.SENT
             draft.save(update_fields=["status", "updated_at"])
@@ -880,7 +871,7 @@ def send_calculator_draft_to_shops(*, draft: CalculatorDraft, shops: list[Shop],
                 notify_quote_event(
                     recipient=shop.owner,
                     notification_type=Notification.QUOTE_REQUEST_SUBMITTED,
-                    message=f"New quote request #{quote_request.id} from {quote_request.customer_name or 'customer'}.",
+                    message=f"New quote request #{quote_request.id} from a client.",
                     object_type="quote_request",
                     object_id=quote_request.id,
                     actor=draft.user,

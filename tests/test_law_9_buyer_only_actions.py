@@ -61,6 +61,14 @@ class _BuyerOnlyBase(TestCase):
             partner_profile_enabled=True,
             capability_overrides={"can_source_jobs": True, "can_manage_clients": True},
         )
+        # Audit #3b: production sourcing / the printer roster require a
+        # verified, active manager.
+        from accounts.models import UserProfile
+
+        UserProfile.objects.update_or_create(
+            user=self.manager,
+            defaults={"manager_verified": True, "broker_profile_active": True},
+        )
         self.printer = User.objects.create_user(
             email="law9-printer@test.ke",
             password="pass12345",

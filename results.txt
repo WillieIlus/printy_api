@@ -1,0 +1,3155 @@
+==============================================================================
+Prompt 0 — baseline
+==============================================================================
+Date (local): 2026-11-27
+Branch: security/audit-remediation   (created from 70fd070, no divergence yet)
+Base commit: 70fd070  feat: gate quote and job payments on manager artwork approval
+
+------------------------------------------------------------------------------
+STEP 1 — git status
+------------------------------------------------------------------------------
+Working tree was CLEAN before branching (nothing to commit, no uncommitted
+changes). No work was lost.
+
+------------------------------------------------------------------------------
+STEP 2 — branch
+------------------------------------------------------------------------------
+Created and switched to: security/audit-remediation
+    git checkout -b security/audit-remediation
+HEAD is 70fd070. This branch is the working branch for the whole remediation
+effort. NEVER commit to master/main and NEVER merge into it. Do not push
+unless explicitly told.
+
+------------------------------------------------------------------------------
+STEP 3 — environment (NO repo code was changed)
+------------------------------------------------------------------------------
+The sandbox had no Python dependencies installed (PEP 668 externally-managed
+env, no virtualenv, no .env file). To run the Django test runner:
+
+  * Created a virtualenv OUTSIDE the repo: /home/user/.venv
+      python3 -m venv /home/user/.venv
+      /home/user/.venv/bin/python -m pip install -r requirements.txt
+  * Django 5.2.11 now imports from that venv.
+  * No .env file exists; required settings are passed on the command line.
+  * The test suite uses config.test_settings (SQLite test DB).
+
+Reproducible run command (bash, from repo root):
+
+  SECRET_KEY='test-secret-key-not-for-production' \
+  APP_ENV=local \
+  DEBUG=true \
+  DJANGO_SETTINGS_MODULE=config.test_settings \
+  EMAIL_BACKEND=django.core.mail.backends.locmem.EmailBackend \
+  MPESA_CONSUMER_KEY='test-sandbox-consumer-key' \
+  MPESA_CONSUMER_SECRET='test-sandbox-consumer-secret' \
+  MPESA_SHORTCODE='174379' \
+  MPESA_PASSKEY='test-sandbox-passkey' \
+  MPESA_CALLBACK_URL='https://api.printy.ke/api/payments/mpesa/callback/' \
+  MPESA_SHORTCODE_TYPE='paybill' \
+  /home/user/.venv/bin/python manage.py test --noinput
+
+Notes:
+  * DEBUG=true is required so the production-only guards (SECRET_KEY/ALLOWED_HOSTS/
+    CSRF_TRUSTED_ORIGINS/FRONTEND_URL HTTPS checks) in config/settings.py don't
+    raise ImproperlyConfigured.
+  * MPESA_* sandbox creds are required: both Daraja clients raise
+    ImproperlyConfigured at construction without MPESA_CONSUMER_KEY/SECRET
+    (and, for the default paybill product, MPESA_SHORTCODE/MPESA_PASSKEY/
+    MPESA_CALLBACK_URL). The test suite mocks the network, so dummy sandbox
+    values are sufficient.
+  * MPESA_CALLBACK_URL must equal the canonical https://api.printy.ke/.../callback/
+    value expected by mpesa_payments/test_transaction_status.py.
+
+------------------------------------------------------------------------------
+STEP 4 — full test suite (Django runner)
+------------------------------------------------------------------------------
+Command: python manage.py test   (see env above)
+
+  Ran 1572 tests in ~42.8s
+    Passes   : 1571
+    Failures : 1
+    Errors   : 0
+    Skips    : 0
+
+(Plain `pytest` still discovers nothing useful here — there is no pytest.ini,
+so the 84+ test_* methods across the apps are skipped by pytest. Use the Django
+runner above as the source of truth.)
+
+------------------------------------------------------------------------------
+STEP 5 — pre-existing failures (listed separately)
+------------------------------------------------------------------------------
+ONE genuine pre-existing failure on the baseline (NOT caused by any change in
+this branch — zero source files were modified for Prompt 0):
+
+  FAIL: test_full_guest_to_client_to_production_tracking_workflow
+        tests.Step9BackendWorkflowTestCase
+        tests/__init__.py:504  ->  AssertionError: 400 != 201
+
+  Cause: the test posts to payment-stk-push (reverse("payment-stk-push")) with a
+  freshly accepted quote payment and expects HTTP 201. The request returns 400
+  because the artwork-payment gate added in the base commit
+  (quotes/artwork_review.py:payment_block_reason, invoked from
+  api/payment_views.py:PaymentInitiateSTKView via _request_artwork_block) blocks
+  the push. This end-to-end test never uploads/approves artwork, so the gate
+  returns PAYMENT_BLOCK_UPLOAD. This is a real baseline regression to resolve
+  (either the test must exercise the artwork-approval step, or the gate's
+  applicability to this flow must be reconsidered) — it is tracked here so later
+  prompts do not mistake it for a newly introduced break.
+
+ENVIRONMENTAL failures (resolve automatically once sandbox M-Pesa creds are set;
+documented so a bare run is not misread as code breakage):
+  Without MPESA_CONSUMER_KEY/SECRET (+ paybill shortcode/passkey/callback) the
+  following 11 tests ERROR/FAIL purely because the Daraja client raises
+  ImproperlyConfigured at construction — they pass once the creds above are
+  supplied:
+    mpesa_payments.test_transaction_status.QueryTransactionStatusTests
+      - test_blank_result_url_falls_back_to_callback   (ERROR)
+      - test_invalid_phone_rejected                    (ERROR)
+      - test_sends_documented_payload                  (FAIL, expects canonical callback URL)
+      - test_network_failure_is_typed                  (FAIL)
+      - test_rejection_raises_with_daraja_message      (FAIL)
+    pricing.test_whole_kes_rounding.StkAmountIsNotTruncatedTests
+      - test_daraja_client_rejects_a_cent_carrying_amount          (ERROR)
+      - test_daraja_client_sends_the_exact_whole_amount            (ERROR)
+      - test_mpesa_payments_client_rejects_a_cent_carrying_amount  (ERROR)
+      - test_mpesa_payments_client_sends_the_exact_whole_amount    (ERROR)
+    quotes.test_artwork_review_gate.QuotePaymentArtworkGateTests
+      - test_quote_payment_passes_the_artwork_gate_after_approval   (ERROR)
+    tests.Step9BackendWorkflowTestCase
+      - test_full_guest_to_client_to_production_tracking_workflow   (FAIL, see above)
+
+------------------------------------------------------------------------------
+Files touched this prompt
+------------------------------------------------------------------------------
+  results.txt   (new)  — this baseline record.
+
+No source code, tests, migrations, or config were modified (per "make no code
+changes"). The virtualenv lives at /home/user/.venv (outside the repo) and is
+NOT committed.
+
+------------------------------------------------------------------------------
+Prompt 0 status
+------------------------------------------------------------------------------
+DONE. Working branch created, baseline recorded.
+Suite: 1572 total / 1571 pass / 1 pre-existing failure / 0 errors.
+Full suite is "green" except for the 1 pre-existing, documented failure above.
+Ready for the next prompt (audit(#1): ...).
+==============================================================================
+
+==============================================================================
+Prompt 1 — investigation (STEP A, read-only; written BEFORE any code edit)
+==============================================================================
+Branch: security/audit-remediation (verified with `git branch --show-current`).
+
+------------------------------------------------------------------------------
+A1. Two parallel M-Pesa systems share ONE public callback URL
+------------------------------------------------------------------------------
+(a) mpesa_payments (cashier module)
+    model    MpesaPayment  initiated -> pending -> paid | failed | cancelled | needs_review
+             (TERMINAL = paid/failed/cancelled/needs_review; reconciliation_status
+             independent: pending/confirmed/amount_mismatch/duplicate/manual_review)
+    create   services.create_payment(amount=<CLIENT SUPPLIED>, payable=<GFK>)
+    push     services.initiate_stk_push -> Amount = payment.amount (= client value)
+    settle   services.process_callback -> MpesaPayment.mark_confirmed:
+             paid iff callback Amount == payment.amount else needs_review.
+             The comparison exists, but payment.amount is whatever the client
+             POSTed, so "KES 1 for a KES 5000 job" compares 1 == 1 -> PAID.
+    signal   receivers.on_mpesa_payment_confirmed -> _settle_managed_job sets
+             ManagedJob.payment_status=CONFIRMED (+status PAYMENT_CONFIRMED).
+             quote / quoterequest payables: only logged "unhandled payable" —
+             money taken, nothing settles.
+(b) canonical payments (docs/CANONICAL_MODELS.md "Batch 7")
+    Quote(sent) -> accept_quote_for_payment -> Payment(pending, amount =
+    expected_amount = QuoteFinancialSplit.client_total) -> payments.services.
+    initiate_stk_push -> MpesaSTKRequest(pending->sent), Payment(processing)
+    -> handle_stk_callback -> confirm_successful_stk_request -> mark_payment_paid
+    (raises if received != expected) -> create_managed_job_from_payment.
+    Payment: pending/processing/paid/failed/cancelled/expired (no needs_review).
+    MpesaSTKRequest: pending/sent/success/failed/cancelled/expired.
+
+Canonical paid/failed/needs_review vocabulary = payments/states.py (law 10.7):
+only a provider-confirmed `paid` maps to PAID; mpesa `needs_review` maps to
+AWAITING_CONFIRMATION (never paid).
+
+------------------------------------------------------------------------------
+A2. Callback routes and where they set state (ALL AllowAny, no auth today)
+------------------------------------------------------------------------------
+/api/payments/mpesa/callback/  mpesa_payments.views.MpesaCallbackView
+    - Result-shaped body -> process_transaction_status_result
+    - CheckoutRequestID owned by an MpesaPayment -> process_callback (A1a)
+    - otherwise -> payments.services.handle_stk_callback (A1b)
+    - always 200, exceptions swallowed.
+/api/payments/mpesa/result/    mpesa_payments.views.MpesaTransactionStatusView
+    -> process_transaction_status_result: matches MpesaPayment by receipt
+    (TransactionID); success -> mark_confirmed, else mark_failed.
+/api/payments/mpesa-callback/  api.payment_views.MpesaCallbackView (legacy)
+    -> handle_stk_callback directly; 400 on ValidationError.
+
+Gaps found:
+ G1 No secret / IP check on any route: anyone who learns a CheckoutRequestID
+    (returned in several API responses, see A4) can POST a forged success.
+ G2 handle_stk_callback: success without Amount -> mark_payment_paid treats
+    received=None as expected -> PAID. Success without MpesaReceiptNumber -> PAID.
+ G3 handle_stk_callback: amount mismatch raises ValidationError -> rollback,
+    nothing recorded (no needs_review state exists on Payment).
+ G4 handle_stk_callback falls back to matching on MerchantRequestID when the
+    CheckoutRequestID is absent; no already-final guard on the STK request.
+ G5 handle_stk_callback failure branch (payments/services.py ~line 650): a late
+    / replayed FAILURE callback for an OLD, already-final STK request calls
+    mark_payment_failed(payment) and flips the Payment to failed/cancelled while
+    a NEWER prompt for the same payment is still in flight -> alters an
+    unrelated pending prompt. Also re-writes the old request's status.
+ G6 Unknown CheckoutRequestID: process_callback logs + 200; canonical raises,
+    swallowed -> 200 on /callback/, 400 on legacy. Not explicitly rejected.
+
+------------------------------------------------------------------------------
+A3. stk-push (/api/payments/mpesa/stk-push/) — amount + ownership
+------------------------------------------------------------------------------
+ - amount: client supplied (MpesaStkPushSerializer.amount) for every payable.
+ - ownership: _resolve_payable() fetches ANY ManagedJob/Quote/QuoteRequest by
+   pk; no client_id check. (Canonical views use _can_trigger_managed_job_payment
+   = managed_job.client_id == request.user — consistent with CANONICAL_MODELS.)
+ - artwork gate: not checked (canonical views call _managed_job_artwork_block /
+   _request_artwork_block / artwork_payment_block_reason first).
+ - quote_id / quote_request_id: attached as GFK payable -> "unhandled payable".
+ - checkout_request_id field: CharField(blank=True, default="", unique=True).
+   create_payment() inserts "" before Daraja answers; a FAILED initiation keeps
+   "" -> the second initiation's INSERT collides on "" -> IntegrityError.
+
+------------------------------------------------------------------------------
+A4. Every place checkout_request_id is returned to a caller
+------------------------------------------------------------------------------
+ mpesa_payments.serializers.MpesaPaymentReadSerializer (also merchant_request_id)
+   used by: MpesaStkPushView (201), MpesaPaymentDetailView, MpesaPaymentQueryView,
+   MpesaPaymentListView.  The checkout UI polls by payment id -> not needed.
+ api.payment_views._serialize_payment  (payer / platform payment detail)
+ api.payment_views.PaymentInitiateSTKView (~440), ManagedJobPaymentInitiateSTKView
+   (~497), ManagedJobMpesaSTKPushView (~651), ManagedJobMpesaQueryView (~706,
+   which also takes checkout_request_id as INPUT -> the job checkout UI needs it).
+ api.dashboard_views client dashboard recent payments (~409) — display only.
+ api.dashboard_views partner "send to client" payment payload (~1827) — the
+   manager is not the payer -> not needed.
+ clients.views.ClientLinkPaymentView (~593, + merchant_request_id) — signed-out
+   OTP link; no endpoint consumes it -> not needed.
+
+------------------------------------------------------------------------------
+A5. Plan / decisions (no CANONICAL_MODELS conflict found)
+------------------------------------------------------------------------------
+ - Authorised payer for a ManagedJob = managed_job.client (matches existing
+   _can_trigger_managed_job_payment and CANONICAL_MODELS); for a quote = the
+   _can_accept rule inside accept_quote_for_payment.
+ - Shared callback guard (payments/callback_security.py) for all 3 routes:
+   secret (path segment or ?token=, hmac.compare_digest), IP allowlist with
+   trusted-proxy-aware client IP resolution, fail closed when required.
+ - Callbacks must match a persisted transaction by CheckoutRequestID; unknown
+   -> 404 + log; final -> 200 no-op; success requires receipt + Amount ==
+   server-stored expected amount, mismatch -> needs_review (new Payment status).
+ - stk-push: managed_job amount from QuoteFinancialSplit.client_total; quote_id
+   routed through accept_quote_for_payment + canonical initiate_stk_push;
+   quote_request_id removed; no-payable path unchanged (nothing to settle).
+ - checkout_request_id -> null=True, unique=True; migration converts "" to NULL.
+
+==============================================================================
+Prompt 1 — fixes #1 (callback authenticity) + #2 (server-side amount/ownership)
+==============================================================================
+Commit: audit(#1,#2): verify callbacks, server-side amounts, fix checkout_request_id
+Branch: security/audit-remediation (not pushed)
+
+------------------------------------------------------------------------------
+Test counts (same command/env as Prompt 0)
+------------------------------------------------------------------------------
+  Before: Ran 1572 — 1571 pass, 1 FAIL (tests.Step9BackendWorkflowTestCase
+          .test_full_guest_to_client_to_production_tracking_workflow)
+  After : Ran 1596 — 1596 pass, 0 failures, 0 errors   (+24 new tests)
+  Environmental (unchanged class of issue): run WITHOUT the MPESA_* env vars,
+  10 tests error/fail because the Daraja clients refuse to construct without
+  credentials (test_transaction_status x5, test_whole_kes_rounding x4,
+  test_artwork_review_gate x1). Baseline had 11 = these 10 + Step9.
+
+------------------------------------------------------------------------------
+New regression tests — mpesa_payments/test_audit_callback_and_amounts.py
+------------------------------------------------------------------------------
+Verified against the pre-fix tree (code stashed, only the new standalone
+helper module + this file present): 22 of 24 FAIL/ERROR there, all 24 pass
+after. The 2 that pass pre-fix are by design: a positive control
+(allowlisted IP via trusted proxy is accepted) and a unit test of the new
+resolve_client_ip helper.
+  #1 callbacks
+   - test_forged_callback_without_secret_is_403_and_changes_nothing
+       (/callback/, /result/, legacy /mpesa-callback/, wrong path/query secret)
+   - test_callback_with_secret_in_path_or_query_is_applied
+   - test_production_without_configured_secret_fails_closed
+   - test_outbound_callback_urls_carry_the_secret
+   - test_unknown_checkout_request_id_is_rejected_and_nothing_changes (404)
+   - test_callback_without_checkout_id_or_result_code_is_rejected (400)
+   - test_wrong_amount_goes_to_needs_review_never_paid (canonical + cashier)
+   - test_success_without_receipt_or_amount_is_never_paid
+   - test_duplicate_and_late_callbacks_are_idempotent
+   - test_replayed_failure_for_old_prompt_does_not_touch_newer_pending_prompt
+   - test_non_allowlisted_ip_is_403_even_with_the_secret
+   - test_spoofed_x_forwarded_for_from_untrusted_peer_is_ignored
+   - test_allowlisted_ip_via_trusted_proxy_is_accepted (positive control)
+   - test_production_defaults_to_safaricom_ranges
+   - test_resolve_client_ip_rules (helper unit test)
+   - test_production_requires_a_strong_secret (printy.E017/E018/E019)
+  #2 stk-push
+   - test_kes_1_stk_push_on_kes_5000_job_charges_5000 (Daraja Amount=5000)
+   - test_stk_push_on_another_users_job_is_403
+   - test_stk_push_respects_the_artwork_gate
+   - test_two_consecutive_failed_stk_initiations_do_not_raise_integrity_error
+   - test_rows_without_checkout_id_coexist
+   - test_quote_request_payable_is_refused
+   - test_quote_id_payment_settles_the_quote (Payment paid + ManagedJob created)
+   - test_quote_id_payment_by_a_stranger_is_403
+
+------------------------------------------------------------------------------
+Existing tests changed (and why)
+------------------------------------------------------------------------------
+ - tests/__init__.py Step9BackendWorkflowTestCase: now uploads + approves the
+   artwork before paying (same step tests/test_step9_backend_workflow.py
+   already had). Gate untouched. (The failing id `tests.Step9...` is the
+   stale copy living in tests/__init__.py.)
+ - payments/tests/test_payment_states.py: callback fixture used the key
+   "Items"; Daraja sends "Item". It only passed because a success with no
+   receipt/amount used to be marked PAID (gap G2). Key corrected.
+ - payments/tests/test_adjusted_quote_mpesa_amount.py: a wrong amount used to
+   raise ValidationError (rolled back, nothing recorded). It now returns
+   status=needs_review and the Payment is NEEDS_REVIEW. Still never paid.
+ - mpesa_payments/tests.py test_stk_push_returns_pending_not_paid: now asserts
+   checkout_request_id / merchant_request_id are NOT in the response (the row
+   still stores them).
+ - api/test_phase5_offline_partner_quotes.py: the partner "send to client"
+   payload no longer includes checkout_request_id.
+
+------------------------------------------------------------------------------
+Files touched
+------------------------------------------------------------------------------
+ new  payments/callback_security.py — shared gate: secret (path segment or
+      ?token=, hmac.compare_digest), IP allowlist, trusted-proxy client IP,
+      signed_callback_url(), Safaricom default ranges.
+ new  mpesa_payments/migrations/0002_checkout_request_id_nullable.py
+ new  payments/migrations/0003_payment_needs_review_status.py (choices only)
+ new  mpesa_payments/test_audit_callback_and_amounts.py
+ mod  config/settings.py — MPESA_CALLBACK_SECRET, MPESA_CALLBACK_SECRET_REQUIRED
+      (= not DEBUG), MPESA_CALLBACK_ALLOWED_IPS, MPESA_TRUSTED_PROXIES; import-
+      time ImproperlyConfigured when DEBUG=False and secret missing/weak;
+      system check printy.E017/E018/E019.
+ mod  mpesa_payments/views.py — stk-push rework (below); MpesaCallbackView and
+      MpesaTransactionStatusView gated; dispatch_verified_stk_callback():
+      CheckoutRequestID required, ResultCode must be an int, must be owned by
+      a persisted MpesaPayment or MpesaSTKRequest, else 404 + MpesaCallbackLog
+      "REJECTED: …".
+ mod  mpesa_payments/urls.py, api/urls.py — callback/<secret>/, result/<secret>/,
+      mpesa-callback/<secret>/ routes (bare routes kept for ?token= and 403s).
+ mod  api/payment_views.py — legacy MpesaCallbackView gated + uses the same
+      dispatcher (keeps its legacy response body).
+ mod  payments/services.py — handle_stk_callback hardened: match only by
+      CheckoutRequestID (merchant-id fallback removed), payment row locked,
+      final STK request = idempotent no-op (a replayed success still runs the
+      paid-row ManagedJob repair), success needs receipt AND Amount ==
+      Payment.expected_amount == STK amount else needs_review, a success on an
+      already-paid payment (second debit) -> needs_review, failure only fails
+      the Payment when no other prompt is in flight. create_payment_for_quote /
+      initiate_stk_push refuse a payment under review. Daraja CallBackURL signed.
+ mod  payments/models.py — Payment.STATUS_NEEDS_REVIEW, MpesaSTKRequest
+      .STATUS_NEEDS_REVIEW, MpesaSTKRequest.IN_FLIGHT_STATUSES.
+ mod  payments/states.py — needs_review -> AWAITING_CONFIRMATION (never paid).
+ mod  mpesa_payments/models.py — checkout_request_id null=True, default=None,
+      unique=True.
+ mod  mpesa_payments/services.py — CallBackURL / ResultURL / QueueTimeOutURL
+      signed with the secret.
+ mod  mpesa_payments/serializers.py — amount optional (ignored for payables);
+      quote_request_id refused; read serializer drops checkout_request_id +
+      merchant_request_id.
+ mod  clients/views.py, api/dashboard_views.py — Daraja ids removed from the
+      signed-out client-link response, the client dashboard list and the
+      partner send-to-client payload.
+ mod  docs/env_vars.md, docs/DARAJA_PRODUCTION_CHECKLIST.md, .env.example.
+ mod  tests listed above; results.txt.
+
+------------------------------------------------------------------------------
+Choices and why
+------------------------------------------------------------------------------
+ 1. Where the secret goes: appended automatically as the final path segment of
+    every URL handed to Daraja, so MPESA_CALLBACK_URL keeps its documented
+    canonical value and the existing E010-E012 checks still apply. ?token= is
+    also accepted for operators who prefer to register the URL by hand.
+ 2. "Production" = DEBUG=False (MPESA_CALLBACK_SECRET_REQUIRED = not DEBUG).
+    This matches the existing MPESA_FORCE_STUB guard. Fail closed twice: the
+    settings import raises without a >=32-char secret, and at request time a
+    missing secret with REQUIRED=True rejects every callback with 403.
+    (The import-time raise is skipped for test settings; the system check
+    still runs.)
+ 3. IP allowlist: enforced whenever MPESA_CALLBACK_ALLOWED_IPS is set; in
+    production with it unset, the published Safaricom Daraja callback IPs are
+    enforced. I could not re-check that list online from this sandbox (no
+    access to Safaricom's site), so it is overridable and documented as
+    "keep in sync". Client IP = REMOTE_ADDR unless the peer is in
+    MPESA_TRUSTED_PROXIES (default loopback = the local nginx); only then is
+    X-Forwarded-For walked right-to-left. A raw XFF is never trusted.
+ 4. Responses to Daraja: 403 for an auth failure, 404 for an unknown
+    CheckoutRequestID, 400 for a missing id / non-integer ResultCode, 200 for
+    applied or already-final. A processing exception after verification is
+    logged and still answered 200 so Daraja does not replay it.
+ 5. Status-query results (Result shape, /result/) carry no CheckoutRequestID.
+    They are matched by the receipt we persisted. An unknown receipt is
+    logged and ignored with 200. This keeps the existing "ResultURL always
+    answers 200" contract once the gate has been passed.
+ 6. needs_review on the canonical Payment needed a new status: Payment had no
+    such state, and raising (the old behaviour) rolled back and lost the
+    evidence that money moved. It maps to "awaiting confirmation", and a
+    payment under review cannot be re-pushed or replaced until an operator
+    resolves it.
+ 7. Server-side amount for managed_job_id: source_quote's
+    QuoteFinancialSplit.client_total. A manager-created job with no quote
+    falls back to its frozen ManagedJob.client_total, which is still server-
+    side. A job with neither returns 409; an already-settled job returns 409.
+    Ownership uses the existing _can_trigger_managed_job_payment
+    (managed_job.client_id == request.user), consistent with CANONICAL_MODELS
+    (ManagedJob.client is the payer). No conflict with CANONICAL_MODELS found.
+ 8. quote_id is routed through accept_quote_for_payment plus the canonical
+    payments STK flow, gated on _can_accept (403) and the request artwork gate.
+    It no longer creates an MpesaPayment, so a confirmed callback settles the
+    quote and creates its ManagedJob. quote_request_id is refused, because a
+    request has no price and nothing ever settled it.
+ 9. The ad-hoc stk-push with no payable keeps the client amount: nothing is
+    settled by it, and the existing checkout tests rely on it.
+10. checkout_request_id exposure: removed where no caller consumes it (the
+    cashier read serializer, since the UI polls by payment id; the signed-out
+    client link; the client dashboard list; the partner send-to-client
+    payload). Kept for the authenticated payer's canonical STK/detail
+    responses, because ManagedJobMpesaQueryView takes it as input from the job
+    checkout UI. Forged use of it is now blocked by the secret + IP gate.
+11. Migration: AlterField to null=True first, then RunPython "" -> NULL. NULLs
+    never collide on a UNIQUE index (SQLite/PostgreSQL). The reverse is
+    guarded (refuses if more than one NULL row exists).
+
+==============================================================================
+Prompt 2 / STEP 0 — audit(#1b): admin resolution for needs_review payments
+==============================================================================
+Starting point (same command/env as Prompt 0): Ran 1596, OK.
+After step 0: Ran 1605, OK (+9 tests).
+
+Investigation: no safe way out existed.
+ - payments/admin.py "simulate_sandbox_payment_confirmation" only works when
+   MPESA_ENV=sandbox and refuses any status other than pending/processing/paid.
+ - mpesa_payments/admin.py can only *flag* for review (and query Daraja).
+ - The mpesa_reconcile / mpesa_verify_receipt commands skip needs_review rows
+   or are read-only.
+ So a needs_review canonical Payment blocked the quote permanently, because
+ create_payment_for_quote refuses while one exists.
+
+Added:
+ - payments/review_resolution.py: resolve_canonical_payment() and
+   resolve_mpesa_payment().
+     confirm_paid  needs receipt_number + amount. amount must equal the
+                   server-stored expected amount unless override_reason is
+                   given. The receipt must match the receipt Daraja reported
+                   (case-insensitive) and must not already settle another
+                   PAID payment. Canonical path = payments.services.
+                   mark_payment_paid (creates/unlocks the ManagedJob and
+                   notifies); cashier path = the mpesa_payment_confirmed signal
+                   (mpesa_payments.receivers settles the ManagedJob).
+     mark_failed   Payment -> failed, its needs_review STK requests -> failed.
+                   A fresh payment + STK push is then allowed.
+   A reason is always required. Only is_superuser may resolve, enforced in
+   the service as well as the view. Every resolution writes a Django admin
+   LogEntry via api.admin_audit.record_admin_audit with actor, resolved_at,
+   reason, previous status, expected/reported/confirmed amounts, receipt and
+   override reason, plus a WARNING log line.
+ - payments/services.mark_payment_paid: new keyword amount_override_reason.
+   Only the audited resolver passes it; every automated caller keeps the
+   strict received == expected check.
+ - api/admin_ops_views.py + api/urls.py (same style and permissions as the
+   other admin_ops endpoints: IsAuthenticated + IsSuperUser):
+     GET  /api/admin/payments/needs-review/
+     POST /api/admin/payments/<id>/resolve-review/
+     POST /api/admin/mpesa-payments/<id>/resolve-review/
+   Body: resolution=confirm_paid|mark_failed, reason, receipt_number, amount,
+         override_reason.
+ - Choice: an API endpoint rather than a Django-admin action. An action would
+   need a custom intermediate form to collect receipt/amount/reason, and the
+   admin_ops endpoints are what the ops dashboard already uses.
+   "super_admin/platform admin" = is_superuser (same as ADMIN_PERMISSIONS).
+   is_staff alone is refused (tested).
+
+Tests: payments/tests/test_needs_review_resolution.py (9). Run against the
+pre-step-0 tree they fail 9/9 (8 FAIL + 3 ERROR, counting subtests); all pass
+after.
+  - non-admin (client, manager, is_staff) -> 403 on list + resolve, no change
+  - admin list
+  - confirm_paid -> PAID, STK success, ManagedJob created + CONFIRMED, audited
+  - amount mismatch needs override_reason; with override -> paid + audited
+  - wrong receipt / missing reason -> 400
+  - mark_failed -> fresh STK push accepted (was 400 while under review)
+  - resolving twice -> 400
+  - cashier MpesaPayment: non-admin 403; confirm_paid settles the ManagedJob
+
+Files: payments/review_resolution.py (new), payments/services.py,
+       api/admin_ops_views.py, api/urls.py,
+       payments/tests/test_needs_review_resolution.py (new), results.txt
+
+==============================================================================
+Prompt 2 — #3 privilege escalation, #4 Google OAuth + throttles,
+           #5 ProductionOrder tenancy
+==============================================================================
+Branch: security/audit-remediation (checked with `git branch --show-current`).
+Suite command: the one recorded in Prompt 0 (venv + MPESA_* sandbox vars).
+
+Counts
+  before (HEAD e4175cb, after STEP 0): Ran 1605 tests ... OK
+  after:                               Ran 1654 tests ... OK
+    (+48 in accounts/test_audit_roles_oauth_tenancy.py, +1 in
+     accounts/test_shop_name_persistence.py)
+  without MPESA_* vars:                Ran 1654, failures=2 errors=8. These are
+    the same 10 environmental items as in Prompt 1:
+    mpesa_payments.test_transaction_status x5, pricing.test_whole_kes_rounding
+    x4, quotes.test_artwork_review_gate x1.
+  Prod `manage.py check` (DEBUG=false, APP_ENV=production): no new issues.
+    Only the existing SMTP-credential errors (E002/E003, because no SMTP
+    creds were passed) and the sandbox info W902.
+
+Fail-before proof: I ran the new test module against the pre-fix tree
+(`git stash -u`, then copied the test file back in): 47 of 48 fail (38 FAIL +
+8 ERROR). The one that passes, test_resaving_the_same_number_keeps_verification,
+is a guard that re-saving the same number does NOT drop verification. It
+protects the new reset-on-change rule from over-correcting, so it is expected
+to pass both before and after.
+
+Decisions confirmed with the user before coding
+  docs/CANONICAL_MODELS.md does not define a sign-up allowlist or an
+  "applicant" state, and no model has an applicant field, so I asked:
+  (a) Printer sign-up = "applicant without a shop". POST
+      /api/auth/register/production/ creates a client-role account and creates
+      no shop (shop_name is accepted and ignored). The printer creates the shop
+      later via POST /api/shops/, which already starts it private
+      (is_public=False, pricing_ready=False) until an admin approves it.
+      role=production on any registration route returns 400.
+  (b) Marketplace for production accounts = "own shop only". A shop owner
+      passes PrintManagerMarketplaceAccess only on shop-scoped views for a shop
+      it owns. The roster, nearby search and other shops' rate cards return
+      403 unless the account is also a verified, active manager or
+      super_admin. Without this, a rejected manager could get around the
+      verification check just by creating a shop. CANONICAL_MODELS also says
+      shop actors never see competing shop rates.
+
+------------------------------------------------------------------------------
+#3 Privilege escalation
+------------------------------------------------------------------------------
+- accounts/services/roles.py: new SELF_SERVICE_SIGNUP_ROLES = {client, partner}.
+  get_public_assignable_roles() now returns it (it was client, partner,
+  production). partner means a manager applicant.
+- accounts/serializers.py
+  * UserSerializer (PATCH /api/auth/me/ and /api/users/me/): role,
+    partner_profile_enabled and capability_overrides are read_only. They are
+    silently ignored rather than rejected, so a frontend that PATCHes the whole
+    user object keeps working. update() also pops them defensively. The
+    set_account_role call is gone.
+  * UserCreateSerializer: partner_profile_enabled and capability_overrides are
+    read_only. role stays writable but is validated against the allowlist, so
+    super_admin, admin, staff, production, printer and shop_owner return 400.
+    Partner sign-up sets the profile to manager_verified=False explicitly. The
+    sign-up shop creation is removed. A printer applicant does not claim guest
+    drafts (Law 9.4 behaviour kept through signup_intent).
+  * Phone: UserSerializer.validate_phone normalises, so an invalid number is a
+    400. update() writes the phone via set_profile_phone().
+- accounts/views.py: ProductionRegisterView now has default_role=client,
+  role_source=signup_printer_applicant, and returns
+  signup_intent="printer_applicant".
+- api/permissions.py: PrintManagerMarketplaceAccess passes for
+  * super_admin, or
+  * a partner whose profile has manager_verified AND broker_profile_active
+    (new helper is_verified_active_manager), or
+  * a production account on a view whose shop_slug/slug is a shop it owns.
+  Pending (unverified, active), rejected (inactive) and verified-but-suspended
+  managers get 403.
+- Phone writes. Every write now goes through accounts.services.phone.
+  set_profile_phone:
+  * set_profile_phone itself now clears phone_verified_at when the normalised
+    number changes or is cleared. Re-saving the same number keeps it, and so
+    does a legacy row with no phone_normalized whose phone normalises to the
+    same number.
+  * Removed direct profile.phone writes in: api/payment_views.py (x2),
+    mpesa_payments/views.py, api/views.py ManagerProfileBundleView
+    (setattr phone), accounts/serializers.py UserSerializer.
+  * accounts/admin.py UserProfileAdmin: phone_normalized and phone_verified_at
+    are read-only. A phone edit is validated, then routed through
+    set_profile_phone.
+  * After the change, grep finds no `profile.phone =` writes outside
+    set_profile_phone (only throwaway _verify_*.py scripts at the repo root).
+- Only admin surfaces can change role, capabilities and the partner flag:
+  Django admin (UserAdmin) and the existing /api/admin/managers/... decisions
+  for verification.
+- Pre-existing bug found and fixed because the roster could not be tested
+  otherwise: api/serializers.py PublicShopListSerializer.get_finishing_tags
+  did select_related("category") on FinishingRate, which has no category FK.
+  That raised FieldError, so GET /api/public/shops/ returned 500 whenever any
+  public shop existed. I removed the select_related; behaviour is otherwise
+  unchanged.
+
+------------------------------------------------------------------------------
+#4 Google OAuth (POST /api/auth/social/google/) + scoped throttles
+------------------------------------------------------------------------------
+- New dependency: google-auth==2.63.1, plus pyasn1 and pyasn1_modules, added
+  to requirements.txt. The token is verified with
+  google.oauth2.id_token.verify_oauth2_token, which checks signature (Google
+  certs), expiry, issuer (accounts.google.com) and aud == GOOGLE_CLIENT_ID.
+  The tokeninfo HTTP call and the `requests` import are removed.
+- config/settings.py: GOOGLE_CLIENT_IDS is read from GOOGLE_CLIENT_ID
+  (comma-separated for web, Android, etc.).
+  * Unset: 503 {"code": "google_oauth_not_configured"}. This fails closed,
+    and no account is created or looked up.
+  * Explicit dev/test override: GOOGLE_OAUTH_DEV_SKIP_AUDIENCE=true skips ONLY
+    the audience check. It is honoured only when DEBUG=true and APP_ENV is
+    local/dev/test; signature, issuer, expiry and email_verified are still
+    enforced (tested).
+- email_verified must be true (bool true or the string "true").
+- Lookup: by SocialAccount (provider=google, uid=sub) first, then
+  User.email__iexact. If two or more accounts match case-insensitively, the
+  response is 409 duplicate_email_accounts and nothing is merged.
+  EmailAddress is also matched with iexact, so no case-variant duplicate rows
+  are created.
+- Inactive account: 403 account_inactive, and no tokens are issued.
+- Role: chosen ONLY when a new account is created, and only from the
+  allowlist. Anything else falls back to client, and partner starts
+  unverified. Existing accounts never have assign_role or the partner flag
+  touched (the old code called assign_role on every login, which could
+  demote a super_admin's stored role). New accounts get an unusable password.
+- Duplicate report: `python manage.py report_duplicate_emails
+  [--fail-if-any] [--unmasked]` (new, read-only). The equivalent SQL is in
+  the command docstring. The existing `normalize_user_emails` dry run also
+  lists collision groups.
+- Throttles: accounts/throttling.py AuthScopedRateThrottle.
+  * It is a ScopedRateThrottle keyed by the real client IP: X-Forwarded-For
+    is trusted only from MPESA_TRUSTED_PROXIES, reusing
+    payments.callback_security.resolve_client_ip. DRF's stock get_ident uses
+    raw XFF when NUM_PROXIES is unset, which would let a client pick a fresh
+    bucket on every request.
+  * Rates are read from settings at request time.
+  * Scopes and defaults, each overridable with THROTTLE_RATE_<SCOPE>:
+
+      Scope                        Default    Endpoints
+      auth_login                   10/min     login/, token/
+      auth_register                10/hour    register/, register/client|partner|production/
+      auth_password_reset          5/hour     password-reset/
+      auth_password_reset_confirm  10/hour    password-reset/confirm/
+      auth_email_resend            5/hour     resend-confirmation/, email/resend/
+      auth_google_login            20/min     social/google/
+      auth_invite_claim            10/hour    client-invites/claim/
+
+  * OTP send/verify: the only OTP endpoints are the client-link ones
+    (/api/client-portal/links/<token>/otp/request|verify/). They were already
+    throttled (client_otp_request 5/hour, client_otp_verify 20/hour) but keyed
+    on the raw X-Forwarded-For. clients/throttling.py now uses the same
+    trusted-IP key.
+  * config/test_settings.py raises ONLY the auth_* rates. The test run shares
+    one locmem cache, so production rates would make unrelated tests return
+    429. The throttle tests override the rates back down to prove that each
+    endpoint returns 429 after its limit.
+
+------------------------------------------------------------------------------
+#5 ProductionOrder tenancy (/api/production-orders/)
+------------------------------------------------------------------------------
+- production/views.py
+  * New IsShopPrinterOrPlatformAdmin replaces bare IsAuthenticated.
+    View level: an authenticated shop owner or a platform admin
+    (is_staff/is_superuser). Object level: obj.shop.owner == user, or a
+    platform admin.
+  * get_queryset filters to shop__owner=user for non-admins, so another
+    shop's order is 404 on retrieve, PATCH and DELETE.
+- production/serializers.py ProductionOrderWriteSerializer
+  * shop is read-only and resolved server-side:
+    - With a quote: if the quote has JobAssignments, the shop must be one of
+      the assigned shops; otherwise it must be quote.shop. The requester must
+      own it (admins exempt). Otherwise 400 "This quote does not belong to
+      your shop".
+    - Without a quote: the printer's only shop. A printer with several shops
+      must create from a quote. Admins must always pass a quote.
+  * A client-sent shop that differs from the resolved one returns 400.
+  * PATCH that changes shop or quote returns 400 (the order cannot be moved).
+- The existing POST /api/sent-quotes/<id>/create-job/ already checked
+  quote.shop.owner. It now works without the client sending shop.
+
+------------------------------------------------------------------------------
+Tests added: accounts/test_audit_roles_oauth_tenancy.py (48)
+------------------------------------------------------------------------------
+- SelfServicePrivilegeFieldTests: PATCH /api/auth/me/ and /api/users/me/ with
+  role, partner_profile_enabled or capability_overrides leaves the stored
+  values unchanged.
+- RegistrationRoleAllowlistTests:
+  * super_admin, admin, staff, production, printer and shop_owner return 400
+    on all four register routes.
+  * Flags and overrides are ignored.
+  * A printer applicant gets no shop and no production role.
+  * A manager applicant starts unverified and gets 403 on the roster.
+- MarketplaceManagerVerificationTests:
+  * Pending, rejected and suspended managers get 403 on /api/public/shops/
+    and /api/shops/<slug>/rate-card/. Verified managers get 200.
+  * A rejected manager who owns a shop sees only its own rate card.
+  * A printer sees only its own rate card.
+  * A client gets 403; a super_admin gets 200.
+- CanonicalPhoneWriteTests:
+  * PATCH me phone goes through set_profile_phone (spy): phone_normalized
+    is set and phone_verified_at reset.
+  * The same number keeps verification.
+  * An invalid number returns 400 and changes nothing.
+  * The manager-profile phone and both payment save-phone helpers go
+    through the canonical writer.
+- GoogleLoginTests. These use real verify_oauth2_token with a throwaway RSA
+  key and patched _fetch_certs; requests.get is patched to fail so nothing
+  reaches the network.
+  * Valid token: 200.
+  * Wrong aud, wrong iss, bad signature or expired token: 400.
+  * GOOGLE_CLIENT_ID unset: 503.
+  * The dev override is ignored outside DEBUG, and when active it skips only
+    aud.
+  * email_verified false: 400. Inactive user: 403.
+  * An existing super_admin keeps its role, is_staff and is_superuser.
+  * An existing client cannot become partner.
+  * Name@x and name@x resolve to one account.
+  * Case-duplicate accounts get 409 and are not merged.
+  * A new user's role comes from the allowlist only.
+- DuplicateEmailReportTests: the command lists the groups, merges nothing,
+  and --fail-if-any exits non-zero.
+- AuthThrottleTests:
+  * 429 after the limit for login, register, password reset, password reset
+    confirm, Google login, and client OTP request/verify.
+  * A spoofed X-Forwarded-For from an untrusted peer does not reset the
+    bucket.
+  * Production rates exist for every scope.
+- ProductionOrderTenancyTests:
+  * A user cannot create for another shop (shop id or foreign quote).
+  * The shop is resolved server-side.
+  * A quote reassigned to another shop is refused for the original shop and
+    allowed for the assigned one.
+  * An order cannot be moved to another shop or quote.
+  * List, retrieve, PATCH and DELETE are tenant-scoped (404).
+  * A non-printer gets 403; a platform admin sees all orders.
+
+Existing tests updated (the behaviour change is intended):
+- accounts/test_shop_name_persistence.py: the helper used
+  role=production on /register/ and expected sign-up to create a public shop.
+  It now follows the applicant flow (/register/production/, then POST
+  /api/shops/), asserts the shop starts private, and has a new test that
+  sign-up alone creates no shop and no production role.
+- api/test_public_shop_quote_preview.py and api/test_direct_shop_submission.py
+  (preview test only): the manager in the fixture is now
+  manager_verified=True, because the marketplace gate requires it.
+
+------------------------------------------------------------------------------
+Frontend follow-ups (printy_ui is not checked out in this sandbox, so this
+list comes from the API contract; frontend NOT edited)
+------------------------------------------------------------------------------
+1. Printer sign-up (/api/auth/register/production/ or role=production):
+   * Do not send role=production; it now returns 400.
+   * The response now includes signup_intent="printer_applicant", and the
+     account starts as client with NO shop. After login, send the user to the
+     "create your shop" step (POST /api/shops/ with name). shop_name sent at
+     sign-up is ignored.
+   * Expect the shop to be private until an admin approves it.
+2. Manager sign-up (/register/partner/ or role=partner): the account starts
+   unverified.
+   * The roster (/api/public/shops/), nearby search, rate cards and shop
+     previews return 403 until staff verify it.
+   * Show a "pending verification" state instead of an error.
+3. Any settings or profile screen that PATCHes role, partner_profile_enabled
+   or capability_overrides on /api/auth/me/ or /api/users/me/ (for example a
+   "become a manager" toggle): those fields are now ignored. Route that
+   through an admin or application flow instead.
+4. Profile phone edits now return 400 for non-Kenyan or invalid numbers.
+   Changing the number clears is_phone_verified, so prompt for
+   re-verification.
+5. Google sign-in:
+   * The server must have GOOGLE_CLIENT_ID set to the same client id that
+     the frontend uses; otherwise the endpoint returns 503
+     google_oauth_not_configured.
+   * Handle 409 duplicate_email_accounts ("contact support"), 403
+     account_inactive, and 400 google_email_unverified / invalid_google_token.
+   * `role` is honoured only for brand-new accounts and only client or
+     partner.
+6. Handle 429 on login, register, password reset, resend confirmation, Google
+   login and invite claim. Read the Retry-After header.
+7. Printer accounts no longer see other shops' rate cards or the shop roster.
+   Hide those screens for production-only accounts.
+8. Production orders: do not send `shop` when creating; send `quote` (or
+   nothing for a single-shop printer). PATCH can no longer change shop or
+   quote.
+
+Known follow-ups (backend, not in scope here)
+- Account pre-hijacking: Google login links to an existing account whose email
+  was never verified and marks that email verified. Someone who pre-registered
+  the victim's address with a password would keep that password. Consider
+  forcing a password reset, or refusing the link, when the existing
+  EmailAddress was unverified.
+- ShopViewSet.create stays self-service (any user can become production for
+  their own new private shop). Gating it on approval is a product decision.
+
+Files touched
+  accounts/services/roles.py, accounts/serializers.py, accounts/views.py,
+  accounts/services/phone.py, accounts/admin.py, accounts/throttling.py (new),
+  accounts/management/commands/report_duplicate_emails.py (new),
+  accounts/test_audit_roles_oauth_tenancy.py (new),
+  accounts/test_shop_name_persistence.py, api/permissions.py, api/views.py,
+  api/payment_views.py, api/serializers.py, api/test_public_shop_quote_preview.py,
+  api/test_direct_shop_submission.py, mpesa_payments/views.py,
+  clients/throttling.py, production/views.py, production/serializers.py,
+  config/settings.py, config/test_settings.py, requirements.txt, .env.example,
+  docs/env_vars.md, docs/api_contract.md, results.txt
+
+==============================================================================
+Prompt 3 / STEP 0 (#3b): role visibility, tests and leak fixes
+==============================================================================
+Branch: arena/9db94b23-printy-api (cut from main 70fd070). The sandbox reset
+deleted security/audit-remediation and its commits. The audit files survived
+as uncommitted changes, so they were re-committed as 8f7d92e ("audit(#0-#5):
+restore ..."). The abort rule covers only master/main, so work continued on
+this branch. Nothing was pushed.
+
+Start: 1654 tests, OK.  End: 1664 tests, OK (same command as above, with the
+MPESA_* env vars).
+
+Product rule (as given, unchanged)
+- Signed-out visitors and clients find MANAGERS, never printers or shops: no
+  shop name, slug, id, location, contact, shop-level cost or rate card.
+- Printers/shops are visible only to verified, active managers and super_admin.
+  A printer owner sees only their own shop.
+- Printers never see client identity or the client's total. Clients never see
+  production cost.
+
+Survey: every surface that can return shop or printer data
+(R = covered by tests/test_audit_role_visibility_matrix.py)
+Shop / printer data
+  R GET  /api/public/shops/                      PrintManagerMarketplaceAccess (Prompt 2)
+  R GET  /api/public/shops/<slug>/ , /catalog/ , /custom-options/
+  R GET  /api/shops/<slug>/rate-card/ , /rate-card-for-calculator/
+  R GET  /api/shops/nearby/
+  R POST /api/public/shops/<slug>/calculator-preview/ , /quote-preview/
+  R GET  /api/dashboard/partner/production-shops/  (FIXED, see below)
+  R POST /api/partner/production-matches/          (FIXED, see below)
+    POST /api/partner/production-options/ uses the same gate as production-matches, so it is fixed too
+Public discovery and calculator (must stay usable for anonymous users and clients)
+  R POST /api/public/recommended-managers/
+  R GET  /api/public/print-managers/recommended/ , /featured/
+  R GET  /api/intake/recommended-managers/  (authenticated client)
+  R GET  /api/calculator/config/
+  R POST /api/calculator/public-preview/ , /api/public/calculator/preview/
+  R POST /api/public/match-shops/  (_public_preview_response masks shops as "Production option N")
+  R GET  /api/public/products/ , /api/public/price-range/ , /api/seo/products/
+  R GET  /api/share/<token>/  (QuoteSharePublicSerializer; no shop_name)
+Quotes and quote requests (client)
+  R /api/dashboard/client-home/ ; /api/dashboard/client/quotes/ (+ <id>/)
+  R /api/quote-requests/ (+ <id>/ , <id>/brief/ , <id>/whatsapp-handoff/)
+  R /api/client/requests/<id>/ ; /api/client/responses/ ; /api/calculator/buyer-quotes/
+  R /api/client/messages/ ; /api/buyer/locked-managers/
+Jobs and tracking
+  R /api/managed-jobs/ (+ <id>/ , card/ , events/ , payments/)
+  R /api/dashboard/client/jobs/ , tracked-jobs/ , payments/ (+ detail)
+  R /api/track/<MJ-ref|QR-ref>/  (entitled user, and signed out with phone)
+  R /api/public/managed-jobs/track/<token>/
+    /api/public/jobs/<token>/  returns 410 (disabled)
+Printer side
+  R /api/dashboard/production-home/ ; /production/jobs/ (+ <id>/) ; /production/payments/
+  R /api/dashboard/printshop/jobs/<id>/breakdown/ ; /api/shop/assignments/
+  R /api/shops/<slug>/incoming-requests/ (+ <id>/ , brief/ , whatsapp-handoff/)
+  R /api/shops/<slug>/quotes/ ; /api/shop/messages/ ; /api/production-orders/
+  R /api/dashboard/shop-home/ ; /api/dashboard/counts/ ; /api/dashboard/needs-my-action/
+Notifications and emails
+  R /api/me/notifications/  (rendered by notifications/rendering.py)
+  R quotes/messaging.py email payloads: quote_request_created and
+    quote_accepted (to the shop owner), quote_response_sent (to the client)
+  Checked by reading only: the notify()/notify_quote_event() messages in
+    jobs/*, payments, mpesa use references only. The client-facing messages
+    already pass shop names through project_identity(CLIENT_ACTOR).
+
+Matrix test: tests/test_audit_role_visibility_matrix.py (new, 10 tests)
+  Roles: anonymous, client, unverified manager, rejected manager, verified
+  manager, printer (own shop), printer (other shop), super_admin.
+  The fixture is one brokered job with distinctive values: shop name, slug,
+  phone, emails and address; client name, email and phone; client total 9137,
+  production cost 5261, shop payout 5011. Every response body is scanned for
+  those values (amounts are matched as whole numbers) and for shop-id,
+  cost and client-identity keys.
+  Fail-before: with the source fixes stashed, 5 of the 10 tests fail (4
+  failures, 1 error). The other 5 are guardrails that already passed after
+  Prompt 2: shop surfaces per role, public surfaces, discovery, client
+  emails, and the roster test's verified-manager access.
+
+Leaks found and FIXED (field -> endpoint)
+ 1. production_cost, gross_margin, manager_margin and margin_percent were
+    sent to the client on GET /api/dashboard/client/quotes/.
+    shop_name was the real shop name on the same endpoint.
+    Fix: BaseRoleDetailView._quote_row(client_view=True) and
+    _quote_partner_pricing_payload(client_view=True), used by
+    ClientQuoteListView. The keys stay in the response but are null, so the
+    row shape does not change. shop_name now reads "Verified Print Partner"
+    (or "Awaiting production match").
+ 2. The shop phone number reached clients through whatsapp_url and phone on
+    GET /api/dashboard/client/quotes/<id>/, /api/client/requests/<id>/,
+    /api/quote-requests/<id>/whatsapp-handoff/ and brief/
+    (quotes/request_brief.build_quote_request_whatsapp_handoff).
+    Fix: the buyer is now sent to the assigned manager's
+    profile.manager_whatsapp. If none is set, available=false with reason
+    "manager_whatsapp_not_set". The shop phone is never used.
+ 3. The shop id appeared in matched_shops[].id on
+    /api/quote-requests/<id>/brief/ for clients. It is now null; the slug was
+    already "partner".
+ 4. The client's phone reached printers through whatsapp_url and phone on
+    /api/shops/<slug>/incoming-requests/<id>/whatsapp-handoff/ and brief/.
+    The client's name, email and phone also appeared in brief.buyer.
+    Fix: the shop handoff now returns available=false with reason
+    "client_contact_private", and the shop brief uses
+    include_buyer_contact=False. This matches QuoteRequestShopSerializer,
+    which already hid buyer identity.
+ 5. The client's name was in emails to the shop owner (quote_request_created
+    and quote_accepted: greeting, "Buyer"/"Client" rows).
+    Fix: quotes/messaging._build_email_payload projects the name with
+    project_client_identity(actor=SHOP_ACTOR), which gives "Client".
+ 6. The client's name was in printer in-app notifications:
+    * stored messages in api/quote_views.py (submit, reply),
+      api/workflow_views.py (quote follow-up reply),
+      quotes/builder_service.py and quotes/services_workflow.py;
+    * rendered titles in notifications/rendering.py (_render_new_request
+      showed it to VIEWER_SHOP; _render_clarification as well).
+    Fix: the messages now say "a client" / "The client", and the renderer no
+    longer shows the client name to the shop viewer.
+ 7. Unverified and rejected managers could list the whole printer roster on
+    GET /api/dashboard/partner/production-shops/. They could also reach
+    POST /api/partner/production-matches/ and production-options/.
+    Fix: PartnerProductionShopListView.has_dashboard_access and
+    workflow_views._can_source_calculator_production now also require
+    is_verified_active_manager. Verified managers still get 200.
+ 8. Another printer's job on GET /api/dashboard/production/jobs/<id>/ returned
+    an unhandled DoesNotExist (500). It now returns 404.
+
+Confirmed still working for anonymous users and clients (asserted in tests):
+public/recommended-managers, print-managers/recommended and featured,
+intake/recommended-managers (client), calculator/config,
+calculator/public-preview, public/calculator/preview, public/match-shops,
+public/products, price-range, seo/products, public tracking by token and by
+phone, share links.
+
+Existing test fixtures updated: their partner users are now verified, because
+the roster and production matching require it. Files:
+api/test_phase4_manager_production_sourcing.py, api/test_production_matching.py,
+tests/test_law_9_buyer_only_actions.py, tests/test_step9_backend_workflow.py and
+tests/__init__.py.
+
+Recorded, NOT fixed (large change or UI contract)
+ a. /api/partner/quotes/preview/ and /api/partner/quotes/create/ check only
+    has_capability("can_source_jobs"). capabilities.py grants that to every
+    partner and every production account. The preview prices from the
+    caller-supplied pricing_snapshot, so no rate card leaks. However, a
+    printer or unverified manager can still confirm that a shop id exists
+    (the serializer validates the shop pk). Fixing it means changing what
+    can_source_jobs means, which affects many callers.
+ b. Legacy direct-to-shop write paths are still there: a client creating a
+    QuoteRequest with a `shop`, the shop incoming-requests inbox, and
+    quote_request_created emails to the shop owner. Shop ids are no longer
+    exposed to clients, so these are hard to reach. Removing them is a
+    product and UI change.
+ c. docs/QUOTE_SERIALIZERS.md says /api/share/<token>/ returns shop_name. The
+    code does not (documentation drift).
+ d. The partner dashboard home (/api/dashboard/partner-home/) shows real shop
+    names to any partner, including unverified ones, but only for that
+    partner's own jobs and requests. Unverified managers get no assignments,
+    so this is accepted.
+
+Frontend follow-ups (printy_ui, not edited)
+ 1. The client quote list returns null for production_cost, gross_margin,
+    manager_margin and margin_percent, and shop_name is the masked label.
+    Remove any client UI that showed these.
+ 2. WhatsApp handoff: buyers are now routed to the manager's WhatsApp. There
+    are new reason codes, "manager_whatsapp_not_set" (buyer) and
+    "client_contact_private" (shop). "shop_whatsapp_not_public" is no longer
+    returned.
+ 3. Shop request brief: buyer.name, email and phone are now empty strings.
+ 4. Unverified managers get 403 on the production-shops roster and on
+    production-matches. Show a "pending verification" state.
+
+Files touched (STEP 0)
+  api/dashboard_views.py, api/quote_views.py, api/workflow_views.py,
+  notifications/rendering.py, quotes/builder_service.py, quotes/messaging.py,
+  quotes/request_brief.py, quotes/services_workflow.py,
+  tests/test_audit_role_visibility_matrix.py (new), plus the fixture files
+  listed above, results.txt
+
+==============================================================================
+Prompt 3 / STEP 1 (#6): enforce the margin floor, honour PlatformFeePolicy
+==============================================================================
+Branch: arena/9db94b23-printy-api (security/audit-remediation no longer
+exists after the sandbox reset; this branch is not master/main). Not pushed.
+
+Counts
+  Before: 1664 tests, OK (commit 748f9d5).
+  After:  1687 tests, OK (+23, all in pricing/test_audit_fee_floor.py).
+  Same command as before (venv + MPESA_* sandbox env, config.test_settings).
+  `makemigrations --check`: no changes.
+
+Naming notes
+  - There is no `compute_split`. The split function is
+    pricing.services.platform_fee_policy.calculate_quote_financials. It is
+    wrapped by calculate_financial_split / create_quote_financial_split /
+    ensure_quote_financial_split.
+  - No law.txt exists. The decision below was checked against
+    docs/CANONICAL_MODELS.md.
+
+The bug
+  Every tier pays the shop production x shop_floor_multiple (A 1.00, B 1.05,
+  C 1.08). It pays the manager min(markup, markup x commission cap), and
+  Printy keeps the residual. A markup smaller than the shop uplift divided
+  by (1 - cap) made the residual negative. Known case: production 20,000,
+  markup 1,000 gives shop 21,600, manager 350, printy_fee -950, against a
+  client_total of 21,000. MIN_MARKUP_MULTIPLE (1.05) was imported in one
+  place, the partner guardrail, and never enforced in the split.
+  Fail-before (code stashed, new tests kept): 16 of the new tests failed
+  (9 FAIL, 7 ERROR). After the fix: 23 OK.
+
+Choice: REJECT, not clamp
+  A markup below the floor raises MarginFloorError, a subclass of both
+  django ValidationError and ValueError. The message gives the minimum
+  markup and minimum client price.
+  Why:
+   - CANONICAL_MODELS.md makes PlatformFeePolicy own the markup caps, and
+     the existing upper cap already rejects ("Manager markup exceeds the
+     policy cap.").
+   - Clamping would silently raise a price the manager typed and may
+     already have shown to a client. The stored split would then disagree
+     with what was quoted.
+   - Subclassing ValueError means callers that already map ValueError to
+     400 (partner preview / respond) report it without changes.
+     api/exception_handlers.py does not convert a Django ValidationError,
+     so views that only caught DRF errors would have returned 500. Those
+     views now catch it (see below).
+
+Floor definition (minimum_manager_markup, new, public)
+  The larger of these two, in whole KES rounded up:
+   1. production x (min_markup_multiple - 1)
+   2. the margin floor, so the Printy fee is never negative:
+      - fee charged: production x (shop_floor - 1) / (1 - commission cap)
+      - fee waived:  production x (shop_floor - 1)
+  It then steps up by KES 1 if whole-KES rounding leaves the residual short.
+  Effective minimums with the default policy:
+    tier A (<1,000):      5.00%, fee waived 5%
+    tier B (<=10,000):    9.09%, fee waived 5%
+    tier C (>10,000):    12.31%, fee waived 8%
+  Invariants are tested over a grid of production 100..500,000, markups
+  0..300%, tiers A/B/C, fee charged and waived. They also cover the
+  broker_client_price entry point, the direct-shop path
+  (production_matching), the public estimate path (calculator_preview) and
+  partner preview. Every accepted split has client_total >= shop + manager,
+  printy_fee >= 0, and shop + manager + printy == client_total.
+
+Runtime now reads PlatformFeePolicy (admin edits take effect)
+  - Added 10 PlatformFeePolicy fields (migration
+    pricing/migrations/0009_platform_fee_policy_tier_parameters.py; the
+    defaults reproduce today's numbers exactly):
+      min_markup_multiple 1.05
+      tier_{a,b,c}_shop_floor_multiple 1.00 / 1.05 / 1.08
+      tier_{a,b,c}_manager_commission_cap_rate 0.60 / 0.45 / 0.35
+      tier_{a,b,c}_max_client_price_multiple 3.00 / 2.50 / 2.00
+    The tier boundaries reuse the existing under_production_threshold
+    (1,000) and high_production_threshold (10,000).
+    PlatformFeePolicy.clean() rejects a policy whose floor cannot be met:
+    max client multiple <= shop floor, a commission cap outside [0, 1), a
+    shop floor < 1 or min_markup_multiple < 1.
+  - The hardcoded tier table in calculate_quote_financials was replaced by
+    _tier_parameters(policy, cost).
+  - Deleted the dead _policy_value() helper.
+  - The module constants MIN_MARKUP_MULTIPLE / TIER_*_MAX_PRODUCTION_COST
+    are kept for importers but now come from the field defaults.
+  - quotes/guardrails.get_partner_markup_min_rate reads the active policy's
+    min_markup_multiple.
+  - quotes/snapshots._POLICY_FIELDS includes the 10 fields, so the
+    pricing_rules_version fingerprint changes when an admin edits them.
+    Existing fingerprints change once; no test depended on the old hash.
+  - Hardcoded fee grep: the only remaining literal was
+    quotes/partner_services.py `production_estimate * Decimal("0.35")`.
+    That is the upper end of the "suggested selling range" UI hint, not a
+    fee, and it never feeds the split. It is now the named constant
+    SUGGESTED_MARKUP_HINT_RATE with a comment saying so.
+    Values in seed_data and the model defaults are allowed.
+
+Callers: 400, not 500
+  - PartnerQuoteSendToClientView (/api/dashboard/partner/quotes/<id>/
+    send-to-client/): both calculate_financial_split calls now return 400
+    {"detail": <floor message>} and store no split.
+  - ManagerQuoteRequestPricingPreviewView catches (ValueError,
+    ValidationError) and returns 400.
+  - api/pricing_views.py (financial preview / PATCH) already caught
+    ValidationError: OK.
+  - workflow_views PartnerQuotePreviewView and the partner respond flow catch
+    ValueError: OK (MarginFloorError is a ValueError with a readable str()).
+  - quotes/acceptance.ensure_quote_financial_split raises ValidationError,
+    which is already handled by the accept views.
+  - Direct-shop default markup 0.20, public estimate x1.75 and marketplace
+    default 75% are all above every floor and below every cap.
+  - build_partner_quote_preview: suggested_selling_range.min used to be the
+    bare production cost, a price the manager could not actually send. It is
+    now production + minimum_manager_markup, honouring the fee waiver.
+
+Own clients pay no Printy fee; prepare/send consistency
+  - fee_waived splits give printy_fee 0, manager_payout = client_total - shop
+    payout, and a lower floor (shop uplift only). This is covered by the new
+    test_known_case_is_also_rejected_when_the_fee_is_waived, the grid, and
+    test_own_client_preview_has_no_printy_fee_and_a_lower_floor. The existing
+    accounts/test_origin_manager_law.py also passes unchanged.
+  - test_prepare_preview_numbers_match_the_split_that_send_stores: the
+    preview's client_price / gross_margin / printy_fee / broker_payout equal
+    calculate_financial_split for the same inputs, and printer + broker +
+    printy == client price.
+  - test_accepted_markup_shows_numbers_that_match_the_stored_split:
+    send-to-client with margin 1,000 on 5,000 stores a split that reconciles,
+    and quote.total == split.client_total == the response
+    final_client_price (6,000; shop 5,250, manager 450, printy 300).
+
+Existing data audit (read-only)
+  New command:
+    python manage.py report_financial_split_anomalies [--fail-if-any]
+  (pricing/management/commands/report_financial_split_anomalies.py). For
+  every QuoteFinancialSplit it flags negative_printy_fee, over_allocated
+  (shop + manager > client_total), does_not_reconcile, negative_payout,
+  shop_below_cost, and below_current_floor (informational; the row may
+  predate the floor). It also lists ManagedJob rows with a negative
+  printy_fee or broker_payout. It never writes; the test confirms a seeded
+  -950 row is reported and left unchanged. The equivalent SQL is in the
+  command docstring.
+  Result here: this sandbox has no production or staging database
+  (settings.py points at Postgres on 127.0.0.1, which is not running). On a
+  fresh migrate + seed_data database it reports "No negative or
+  over-allocated splits found." (0 splits, 0 jobs). ACTION FOR OPS: run the
+  command against production. Any split created before this change with a
+  markup under the tier floor (B < 9.09%, C < 12.31%) will show up as
+  negative_printy_fee. Those rows were deliberately not modified.
+
+Existing tests rewritten (they asserted the bug)
+  - pricing/tests.py test_10001_uses_high_production_policy asserted
+    markup_fee_component == -150. It now asserts that markup 1,000 is
+    rejected, and that markup 2,000 gives production_fee_component 800 and
+    markup_fee_component 500.
+  - pricing/tests.py test_decimal_rounding_is_half_up asserted -6. It now
+    uses markup 300.025, giving manager_markup 300 and
+    markup_fee_component 115.
+  - pricing/test_whole_kes_rounding.py exhaustive sweep: three markups above
+    the floor were added so it still checks > 20 combinations. Floor
+    rejections are skipped like cap rejections.
+
+Drift / findings (recorded, not changed)
+  e. docs/CANONICAL_MODELS.md ("Batch 4 fee policy") still documents the
+     old formula: printer_side_fee = production x printer_fee_rate,
+     broker_margin_fee = margin x broker_margin_fee_rate, and
+     add_platform_fee_on_top. The code uses the tier model above, and those
+     fields are deprecated or unused. The doc needs a rewrite; I did not
+     edit it.
+  f. quotes/guardrails.get_partner_markup_max_rate still uses
+     maximum_manager_markup_multiple (2.00) for every tier. The split's real
+     cap is per tier (A 3.00 / B 2.50 / C 2.00). The split is authoritative
+     and rejects anything over its cap, so the guardrail is just stricter
+     for A and B. Aligning them changes the partner UI range.
+  g. Dead PlatformFeePolicy fields: small_job_limit, medium_job_limit,
+     small/medium/bulk_job_max_multiple and add_platform_fee_on_top are read
+     nowhere. Their defaults (2,000 / 4.00 / 3.00) disagree with the live
+     tiers, which can mislead admins. Removing them is a schema change.
+  h. QuantityPricingTier.clean() only requires multiplier >= 1. An admin
+     setting a multiplier below 1 + the tier floor (e.g. 1.05 in tier C)
+     would make the calculator's own suggested price fail the floor. That
+     returns 400, never a negative fee. Seeds use 1.50..6.00, so this is
+     safe today.
+
+Frontend follow-ups (printy_ui, not edited)
+  5. Send-to-client / pricing preview can now return 400 with "Manager
+     markup is below the minimum of KES X ..." Show it inline.
+  6. The partner preview's suggested_selling_range.min is now the minimum
+     sendable price, not the production cost. Use it as the input's lower
+     bound.
+
+Files touched (STEP 1)
+  pricing/models.py, pricing/migrations/0009_platform_fee_policy_tier_parameters.py (new),
+  pricing/services/platform_fee_policy.py, pricing/management/commands/
+  report_financial_split_anomalies.py (new), pricing/test_audit_fee_floor.py (new),
+  pricing/tests.py, pricing/test_whole_kes_rounding.py, quotes/guardrails.py,
+  quotes/snapshots.py, quotes/partner_services.py, api/dashboard_views.py,
+  results.txt
+
+==============================================================================
+Prompt 4 / STEP 0: verify the previous prompt
+==============================================================================
+Branch: the session branch is arena/9db94b23-printy-api (not master/main).
+security/audit-remediation does not exist in this sandbox. Not pushed.
+
+The sandbox was reset again before this prompt. `git log` showed only main's
+70fd070, and commits 8f7d92e, 748f9d5 ("audit(#3b): role visibility tests and
+leak fixes") and 62a8c04 ("audit(#6): ...") were gone. All of their file
+changes were still present as uncommitted edits: 57 files, including
+tests/test_audit_role_visibility_matrix.py and the Prompt 3 sections above.
+Before committing anything, the suite was run with the recorded command:
+1687 tests, OK, the same count as before the reset. The edits were then
+re-committed unchanged as one commit:
+  826ae80 audit(#0-#6): restore audit work after sandbox reset (#1-#5, #3b
+          role visibility tests and leak fixes, #6 margin floor)
+So the #3b work exists (equivalent commit). The Step 0 inventory, role matrix
+and leak fixes are in the "Prompt 3 / STEP 0 (#3b)" section above, and Step 0
+was NOT redone.
+
+==============================================================================
+Prompt 4 / STEP 1 (#10a): test discovery, test_settings, CI
+==============================================================================
+Counts ("zero setup" = `env -i PATH=<venv>/bin:/usr/bin:/bin HOME=/tmp`, no
+.env file, no variables at all)
+
+                                      manage.py test        pytest
+  BEFORE, zero setup                  crash: ImproperlyConfigured  28 collected,
+                                      "Set the SECRET_KEY    140 collection errors
+                                      environment variable"  (same error)
+  BEFORE, SECRET_KEY + test_settings  crash: "CSRF_TRUSTED_ORIGINS must
+    only (DEBUG unset = False)        contain HTTPS origins when DEBUG=False"
+  BEFORE, recorded env (DEBUG=true    1687, OK              1613 collected
+    + MPESA_* vars)                                         (no pytest.ini)
+  BEFORE, recorded env minus MPESA_*  1687, 10 failures (environmental list
+                                      in Prompt 2)
+  AFTER, zero setup                   1707, OK              1707 passed
+  AFTER, recorded env (DEBUG=true)    1707, OK              1707 passed
+  AFTER, fresh venv from              1707, OK              1707 passed
+    requirements.txt
+
+  The two runners now collect IDENTICAL test sets: the 1707 unittest ids from
+  DiscoverRunner.build_suite and the pytest node ids, normalised, diff empty.
+  1707 = 1687 + 13 pytest-style tests the Django runner never ran + 7 new
+  smoke tests.
+
+Why the totals differed, and what was done (no test deleted, skipped or
+weakened)
+  1. pytest's default python_files (test_*.py, *_test.py) skipped 84 tests in
+     tests.py / tests_*.py: client_calculator, common.tests_geo,
+     mpesa_payments, notifications, pricing, production,
+     quotes.tests_law2_overrides, services.tests_role_projection,
+     services.tests_vat_visibility, shops. pytest.ini now uses
+     python_files = test*.py tests*.py *_tests.py; all 84 are collected and
+     pass.
+  2. 13 test methods in tests/test_email_delivery.py (TestEmailDeliveryConfigCheck, 7)
+     and tests/test_mpesa_production_config.py (TestMpesaConfigCheck, 6)
+     were plain pytest-style classes. `manage.py test` NEVER ran them; only
+     pytest did. Both now subclass SimpleTestCase, with the bare asserts
+     unchanged, and both runners run them. All 13 pass.
+  3. tests/__init__.py held 11 tests (Step9BackendWorkflowTestCase), an exact
+     copy of tests/test_step9_backend_workflow.py apart from one comment.
+     Django ran them; pytest never collects package __init__ files. Moved
+     verbatim to tests/test_step9_backend_workflow_legacy_copy.py, and
+     tests/__init__.py is now empty. FINDING: this is a pure duplicate;
+     deleting it is an owner decision.
+  4. api/test_b51b_printer_leaks.py did `from api.test_actor_visibility import
+     ActorVisibilityTestCase` only to read SHOP_FORBIDDEN. pytest therefore
+     ran that class's 8 tests twice; Django de-duplicates. It now imports the
+     module and reads the attribute, so the class runs once in both runners.
+  5. config/test_settings.py matches test*.py. conftest.py lists it in
+     collect_ignore.
+
+test_settings.py: zero-setup import, DEBUG=False, no real secrets
+  - Values set in os.environ BEFORE `from .settings import *`. Nothing was
+    added to config/settings.py.
+    FORCED, overriding the shell and .env (load_dotenv uses override=False,
+    so these win):
+      SECRET_KEY
+      MPESA_ENV=sandbox, MPESA_BASE_URL=sandbox
+      MPESA_CONSUMER_KEY, MPESA_CONSUMER_SECRET
+      MPESA_SHORTCODE=174379 (Safaricom's public sandbox code),
+      MPESA_SHORTCODE_TYPE
+      MPESA_PASSKEY, MPESA_CALLBACK_URL
+      MPESA_CALLBACK_SECRET (47 chars)
+      MPESA_CALLBACK_ALLOWED_IPS="", initiator fields blank
+      EMAIL_HOST_USER/PASSWORD blank
+    Every secret value starts with "test-only-fake-" or "test-only-insecure-".
+    DJANGO_SECRET_KEY, MPESA_STK_CALLBACK_URL, MPESA_RESULT_URL and
+    MPESA_TIMEOUT_URL are removed from the environment.
+    DEFAULTS, used only when unset:
+      APP_ENV=test, ALLOWED_HOSTS
+      CSRF_TRUSTED_ORIGINS / CORS_ALLOWED_ORIGINS (https only, so the
+      DEBUG=False guards pass)
+      FRONTEND_URL=https://printy.ke
+      EMAIL_BACKEND=locmem
+      SECURE_SSL_REDIRECT=false (otherwise every test-client request is a
+      301 when DEBUG=False)
+  - Verified: with a temporary .env containing pretend-real SECRET_KEY,
+    MPESA_CONSUMER_KEY, MPESA_CALLBACK_SECRET and MPESA_ENV=production, the
+    test settings still resolve to the fake values and sandbox. The temporary
+    .env was deleted.
+  - MPESA_CALLBACK_SECRET_REQUIRED = True is pinned after import. The
+    callback gate runs in production (fail-closed) mode whatever DEBUG is,
+    so results no longer depend on the shell.
+  - manage.py: `manage.py test` defaults DJANGO_SETTINGS_MODULE to
+    config.test_settings. Before, it defaulted to config.settings, which
+    needs Postgres and real env. An explicit DJANGO_SETTINGS_MODULE or
+    --settings still wins. Every other command still defaults to
+    config.settings.
+
+Newly discovered failures (zero-setup runs), all diagnosed as test-environment
+coupling, not product bugs
+  a. 9 callback-routing tests posted to the bare callback URL from 127.0.0.1:
+       mpesa_payments.tests StkPushApiTests.test_callback_requires_no_auth
+       mpesa_payments.test_transaction_status TransactionStatusEndpointTests x4
+       payments.tests.test_payment_flow CanonicalPaymentFlowTestCase
+         test_configured_card_callback_url_confirms_canonical_payment,
+         test_configured_callback_card_payment_still_confirmed_by_this_app
+       tests.test_step9_backend_workflow (and its legacy copy)
+         test_full_guest_to_client_to_production_tracking_workflow
+     They passed before only because the shell had DEBUG=true and no
+     callback secret, which leaves the gate open. With a configured secret
+     and DEBUG=False the product correctly returns 403. That is the audit #1
+     fail-closed behaviour, and it is already proven by
+     mpesa_payments/test_audit_callback_and_amounts.py.
+     Fix: these tests now post the way Daraja does in production, to the
+     signed URL (secret as the last path segment) from a published Safaricom
+     IP. The helpers are in the new payments/testing.py:
+     DARAJA_TEST_PEER_IP and daraja_callback_path(). Their assertions are
+     unchanged, and they now exercise the real gate.
+  b. 2 payload-shape tests asserted that the CallBackURL / ResultURL /
+     QueueTimeOutURL sent to Daraja equal the bare URL:
+       mpesa_payments.test_daraja_products
+         test_common_fields_survive_the_product_switch
+       mpesa_payments.test_transaction_status
+         test_sends_documented_payload
+     With a secret configured, the product intentionally sends the signed
+     URL (signed_callback_url). They now expect
+     daraja_callback_path(<documented URL>), and the transaction-status test
+     also asserts that the signed URL starts with the documented one.
+  c. 2 config.test_mpesa_force_stub_guard tests failed against an early
+     draft of test_settings that removed MPESA_FORCE_STUB from the
+     environment. The subprocess they boot inherits
+     DJANGO_SETTINGS_MODULE=config.test_settings. That was my bug, not the
+     test's: the removal was dropped and the tests pass.
+  The 10 "environmental" failures recorded since Prompt 2 (no MPESA_* vars)
+  are gone. No product bug was found, so nothing needed a stop-and-report.
+
+pytest.ini
+  DJANGO_SETTINGS_MODULE = config.test_settings
+  python_files = test*.py tests*.py *_tests.py
+  testpaths = every app package (accounts api catalog client_calculator
+    clients common config contact core gallery inventory jobs locations
+    mpesa_payments notifications payments pricing production quotes services
+    setup shops tests workflow)
+  addopts = -p no:cacheprovider
+  filterwarnings: ignore WhiteNoise's "No directory at: .../staticfiles/".
+  It fired about 800 times because tests never run collectstatic.
+  Remaining warnings: 3 (an unordered-pagination warning and similar).
+
+Smoke tests (new; catalog/ and core/ had none)
+  catalog/tests.py CatalogSmokeTests (4):
+    - /api/public/products/ resolves (name public-all-products)
+    - the list returns 200 to a signed-out visitor and includes a published
+      product but not a draft
+    - ProductCategory and Product save, with auto-slug
+    - CatalogBrowseView returns 200
+  core/tests.py CoreSmokeTests (3). core has no models, views or URLs of its
+  own, so the tests cover what it does provide:
+    - the app is installed
+    - `seed_data` creates and saves an active PlatformFeePolicy, Shop and
+      Product, and the public catalog list then returns 200
+    - QuoteRequest.objects.for_buyer/for_seller (core.querysets) and
+      is_seller/is_buyer (core.permissions) scope by owner
+  FINDING: catalog/urls.py (CatalogBrowseView, name catalog_browse) is not
+  included in config/urls.py or api/urls.py, so the view is unreachable dead
+  code. The smoke test calls the view directly.
+
+CI: .github/workflows/ci.yml
+  Runs on push and pull_request, Python 3.11, ubuntu-latest, pip cache.
+  Steps: pip install -r requirements.txt, pip check,
+  makemigrations --check, pytest -q, manage.py test.
+  permissions: contents: read. No secrets or env vars are used.
+  Python version: nothing in the repo pins one (no runtime.txt, Dockerfile,
+  pyproject or docs mention). 3.11 is what the suite was verified on;
+  Django 5.2 supports 3.10-3.13.
+  Not executed on GitHub (no push). Each step was run locally, in the same
+  order, in a fresh venv: all green.
+
+requirements / google-auth
+  google-auth==2.63.1 is already in requirements.txt. It was added with the
+  audit #4 Google token verification on this branch; main's requirements.txt
+  does not have it. CI installs only requirements.txt, which also includes
+  pytest 9.0.2 and pytest-django 4.11.1.
+  A clean `python3 -m venv` + `pip install --no-cache-dir -r requirements.txt`
+  succeeds, `pip check` reports no broken requirements, and
+  google.oauth2.id_token imports.
+
+Other notes
+  - .gitignore now ignores printy_test.sqlite3(-journal). The test settings'
+    SQLite file is created in the repo root by commands like
+    `makemigrations --check`.
+  - tests/test_mpesa_production_config.py has constants named REAL_KEY,
+    REAL_SECRET and REAL_PASSKEY. They look fabricated: the passkey is a
+    padded variant of the public sandbox passkey, and the key and secret
+    look random. I cannot verify that. If they were ever live Daraja
+    credentials, rotate them. Nothing new was added there.
+
+Files touched (STEP 1)
+  pytest.ini (new), conftest.py, config/test_settings.py, manage.py,
+  .gitignore, .github/workflows/ci.yml (new), payments/testing.py (new),
+  catalog/tests.py (new), core/tests.py (new),
+  tests/__init__.py (emptied) -> tests/test_step9_backend_workflow_legacy_copy.py (moved),
+  tests/test_step9_backend_workflow.py, tests/test_email_delivery.py,
+  tests/test_mpesa_production_config.py, api/test_b51b_printer_leaks.py,
+  mpesa_payments/tests.py, mpesa_payments/test_transaction_status.py,
+  mpesa_payments/test_daraja_products.py, payments/tests/test_payment_flow.py,
+  results.txt
+
+
+================================================================================
+PROMPT 5 / STEP 0 - state check
+================================================================================
+
+Branch: arena/9db94b23-printy-api (not main/master). The prompt names
+security/audit-remediation; this session is pinned to the arena branch, as in
+Prompts 1-4.
+
+git log --oneline (before Prompt 5):
+  18fb86a audit(#10a): test discovery, test_settings, CI
+  826ae80 (restore commit: #1, #2, #3, #4, #5, #3b and #6 re-committed after a
+           sandbox reset wiped the original per-item commits; see Prompt 4)
+  70fd070 (main)
+
+Present: #1 (payments/callback_security.py, signed callback paths), #2, #3,
+#4 (accounts/throttling.py, Google token verification), #5, #3b
+(tests/test_audit_role_visibility_matrix.py), #6
+(payments/review_resolution.py, report_duplicate_emails) and #10a
+(pytest.ini, config/test_settings.py, .github/workflows/ci.yml).
+
+Role visibility matrix: tests/test_audit_role_visibility_matrix.py exists,
+10 tests, all pass. Nothing was written or committed for #3b.
+
+Zero-setup runs (env -i, no .env, no exported variables):
+  python manage.py test --noinput   -> Ran 1707 tests ... OK
+  python -m pytest -q                -> 1707 passed
+
+
+================================================================================
+PROMPT 5 / COMMIT C - audit(#9): uploads and middleware
+================================================================================
+
+New: common/uploads.py, the one validated upload service.
+  validate_upload(file, policy) checks, in order:
+    1. extension, with Django's FileExtensionValidator against the policy's
+       allowlist;
+    2. size: empty files and files over the cap are refused;
+    3. magic bytes: the first bytes must match the extension, so a renamed
+       file (HTML or SVG saved as .png/.pdf, a JPEG named .png) is refused.
+  It raises UploadRejected (a ValueError), because the artwork call sites
+  already turn ValueError into a 400. The client's Content-Type is never
+  trusted; the stored type comes from the checked extension.
+  Signatures: PDF "%PDF-"; AI "%PDF-" or "%!PS" (modern Illustrator files are
+  PDF-compatible, legacy ones PostScript); EPS "%!PS" or the C5 D0 D3 C6 DOS
+  EPS header; PNG 89 50 4E 47 0D 0A 1A 0A; JPEG FF D8 FF; GIF GIF87a/GIF89a;
+  WebP RIFF....WEBP.
+  Policies (types unchanged from what the product accepted before):
+    ARTWORK  pdf jpg jpeg png ai eps, 50MB
+    PROOF    same as artwork (proofs were not validated at all before)
+    AVATAR   jpg jpeg png webp gif, 5MB (the old avatar list)
+  SVG, PSD, TIFF and HTML are not accepted anywhere. SVG is blocked outright
+  rather than served as an attachment.
+
+Wired in:
+  jobs/file_services.py   validate_artwork_upload_file now delegates to the
+                          service; new validate_proof_upload_file, called by
+                          upload_proof_for_managed_job.
+  jobs/views.py           ManagedJobProofUploadView returns 400 (not 500) on
+                          a rejected proof.
+  quotes/pending_artwork.py  validate_pending_artwork_file and
+                          create_pending_artwork_upload use the service. This
+                          also covers QuoteRequestAttachmentUploadSerializer,
+                          which calls validate_pending_artwork_file.
+  api/views.py            ProfileAvatarUploadView: the old code trusted the
+                          client Content-Type and renamed any unknown
+                          extension (including .svg/.html) to .jpg before
+                          storing it publicly. It now validates, and stores
+                          under the checked extension.
+  accounts/validators.py  validate_manager_photo (PIL-based) now also requires
+                          the decoded format to match the extension.
+
+GuestArtworkUploadView / GuestArtworkUploadPreviewView (api/workflow_views.py)
+  - Throttled: AuthScopedRateThrottle (trusted-proxy-aware client IP, from
+    audit #4), scope guest_artwork_upload, 30/hour in production
+    (THROTTLE_RATE_GUEST_ARTWORK_UPLOAD overrides). test_settings raises it
+    like the auth scopes; a test lowers it to prove the 429.
+  - Size cap: the service enforces 50MB, and a Content-Length above
+    50MB + 64KB of multipart framing is refused with 413 before DRF parses
+    or spools the body.
+  - Preview: served inline ONLY for .jpg/.jpeg/.png whose stored bytes still
+    match the extension (re-checked at serve time, so rows stored before this
+    change are covered). PDF, AI, EPS and anything that fails the check are
+    served as_attachment=True. Every preview has X-Content-Type-Options:
+    nosniff, Content-Security-Policy "default-src 'none'; sandbox" and a
+    Content-Type taken from the extension.
+  The other download views (JobFile download, QuoteRequestAttachment
+  download) were already as_attachment=True; SecurityMiddleware's default
+  SECURE_CONTENT_TYPE_NOSNIFF=True also applies.
+
+common/middleware.py - UserLanguageMiddleware
+  - It was already listed after AuthenticationMiddleware, but that only sees
+    session users. API calls use JWT, which DRF resolves inside the view, so
+    JWT users never got their language. The middleware now resolves a bearer
+    token with SimpleJWT's JWTAuthentication; failures are ignored (the view
+    still returns the real 401).
+  - translation.activate() writes a thread-local that was never reset, so the
+    next request on the same worker thread inherited the user's language. The
+    previous language is now restored in try/finally (also when the view
+    raises). The choice is kept on the request (request.LANGUAGE_CODE) and in
+    Content-Language.
+  - Only codes in settings.LANGUAGES are activated. A user with no preference
+    falls back to LocaleMiddleware's Accept-Language choice (what the
+    docstring always said; the old code forced "en").
+
+Tests: tests/test_audit_uploads_middleware.py (33 tests)
+  Shared validator: every accepted type passes (incl. PostScript .ai and DOS
+  EPS); renamed files are refused; svg/psd/tiff/html/no-extension refused;
+  size caps; the file is rewound; the client Content-Type is ignored.
+  Managed job: proof service refuses renamed/svg/exe and oversize; proof and
+  artwork endpoints return 400 and store nothing; a real proof is stored.
+  Avatar: svg refused (no longer renamed to .jpg), HTML-as-png refused,
+  oversize refused, real PNG stored as .png; manager photo with a JPEG named
+  .png refused.
+  Guest: renamed HTML and SVG refused; stored content type from the
+  extension; 413 from Content-Length; throttle 429; production rate present;
+  PDF and EPS previews are attachments with nosniff and sandbox CSP; a
+  validated PNG is inline; a legacy .png row holding HTML is an attachment.
+  Middleware: language restored after the request and after an exception;
+  JWT user's language applied; a bad token is ignored; ordering after
+  AuthenticationMiddleware.
+  Fail-before: with the source changes stashed (common/uploads.py kept so the
+  test module imports), 24 of the 33 fail (23 failures, 1 error). The 9 that
+  pass on the old code are the shared-validator unit tests and positive cases
+  that exercise the new module directly.
+
+Existing tests changed (fixtures only, assertions untouched)
+  api/test_managed_job_delivery_flow.py, jobs/test_phase8_file_visibility.py,
+  jobs/test_proof_approval_gate.py, jobs/test_shop_as_manager_access.py
+  uploaded ".pdf" files whose bytes were b"pdf" / b"proof-bytes". They now
+  start with "%PDF-1.4 ". This is the point of the change: a file whose
+  contents are not a PDF must not be accepted as one.
+
+Counts: manage.py test -> Ran 1740, OK. pytest -> 1740 passed (3 warnings:
+the pre-existing UnorderedObjectListWarning on Shop pagination).
+
+Findings (not changed)
+  - QuoteAttachmentUploadSerializer (seller quote attachments) has no type
+    check, and QuoteItemAttachmentUploadSerializer only checks the client's
+    Content-Type starts with "image/". Neither is served inline by an API
+    view, but if MEDIA is served publicly in production they should get the
+    same service; the accepted types there are a product decision.
+  - Media is only served by Django when DEBUG. In production the web server
+    serving MEDIA_ROOT should send nosniff and Content-Disposition:
+    attachment for non-images (cannot be verified from the repo).
+  - Pre-existing: api/views.py (~line 1114) calls sync_quote_request_from_file,
+    which is not defined or imported (pyflakes). Unrelated to uploads; left
+    alone.
+  - Frontend follow-up (printy_ui, not edited): PDF/EPS previews of guest
+    artwork are now downloads; the UI should not try to show them in an
+    <img>/<iframe>. Upload errors now say when contents do not match the
+    extension.
+
+
+================================================================================
+PROMPT 5 / COMMIT A - audit(#7): client portal and OTP
+================================================================================
+
+clients/views.py
+  ClientLinkArtworkView
+    Before: logged a filename and returned 202; request.FILES["file"] was
+    never saved (a request with no file at all also got 202).
+    Now: the file is validated by common.uploads (ARTWORK policy from commit
+    C: type allowlist, 50MB, magic bytes) and stored as a
+    QuoteRequestAttachment, then quotes.artwork_review.mark_pending() puts it
+    in front of the manager - the same path as a signed-in buyer upload
+    (QuoteRequestAttachmentViewSet.create). 202 is returned only after the
+    save, with attachment_id. No file -> 400; rejected file -> 400; a save
+    failure -> 500 with a logged exception (the attachment and review update
+    are one transaction). A closed/accepted request -> 409, mirroring the
+    buyer path (after acceptance the job's artwork workflow owns files).
+  ClientLinkAcknowledgeView
+    Before: wrote price_acknowledged_at/date_acknowledged_at into
+    request_snapshot JSON. Nothing reads those keys; price_updated and
+    date_updated stayed True, so accept_quote_for_payment kept refusing.
+    Now: calls quotes.overrides.acknowledge_price_update and
+    jobs.timing_services.acknowledge_date_update (which also applies the new
+    due date to the request and its jobs). Each is called only when that
+    change is actually pending - re-running the date service without one
+    would re-apply a stale date_updated_new. The actor is the request's
+    on_behalf_of account (usually None for a phone client), never the
+    manager. The response keeps "acknowledged", "price_acknowledged_at",
+    "date_acknowledged_at" (now from the model fields) and adds
+    "acknowledged_changes", "price_updated", "date_updated", "due_date".
+  ClientLinkPaymentView
+    Before: no artwork gate - it accepted the quote and opened a payment for
+    unapproved artwork.
+    Now: checks the artwork payment block FIRST, with the same helpers as the
+    signed-in STK views (api.payment_views._managed_job_artwork_block when
+    the request has a job, else _request_artwork_block /
+    quotes.artwork_review.payment_block_reason). A block returns 400 with
+    artwork_payment_block_reason, before any acceptance or Payment row. The
+    artwork gate itself is unchanged.
+  ClientLinkOtpRequestView: passes redact=(code,) and returns 503 when the
+    delivery FAILED, instead of "We sent a verification code".
+
+clients/services/otp.py - validate_action_token
+  Now requires expires_at > now. Before, a verified token never expired, so
+  one OTP unlocked artwork/acknowledge/payment on the link forever. A
+  verified token lives as long as the challenge it came from
+  (OTP_TTL_MINUTES, default 10, counted from when the code was issued) -
+  the same rule the existing action_token_is_valid helper already used.
+
+clients/services/messaging.py - StubMessagingProvider / send_client_message
+  - No plaintext OTP in logs: the stub logs channel, a masked recipient
+    (last 4 digits) and the body length; never the body.
+  - No plaintext OTP at rest: send_client_message(redact=...) masks the
+    given secrets in MessageDelivery.body and in error text; the provider
+    still receives the real body.
+  - Never SENT when nothing was sent: DeliveryResult gained queued=True; the
+    stub returns it in dev/test and the delivery is recorded as QUEUED
+    (MessageDelivery has no PENDING status; QUEUED is the existing "not sent
+    yet" value - no migration needed), sent_at stays empty.
+  - Outside dev/test the stub refuses: the delivery is FAILED with "No
+    SMS/WhatsApp provider is configured; the message was not sent." and an
+    ERROR log line. Dev/test = DEBUG, or APP_ENV in local/dev/development/
+    test (test_settings sets APP_ENV=test); MESSAGE_STUB_ALLOWED overrides.
+    NOTE for deployment: production has no real SMS provider today (only the
+    stub exists), so OTP requests on client links will now return 503 there
+    instead of pretending to send. That is the honest state; wiring a real
+    provider is a separate task.
+
+Tests: clients/test_audit_client_portal_otp.py (18 tests)
+  Artwork: saved + pending manager review + exact bytes stored; no file ->
+  400; renamed file -> 400; save failure -> 500 and nothing stored; closed
+  request -> 409.
+  Acknowledge: both flags cleared, model timestamps set, due date applied;
+  price-only leaves the date pending; acknowledging unblocks a payment that
+  was refused for the price update.
+  Payment: unreviewed artwork -> 400 with the block reason, quote still
+  SENT, no Payment, STK not called; no artwork -> 400; approved artwork ->
+  201.
+  Token: live token valid (control); expired token refused by the service
+  and by all three action endpoints.
+  Stub: the OTP is in neither the logs nor the stored body; the phone number
+  is not logged; stub delivery is QUEUED with no sent_at; with DEBUG=False
+  and APP_ENV=production the delivery is FAILED with an ERROR log and the
+  OTP request returns 503 without a code.
+  Fail-before (source files stashed): 17 of 18 fail; the live-token control
+  passes.
+
+Existing tests changed (clients/test_law_10_4_to_10_6.py) - both encoded
+the bugs being fixed; the new assertions are stricter:
+  - MessagingTests.test_delivery_attempt_is_logged expected the stub to
+    record SENT; it now expects QUEUED and no sent_at.
+  - OtpGateTests.test_verified_phone_unlocks_actions posted the artwork
+    action with no file and expected 202, and checked the unused
+    request_snapshot key. It now uploads a real PDF, checks the attachment
+    exists, sets price_updated and checks the acknowledgement cleared it and
+    set price_acknowledged_at.
+  Both fail on the old code.
+
+Counts: manage.py test -> Ran 1758, OK. pytest -> 1758 passed.
+
+Findings / not verified
+  - No real SMS/WhatsApp provider exists in the repo, so real delivery
+    cannot be verified; only the stub paths are tested.
+  - _verify_client_flow.py (a root-level throwaway script, not part of the
+    suite) pays through the link without approving artwork and reads
+    checkout_request_id from the signed-out response (removed in audit #1).
+    It was already stale; it is not run by CI. Delete or update it.
+  - Frontend follow-up (printy_ui, not edited): the link artwork action must
+    send multipart with a "file" field; handle 503 on OTP request and the
+    400 artwork_payment_block_reason on link payment.
+
+
+================================================================================
+PROMPT 5 / COMMIT B - audit(#8): acceptance, payment and outbox state
+================================================================================
+
+api/payment_views.py - PaymentInitiateSTKView
+  quote_id path: the artwork block (_request_artwork_block) is now checked
+  BEFORE accept_quote_for_payment. Before, acceptance committed first (quote
+  ACCEPTED, sibling quotes REJECTED, request CLOSED, due date locked, a
+  Payment row created) and only then was payment refused for artwork.
+  The payment_id path is unchanged (nothing is accepted there). The other
+  STK views already checked first. The artwork gate itself is unchanged.
+
+quotes/acceptance.py - accept_quote_for_payment
+  Refuses while quote_request.date_updated is set ("The due date for this
+  quote was updated. Please review and acknowledge ..."), next to the
+  existing price_updated check. The client-link acknowledgement (commit A)
+  and the existing buyer acknowledgement clear it.
+
+quotes/messaging.py - create_quote_message / outbox
+  The bug: _send_email_for_message schedules the outbox send with
+  transaction.on_commit. In autocommit mode (no surrounding atomic block)
+  on_commit runs immediately, so the email was sent and the message updated
+  to SENT (or FAILED), and then create_quote_message saved
+  email_status=NOT_SENT / email_sent=False over it.
+  Fix: NOT_SENT is saved BEFORE scheduling; afterwards the message is
+  refreshed so the returned object shows the real outcome. The on_commit
+  callback is wrapped (_create_email_outbox_entry_safely) so an outbox
+  failure after commit is logged and recorded as FAILED on the message
+  instead of raising into the caller's commit. Both contexts are tested:
+  autocommit (send happens and stays SENT/FAILED) and atomic (nothing is
+  created or sent until commit, then SENT; a rollback sends nothing).
+
+payments/services.py - initiate_stk_push
+  - The in-flight check and the new MpesaSTKRequest row are now done in one
+    transaction under Payment.objects.select_for_update(), so two
+    concurrent requests cannot both see "no prompt in flight" and push
+    twice. The Daraja HTTP call runs after the lock is released; the
+    PENDING row is what blocks a concurrent second push meanwhile.
+  - Stale prompts: PENDING/SENT prompts older than
+    MPESA_STK_IN_FLIGHT_SECONDS (default 180s; the handset prompt times out
+    after ~1 minute) are marked EXPIRED before the check
+    (expire_stale_stk_requests). So an in-flight prompt still blocks a
+    conflicting one, but only while it is genuinely in flight - the
+    Prompt 1 rule. Before, a prompt whose callback never arrived blocked
+    the payment forever (every retry got the dead prompt back).
+  - handle_stk_callback: EXPIRED is our own bookkeeping, so a late callback
+    for an expired prompt is not dropped as a duplicate. A late success is
+    applied with all the usual checks (receipt, exact amount, payment not
+    already paid / under review -> needs_review). A late failure is recorded
+    on the prompt but never touches the payment.
+  - The caller's Payment instance is refreshed (status, Daraja ids) at the
+    end, so views that read payment.status after the call keep working.
+  - Daraja OAuth token: cached in Django's cache, per base URL + consumer
+    key (hashed), for expires_in - 60s (expires_in defaults to 3599). Before,
+    every STK push fetched a new token.
+  - generate_password used datetime.now() (the OS clock). It now uses
+    daraja_timestamp(): timezone.localtime(timezone.now()), i.e. Kenyan time
+    from TIME_ZONE=Africa/Nairobi, as Daraja expects.
+mpesa_payments/services.py - _timestamp
+  Formatted timezone.now() (UTC) directly, so Daraja got a timestamp 3
+  hours behind EAT. Now timezone.localtime(...). (Its token was already
+  cached in MpesaAccessToken.) This path creates a new MpesaPayment per
+  push, so the in-flight/lock rework above does not apply to it.
+
+notifications/services.py - notify()
+  notify() has no @transaction.atomic of its own, but it is called from
+  atomic services (payments.services.mark_payment_paid via
+  _notify_payment_confirmed, jobs/services/managed_job_creation.py,
+  mpesa_payments/receivers.py). send_mail ran inside those transactions:
+  SMTP held row locks and people were emailed about changes that could
+  still roll back. The email now goes through
+  transaction.on_commit(..., robust=True): after commit, or immediately
+  when there is no transaction; never when the transaction rolls back. A
+  send failure is logged at WARNING and never raised (before:
+  fail_silently=True, silently dropped).
+
+Tests: tests/test_audit_acceptance_payment_outbox.py (24 tests)
+  Acceptance: STK view with unapproved artwork -> 400, quote still SENT,
+  request not CLOSED, no Payment; approved artwork -> 201 (control);
+  date_updated blocks acceptance; acknowledged date allows it (control).
+  STK: select_for_update is used; a fresh prompt still blocks (control); a
+  stale SENT prompt is expired and replaced; a stale PENDING prompt is
+  expired; the caller's instance shows PROCESSING; a late success for an
+  expired prompt is applied; a late failure for an expired prompt leaves
+  the payment PROCESSING and the new prompt SENT.
+  Daraja: token fetched once for two clients; cache timeout = 3599 - 60;
+  a new token after the cache entry goes; timestamps from timezone.now() in
+  EAT (21:30:05Z -> 20260102003005) for both payments and mpesa_payments.
+  Outbox (TransactionTestCase): autocommit SENT and FAILED are not
+  overwritten; atomic sends only after commit and stays SENT; rollback
+  sends nothing; an outbox failure after commit is recorded as FAILED.
+  notify(): no email inside the transaction; one email after commit; SMTP
+  failure logged, not raised; rollback (TransactionTestCase) sends nothing.
+  Fail-before (source files stashed): 15 of 24 fail. The 9 that pass on the
+  old code are the controls listed above plus the atomic-context outbox
+  guards, which the old code already got right.
+
+Counts: manage.py test -> Ran 1782, OK. pytest -> 1782 passed.
+
+Not verified (cannot be, offline)
+  - Real Daraja: the token cache, the EAT timestamp and STK pushes are only
+    exercised with mocked HTTP and the stub. That Daraja accepts the EAT
+    timestamp, and its real expires_in value, are not verified here.
+  - Real SMTP: only Django's locmem backend and mocks are used.
+  - Row locking: SQLite ignores SELECT ... FOR UPDATE, so the test proves
+    the lock is requested, not that PostgreSQL serialises two concurrent
+    requests. A concurrency test against PostgreSQL is a follow-up.
+Findings
+  - The Django cache is the default per-process LocMemCache (no CACHES
+    setting), so each gunicorn worker fetches its own Daraja token. That is
+    correct, just not shared; a shared cache (Redis) would reduce it to one.
+  - MPESA_STK_IN_FLIGHT_SECONDS (180) is a judgement call; tune it from
+    real callback latency.
+
+
+================================================================================
+PROMPT 5 / COMMIT D - audit(#4b): pre-registration account takeover
+================================================================================
+
+Investigation - how email confirmation works today
+  - ACCOUNT_EMAIL_VERIFICATION defaults to "mandatory" (env-overridable).
+    Registration (/api/auth/register/, /client/, /partner/, /production/)
+    creates the user with the password the registrant chose plus a primary
+    allauth EmailAddress with verified=False, and emails a confirmation link
+    to FRONTEND_URL/auth/confirm-email?key=... (ACCOUNT_CONFIRM_EMAIL_ON_GET
+    is False; the SPA POSTs the key to ConfirmEmailView, which only verifies
+    the address and does not log anyone in).
+  - Email/password login and phone login (CustomTokenObtainPairSerializer)
+    are refused with EMAIL_UNVERIFIED while the primary address is
+    unverified. An unverified phone only resolves an account whose email is
+    verified. So the registrant of a squatted address cannot log in yet.
+  - Registration of an address already used (any case) is refused.
+  - Password reset emails the address only. A reset does NOT confirm the
+    address (allauth 65 finalize_password_reset does not), so after a reset
+    login still waits for the confirmation link.
+  - Phone-first accounts (manager invites, and PATCH /api/auth/me/ for an
+    account without an email) attach an address as verified=False.
+
+The takeover (before this commit)
+  GoogleSocialLoginView matched an existing account by email (iexact), then
+  marked the address verified and linked the Google account, without
+  touching credentials. A registrant who squatted victim@x (or a phone-first
+  account that attached victim@x) therefore got a working password login -
+  and kept any refresh tokens - as soon as the real owner signed in with
+  Google once.
+
+Fix (accounts/services/account_security.py, accounts/views.py)
+  - email_is_unconfirmed(user, email): the account has EmailAddress rows but
+    none verifying this email.
+  - On a Google login that matches an existing account by email (not an
+    already-linked Google account), under select_for_update on the user, if
+    the address is unconfirmed: secure_unconfirmed_account() -
+      * set_unusable_password() (this also changes the session auth hash,
+        so Django sessions made with the old password stop authenticating);
+      * every outstanding simplejwt refresh token is blacklisted;
+      * a WARNING is logged;
+    and only then is the address marked verified and Google linked. The
+    same account is kept; nothing is merged into or from another account,
+    and duplicates still get 409. The owner can set a password with the
+    normal reset flow.
+  - Verified accounts are not touched (password and tokens kept).
+Reverse direction
+  - Password login: refused before confirmation (checked, no change).
+  - Password reset: cannot take over (the link goes to the address) and
+    already replaces the registrant's password. Small fix: refresh tokens
+    issued before a reset are now blacklisted (they survived a reset).
+  - PATCH /api/auth/me/ adding an email (accounts/serializers.py
+    UserSerializer.validate_email): an address used by another account in
+    any case is refused with 400. Before, a case variant created a
+    case-duplicate (which then blocks the real owner's Google sign-in with a
+    409) and an exact duplicate was an IntegrityError 500.
+
+Tests: accounts/test_audit_preregistration_takeover.py (16 tests)
+  Today's behaviour (controls): registration gives an unverified primary
+  address and a link to the address; password login and phone login are
+  refused before confirmation; re-registration in another case is refused.
+  Google on an unconfirmed account: same account, password unusable,
+  address verified, registrant's password login fails; refresh tokens
+  issued before are refused (401); the owner's new tokens work; a Django
+  session made before stops authenticating; a phone-first account that
+  attached the address is secured. Controls: verified account keeps its
+  password and tokens; legacy account with no address rows keeps its
+  password.
+  Password reset: link only to the address (control); the reset replaces
+  the registrant's password and revokes their refresh tokens; login still
+  needs confirmation.
+  Attach email: a case variant is a 400; an exact duplicate is a 400 not a
+  500; an unused address can still be added (control).
+  Fail-before (accounts/views.py and accounts/serializers.py stashed, the
+  new helper module kept so the import works): 7 of 16 fail; the other 9
+  are the controls above.
+
+Counts: manage.py test -> Ran 1798, OK. pytest -> 1798 passed.
+
+Findings (not changed here)
+  - Accounts with NO EmailAddress rows (createsuperuser, admin-created,
+    pre-allauth) are trusted by password login and therefore by this fix
+    too. Recommend a backfill that creates their rows (verified only where
+    proven) so the mandatory rule applies to them.
+  - Access tokens are stateless: one issued before the Google remediation
+    stays valid until it expires (ACCESS_TOKEN_LIFETIME = 30 min). An
+    unconfirmed account cannot normally obtain one (login is refused), but
+    a per-user token version would close this fully.
+  - The secured account keeps what the registrant entered: name, an
+    unverified phone, and the role picked at sign-up (e.g. a partner
+    applicant). The owner can edit name/phone; a role picked by the
+    registrant is not reverted. Not changed, to avoid rewriting account
+    data automatically.
+  - Password change (PasswordChangeView) does not revoke other refresh
+    tokens. Doing so would also log out the current session's refresh
+    token; needs a UI decision.
+  - A confirmation link sent for a squatted registration still confirms
+    that account if the owner clicks it (the owner then has an account with
+    the registrant's password). Inherent to link confirmation; the
+    confirmation email should say "if you did not sign up, ignore this".
+    Copy change for the frontend/email templates.
+  - Already-linked Google accounts (matched by Google sub) are not
+    re-checked; they were proved when linked.
+  - ACCOUNT_EMAIL_VERIFICATION=optional or none would let unconfirmed
+    accounts log in; production must keep "mandatory".
+
+
+================================================================================
+PROMPT 5 - FINAL SUMMARY
+================================================================================
+
+Branch: arena/9db94b23-printy-api (the session's fixed branch; the prompt
+names security/audit-remediation). Not main/master. Nothing pushed.
+
+Commits (oldest first)
+  8fa1388  audit(#9): uploads and middleware                    1740 OK
+  8c3baf0  audit(#7): client portal and OTP                     1758 OK
+  903c617  audit(#8): acceptance, payment and outbox state      1782 OK
+  HEAD     audit(#4b): pre-registration account takeover        1798 OK
+  (C was done first because A reuses its validated upload service.)
+
+Suite: 1798 tests, green under both runners with zero environment setup:
+  env -i PATH=/home/user/.venv/bin:/usr/bin:/bin HOME=/tmp python manage.py test --noinput
+  env -i PATH=/home/user/.venv/bin:/usr/bin:/bin HOME=/tmp python -m pytest -q
+  No pre-existing or environmental failures. 1707 at STEP 0, so 91 tests
+  added in Prompt 5 (33 + 18 + 24 + 16); none deleted, skipped or weakened
+  (2 law tests in clients/ were updated in A to the new, stricter
+  behaviour, as recorded there).
+
+Not verified (cannot be, offline / no credentials)
+  - Real SMTP: all email is checked with Django's locmem backend or mocks
+    (quote message outbox, notify() after commit, confirmation and reset
+    mail).
+  - Real Daraja: STK push, callbacks, the OAuth token cache and the EAT
+    timestamp are checked with mocked HTTP and the stub only. That Daraja
+    accepts the timestamp and its real token lifetime are not verified.
+  - Real SMS: the OTP/messaging provider is the stub (now QUEUED, redacted
+    logs, refuses to pretend outside dev/test).
+  - Row locks: SQLite ignores SELECT ... FOR UPDATE; the tests prove the lock
+    is requested, not that PostgreSQL serialises concurrent requests.
+  - Real Google: ID tokens are signed with a local test key.
+
+Open findings carried forward (details in the sections above)
+  - clients/views._client_ip trusts the raw X-Forwarded-For header (used
+    for client-portal rate limiting / logging). It must use the same
+    trusted-proxy logic as the M-Pesa callback defence.
+  - Raw send_mail outside the outbox: accounts/signals.py:30 and
+    quotes/services_workflow.py:805.
+  - QuoteAttachmentUploadSerializer has no type check;
+    QuoteItemAttachmentUploadSerializer trusts the client's Content-Type.
+  - Production MEDIA serving needs nosniff/attachment headers.
+  - api/views.py ~1114 references an undefined sync_quote_request_from_file.
+  - Legacy accounts without EmailAddress rows bypass mandatory
+    verification; access tokens survive the Google remediation until
+    expiry.
+  - UI follow-ups (printy_ui not edited): PDF/EPS guest previews are now
+    downloads; new 400 artwork_payment_block_reason on the quote_id STK
+    path; due-date acknowledgement now required before payment; client
+    portal OTP request can return 503 when no real provider is configured.
+
+
+################################################################################
+PROMPT 6
+################################################################################
+
+STEP 0
+  Branch: arena/9db94b23-printy-api (not main/master). No push.
+  The sandbox was reset again before this prompt: the branch was back at
+  70fd070 (main) and the virtualenv was gone, but the working tree still
+  held all of the Prompt 0-5 changes. The venv was recreated and the
+  surviving work re-committed as one commit:
+    dd4269e audit: restore Prompt 0-5 audit work after sandbox reset
+    (#0-#6, #3b, #10a, #9, #7, #8, #4b)
+  The separate Prompt 5 commits (8fa1388, 8c3baf0, 903c617, aeb62a8) no
+  longer exist; their content is all in dd4269e.
+  Starting point (zero setup):
+    manage.py test -> Ran 1798 tests, OK
+    pytest         -> 1798 passed
+
+
+================================================================================
+PROMPT 6 / SECTION A - audit(#10b): config and proxy trust
+================================================================================
+
+1. Shared cache (config/settings.py, config/test_settings.py, requirements.txt)
+   - REDIS_URL set -> django.core.cache.backends.redis.RedisCache (Django's
+     built-in backend; redis==8.2.0 added to requirements). Must start with
+     redis://, rediss:// or unix:// (else startup error). Key prefix
+     CACHE_KEY_PREFIX (default "printy").
+   - No REDIS_URL: LocMemCache only when DEBUG or a test run
+     (SHARED_CACHE_REQUIRED = not DEBUG and not test settings). Otherwise
+     startup raises ImproperlyConfigured("REDIS_URL must be set when
+     DEBUG=False ..."), placed next to the MPESA_CALLBACK_SECRET guard and
+     behaving the same way. A system check (printy.E020) repeats this for
+     any non-shared backend if CACHES is overridden later.
+   - config/test_settings.py always uses LocMem (even if REDIS_URL is
+     exported) and sets SHARED_CACHE_REQUIRED=False.
+   - What uses it: every DRF throttle (DRF uses the default cache) - so the
+     client-portal OTP request/verify limits, auth, guest upload, tracking,
+     contact, STK - plus the Daraja token cache and the manager-listing
+     cache. OTP codes, attempt counters and action tokens are database rows
+     (clients.ClientOtp) and were already shared; nothing to move.
+
+2. Proxy trust - one resolver: common/client_ip.py resolve_client_ip()
+   (moved from payments/callback_security.py, which now re-exports it).
+   REMOTE_ADDR unless the peer is in MPESA_TRUSTED_PROXIES; then the
+   X-Forwarded-For chain is walked right to left skipping trusted hops; a
+   malformed hop -> None. Kept the existing setting name rather than adding
+   a new one; it is now documented as governing every IP decision.
+   Every read of HTTP_X_FORWARDED_FOR / REMOTE_ADDR in non-test code, found
+   by grep, and what changed:
+     api/payment_views.py:_client_ip (payment phone-consent record)  raw XFF -> resolver
+     clients/views.py:_client_ip (client-link view audit record)     raw XFF -> resolver
+     common/request_meta.py:get_client_ip (analytics events)         raw XFF / X-Real-IP -> resolver
+     payments/callback_security.py (callback allowlist)              already trusted; now imports the shared helper
+     DRF throttles: DEFAULT_THROTTLE_CLASSES were DRF's stock Anon/User/
+       Scoped, whose get_ident returns the raw left-most XFF when
+       NUM_PROXIES is unset (it was). Now common.throttling.Trusted* .
+     api/throttling.py (analytics, guest quote request, tracking IP/code)
+       used get_ident -> TrustedIdentMixin.
+     clients/throttling.py, accounts/throttling.py: already keyed via the
+       resolver; now also derive from TrustedIdentMixin.
+   NUM_PROXIES: not used. DRF's NUM_PROXIES counts hops blindly; with the
+   resolver it is unnecessary. If NUM_PROXIES is set (env or REST_FRAMEWORK)
+   a warning check printy.W903 says it is ignored.
+   Side change: TrustedIdentMixin.get_rate reads REST_FRAMEWORK
+   DEFAULT_THROTTLE_RATES at request time (DRF freezes it into a class
+   attribute at import), unless a class sets its own THROTTLE_RATES (an
+   existing test patches that; it still works).
+   A test now fails if any routed view or default throttle bypasses the
+   mixin, or if any non-test module reads HTTP_X_FORWARDED_FOR/X-Real-IP
+   outside common/client_ip.py.
+
+3. ALLOWED_HOSTS: the default (which included localhost, 127.0.0.1, the
+   droplet IP 178.128.206.240 and testserver) is gone outside DEBUG. With
+   DEBUG=False startup fails if ALLOWED_HOSTS is unset, empty, contains
+   "*", or lists only local names. With DEBUG=True the default is
+   localhost,127.0.0.1,[::1],testserver. Documented in .env.example (and
+   docs/env_vars.md in section E).
+   Deploy impact: a server that relied on the default must now set
+   ALLOWED_HOSTS (and REDIS_URL) or it will not start.
+
+4. Raw send_mail -> notifications.services.send_mail_after_commit() (the
+   same on_commit(robust=True) path notify() uses since #8; failures
+   logged at WARNING, never raised, nothing sent on rollback):
+     accounts/signals.py notify_admin_on_signup (ran inside allauth signup)
+     quotes/services_workflow.py missing-artwork reminder (ran inside the
+       send_calculator_draft_to_shops transaction.atomic block)
+   Remaining send_mail: notifications/services.py (the after-commit sender
+   itself) and core/management/commands/send_test_email.py (an operator
+   command that must send synchronously; no transaction).
+
+Tests: tests/test_audit_config_proxy_trust.py (29 tests)
+  Resolver: spoofed XFF/X-Real-IP from a direct peer ignored by all five
+  callers; behind trusted proxies the first untrusted hop wins; garbage
+  hop -> None; no stray header reads in the codebase.
+  Throttles: default classes and every routed view's throttle derive from
+  the mixin; spoofed XFF does not change the cache key of any IP throttle;
+  end to end with a rotating XFF per request -> 429 on the contact form
+  (default scoped), tracking lookup and login; behind the proxy a
+  prepended spoof does not help, distinct real clients keep separate
+  buckets (control).
+  Settings (clean subprocess, DJANGO_SETTINGS_MODULE=config.settings, no
+  inherited env): full production env + REDIS_URL boots with RedisCache;
+  no REDIS_URL -> refuses; bad scheme -> refuses; DEBUG without Redis ->
+  LocMem + local hosts; ALLOWED_HOSTS unset / empty / "*" / local-only ->
+  refuses. System check E020 / W903 unit tests; test settings use LocMem.
+  Email: signup admin notice and missing-artwork reminder are not sent
+  inside the transaction, are sent after commit; SMTP failure is logged.
+  Fail-before (12 source files stashed, new helper modules kept): 23 of 29
+  fail. The 6 that pass on the old code: garbage hop (resolver existed),
+  login throttle (already trusted since #4), separate buckets for distinct
+  real clients, local-only ALLOWED_HOSTS (old guard), and the two
+  "sent after commit" checks.
+
+Counts: manage.py test -> Ran 1827, OK. pytest -> 1827 passed.
+Prod check (DEBUG=false, all required vars incl. REDIS_URL): only the
+expected E002/E003 (SMTP credentials not set in this sandbox) and W902.
+
+Not verified: no Redis server here. The settings select RedisCache and
+the throttles use the default cache, but no request ever reached a real
+Redis. Check after deploy: `python manage.py shell -c "from django.core.cache
+import cache; cache.set('x',1); print(cache.get('x'))"` on the server.
+
+
+================================================================================
+PROMPT 6 / SECTION B - audit(#10c): repo hygiene
+================================================================================
+
+- _forensics_tmp.py: git rm. It held 17 NUL bytes (truncated lines, it
+  could not even be parsed) and was a scratch script that read a shop's
+  FinishingRate rows against config.settings. Nothing imported it (grep of
+  all .py/.md/.ini/.yml/.toml); the only mention was README's housekeeping
+  note, which claimed it was git-ignored - it was tracked. README updated.
+- gallery/ and locations/: removed (git rm -r).
+  Checks before removing: neither is in INSTALLED_APPS; neither has a
+  migrations directory; no migration of any app references them; no module
+  imports them (grep for "from gallery", "import gallery", "gallery.views",
+  the view class names, and the same for locations). gallery/models.py
+  only re-exported catalog.Product/ProductCategory; its views
+  (ProductGalleryView, GalleryCategoryViewSet, GalleryProductViewSet) were
+  never routed. locations/ was four empty stubs.
+  makemigrations --check: "No changes detected".
+- UTF-8 BOM stripped from 16 .py files (same count as the audit):
+  accounts/migrations/0006_userprofile_manager_areas_and_more.py,
+  api/__init__.py, api/job_messaging_views.py, catalog/__init__.py,
+  common/__init__.py, core/__init__.py, inventory/__init__.py,
+  jobs/__init__.py, jobs/messaging.py, notifications/__init__.py,
+  pricing/__init__.py, production/__init__.py, quotes/__init__.py,
+  quotes/test_artwork_review_gate.py, shops/__init__.py,
+  shops/management/commands/normalize_default_sheet.py
+  (only the 3 leading bytes changed; 16 files, 1 line each).
+- .gitignore: any *.sqlite / *.sqlite3 (+ -journal/-wal/-shm) / *.db
+  (printy_test.sqlite3 was already listed; it is not tracked), media/ and
+  media/uploads/, more IDE/editor files (*.iml, *.code-workspace,
+  .project, .pydevproject, .settings/, .history/, *.swo, *~). .env/.env.*
+  and __pycache__/ were already there. `git ls-files -ci --exclude-standard`
+  is empty (nothing tracked is now ignored).
+- catalog/urls.py (CatalogBrowseView): NOT wired - recorded as a finding.
+  The view is a placeholder that returns {"message": "Public catalog
+  browsing area"}. Nothing in the repo, docs or README refers to a
+  /catalog/ browse route (the frontend, printy_ui, is not in this
+  workspace, so its expectations cannot be checked). Wiring a placeholder
+  would only add a public endpoint. Recommendation: delete catalog/urls.py
+  and CatalogBrowseView (and its smoke test) once printy_ui is confirmed
+  not to call it.
+  Related doc drift found while checking (fixed in section E's API docs):
+  docs/api_contract.md lists GET /api/products/gallery/ (the removed,
+  never-routed gallery view) and GET /api/public/shops/{slug}/catalog/,
+  which is not routed either - and must not be, since anonymous visitors
+  may never see shops (decided visibility rule).
+
+Tests: tests/test_audit_repo_hygiene.py (7 tests): no BOM, no NUL byte in
+any .py; _forensics_tmp.py gone; gallery/locations gone and not installed;
+generated/secret paths are git-ignored (sqlite of any name, .env*,
+__pycache__, media/uploads, IDE files) while .env.example and source are
+not; no sqlite/.env/__pycache__ file is tracked.
+Fail-before (run in a temporary git worktree of the previous commit with
+only the new test copied in): 5 of 7 fail; the 2 that pass are the
+"not ignored" control and "nothing tracked".
+
+Findings (not changed): the tracked root scripts _verify_client_flow.py,
+_verify_client_manager_pin.py, _verify_managers.py, _verify_origin_fee.py
+and _verify_send_client.py are throwaway checks, not tests (not collected
+by either runner). Candidates for removal; not asked for here.
+
+Counts: manage.py test -> Ran 1834, OK. pytest -> 1834 passed.
+
+
+================================================================================
+PROMPT 6 / SECTION C - audit(#6b): fee policy cleanup
+================================================================================
+
+The six PlatformFeePolicy fields that are never read (grep: no reference in
+any non-test, non-migration module; tests only pass values at create):
+
+  field                     default   live equivalent (what pricing reads)
+  small_job_limit           2000.00   under_production_threshold = 1000.00 (tier A ends)
+  medium_job_limit          10000.00  high_production_threshold = 10000.00 (tier B ends)
+  small_job_max_multiple    4.00      tier_a_max_client_price_multiple = 3.00
+  medium_job_max_multiple   3.00      tier_b_max_client_price_multiple = 2.50
+  bulk_job_max_multiple     2.00      tier_c_max_client_price_multiple = 2.00
+  add_platform_fee_on_top   False     (no equivalent: the Printy fee always comes out of the markup)
+
+Change (pricing/models.py, pricing/admin.py, migration
+pricing/0010_platform_fee_policy_deprecated_fields): columns NOT dropped.
+The six are editable=False with help_text "DEPRECATED - never read by
+pricing ...", so they are gone from the admin form and DRF's
+PlatformFeePolicySerializer exposes them read-only. The migration only
+alters help_text/editable (Django emits no SQL for those).
+
+Also found: seven LEGACY fee-rate fields that the live split does not use
+either. Their only reader is quotes/snapshots.py, which hashes them into the
+pricing-rule version string:
+  under_production_fee_rate, standard_production_fee_rate,
+  standard_markup_fee_rate, high_markup_threshold, high_markup_fee_rate,
+  high_production_fee_rate, high_production_markup_fee_rate
+They were shown in the admin list as if live. They are now read-only in
+the admin with help_text "LEGACY - not used by the live split ...", in a
+collapsed "Legacy / deprecated - NOT used by pricing" section (with the
+six above and the already-deprecated printer_fee_rate /
+broker_margin_fee_rate), and removed from list_display. Still model-
+editable (seed commands set them) and still in the version hash.
+The admin form now has three sections: identity; "Live split parameters
+(read by pricing)" - the two tier thresholds, min_markup_multiple, the
+nine tier_* fields and maximum_manager_markup_multiple; and the collapsed
+legacy section. Live fields got short help_text.
+
+DECISION FOR YOU (not changed): the partner markup maximum
+(maximum_manager_markup_multiple, default 2.00, read by
+quotes/guardrails.get_partner_markup_max_rate) is one cap for every tier.
+The split's per-tier maximum client price is 3.00 / 2.50 / 2.00 (tier A /
+B / C). So for tier A and B jobs a partner is capped at 2.00x by the
+guardrail before the tier maximum can ever apply. Keep the flat 2.00x, or
+make the partner cap per-tier (e.g. equal to tier_*_max_client_price_
+multiple)? Left as it is.
+
+Tests: pricing/test_audit_fee_policy_cleanup.py (7 tests): deprecated and
+legacy fields are not in the admin form; live fields still are (control);
+help_text says DEPRECATED / LEGACY and the six are non-editable; the
+change page renders for a superuser and shows the "NOT used by pricing"
+section; list_display has no legacy field; the serializer marks the six
+read-only; changing all 13 fields leaves the split for tier A/B/C jobs
+identical (proves "never read").
+Fail-before (models/admin stashed, migration moved aside): 5 of 7 fail;
+the live-fields control and the never-read proof pass on the old code.
+
+Counts: manage.py test -> Ran 1841, OK. pytest -> 1841 passed.
+makemigrations --check: no changes.
+
+==============================================================================
+PROMPT 6 / SECTION D - audit(#10d): CI on PostgreSQL
+==============================================================================
+Production uses PostgreSQL (config/settings.py DATABASES, engine
+django.db.backends.postgresql, DB_NAME/DB_USER/DB_PASSWORD/DB_HOST/DB_PORT),
+so a PostgreSQL CI job was added. The SQLite job is unchanged.
+
+Changed files:
+- config/test_settings.py: new TEST_DB_ENGINE switch. "sqlite" (the
+  default) keeps the zero-setup printy_test.sqlite3 database exactly as
+  before. "postgresql" uses the same DB_* variable names as production, with
+  defaults that match the CI container (printy_ci / postgres / postgres /
+  127.0.0.1 / 5432; test database test_printy_ci). Any other value raises
+  ImproperlyConfigured at boot.
+- .github/workflows/ci.yml: new job "test-postgres" with a postgres:16
+  service container (pg_isready health check). It runs the same steps as
+  the SQLite job: pip install + pip check, makemigrations --check, pytest
+  and manage.py test, all with TEST_DB_ENGINE=postgresql. It uses no
+  repository secret: the container password "postgres" is a throwaway
+  value for an ephemeral CI database.
+- api/admin_ops_views.py: REAL BUG FOUND BY THE FIRST POSTGRESQL RUN.
+  AdminCustodyReleaseView and AdminDisputeResolveView called
+  ManagedJob.objects.select_for_update().select_related(source_quote,
+  assigned_shop, broker[, client]). Those FKs are nullable, so Django uses
+  LEFT OUTER JOINs, and PostgreSQL refuses: "NotSupportedError: FOR UPDATE
+  cannot be applied to the nullable side of an outer join". So POST
+  /api/admin/custody/<id>/release/ and POST /api/admin/disputes/<id>/resolve/
+  returned 500 on every call in production. SQLite ignores FOR UPDATE, so
+  the suite never saw it. Fix: select_for_update(of=("self",)), which locks
+  only the job row (the row the views change).
+  I checked every other select_for_update()+select_related() site:
+  UserProfile.user, Shop.owner, Quote.quote_request and
+  MpesaSTKRequest.payment are all non-null (inner joins), so those are safe.
+
+Tests: tests/test_audit_postgres_ci.py (9 tests):
+- CI workflow: the SQLite job is kept and runs both runners; test-postgres
+  has a postgres service with a health check, TEST_DB_ENGINE=postgresql,
+  both runners and makemigrations --check; no "secrets." reference.
+- test_settings switch (subprocess boot): sqlite by default, postgresql when
+  TEST_DB_ENGINE=postgresql, unknown engine refused.
+- Admin custody-release / dispute-resolve lock ManagedJob with of=("self",).
+  This test is engine-independent, so the SQLite job guards the bug too.
+- PostgreSQL only (skipped on SQLite): two threads on two real connections
+  call initiate_stk_push for the same payment at the same time, and exactly
+  one MpesaSTKRequest is created. This is the first real test of the
+  audit #8 row lock; SQLite cannot show it.
+Fail-before:
+- With admin_ops_views.py reverted, both lock tests fail. On PostgreSQL,
+  api.test_stage1d_admin has 5 errors (the NotSupportedError 500s).
+- With the select_for_update() in _initiate_stk_push_locked removed, the
+  PostgreSQL concurrency test fails "2 != 1". The lock is restored.
+- The workflow and switch tests fail on the old tree (no test-postgres job,
+  no TEST_DB_ENGINE).
+
+Counts:
+- SQLite: manage.py test -> Ran 1850, OK (skipped=1); pytest -> 1849
+  passed, 1 skipped. The skipped test is the PostgreSQL-only concurrency
+  test.
+- PostgreSQL 16.2 (local, see below): manage.py test -> Ran 1850, OK;
+  pytest -> 1850 passed.
+- makemigrations --check: no changes on both engines.
+
+How PostgreSQL was verified offline: there is no system PostgreSQL, so I
+used the PyPI package "pgserver" (bundled PostgreSQL 16.2 binaries) in a
+throwaway venv under /tmp, ran initdb with trust auth on 127.0.0.1:5432,
+and ran the suite with TEST_DB_ENGINE=postgresql DB_PASSWORD=. NOT verified:
+the GitHub Actions run itself (nothing was pushed). The workflow YAML
+parses, and the job mirrors the existing one.
+
+Findings (not changed):
+- 3 pre-existing DRF UnorderedObjectListWarning warnings: paginated Shop
+  querysets have no ordering (accounts/test_audit_roles_oauth_tenancy,
+  tests/test_audit_role_visibility_matrix). Page order can vary on
+  PostgreSQL. Suggest adding .order_by() or Meta.ordering on Shop.
+
+==============================================================================
+PROMPT 6 / SECTION E - audit(tier3): documentation
+==============================================================================
+Changed files:
+- docs/CANONICAL_MODELS.md
+  - Fee section rewritten to the live code (pricing/services/
+    platform_fee_policy.py). The client pays production cost + markup;
+    the fee is never added on top.
+    - Tiers come from production cost: A < 1000 <= B <= 10000 < C.
+    - Shop payout = shop-paid production cost x 1.00 / 1.05 / 1.08.
+    - Manager payout = min(M, M x 0.60 / 0.45 / 0.35).
+    - Printy fee = the residual, so the parts sum exactly.
+    - Minimum markup: max(min_markup_multiple 1.05, the tier margin floor),
+      rejected with a 400 and never clamped.
+    - Maximum markup: tier max client price 3.00 / 2.50 / 2.00 x P, and the
+      partner guardrail 2.00x flat (the open decision from Section C is
+      restated).
+    - Own-client rule: waiver only when the job's manager is the client's
+      origin manager (or a pending invite from that manager). It is frozen
+      on QuoteFinancialSplit.fee_waived and copied to the ManagedJob.
+    - The Printy fee is never negative.
+    - Worked-example table (4 rows) and minimum markups, recomputed by a
+      test.
+  - JobPayment / JobSettlementSplit: kept DEPRECATED, with a note that
+    neither model class exists and no code creates them.
+  - Corrections to the model lists:
+    - Machine and Paper are in inventory, not pricing.
+    - 11 listed names have no model class.
+    - 38 real models were missing; they are added under "Additional models
+      present in the code", explicitly not as an approval.
+  - Hard rules rewritten so that each is true of the code and cites the test
+    that checks it:
+    - every model is listed;
+    - no JobPayment / JobSettlementSplit;
+    - anonymous visitors and clients never see shops;
+    - printers never see client identity or the total, and clients never
+      see costs;
+    - the live split reads PlatformFeePolicy (with the UI-hint exceptions
+      named);
+    - the fee is never negative and the parts sum exactly.
+
+    The old rule "no model unless on this list" was false: 38 models
+    violated it. "No hardcoded percentages" was false as written, because
+    of the 0.75 default suggestion. "No DEPRECATED model may gain features"
+    is kept as a process rule, labelled as not test-enforced.
+- docs/DARAJA_PRODUCTION_CHECKLIST.md
+  - Payment lifecycle rewritten around payments.Payment + MpesaSTKRequest.
+    The JobPayment.payment_status / reconciliation_status text (a model
+    that no longer exists) is removed.
+  - The three-part callback gate:
+    - the secret in the URL Daraja is given (configured URL vs the URL
+      Daraja actually calls);
+    - the IP allowlist, with the default Safaricom list stated as NOT
+      verified (log real callback IPs first, then pin
+      MPESA_CALLBACK_ALLOWED_IPS);
+    - a persisted transaction.
+  - MPESA_TRUSTED_PROXIES; "reachability is not authenticity"; the
+    callback response-code table.
+  - Server-side amounts; needs_review (every trigger); the 180 s STK expiry
+    (MPESA_STK_IN_FLIGHT_SECONDS) with late-callback behaviour; concurrency.
+  - Super-admin resolution through the resolve-review API (there is no
+    Django-admin button; the cashier admin only has "Flag for manual
+    review").
+  - Recovery of a lost canonical callback (gap stated); the go-live
+    reconciliation against the Daraja statement; the state table aligned
+    with payments/states.py.
+- docs/env_vars.md
+  - ALLOWED_HOSTS (no default; fail closed) and REDIS_URL rows.
+  - MPESA_STK_IN_FLIGHT_SECONDS row.
+  - MPESA_CALLBACK_ALLOWED_IPS: "if missing" plus the unverified-list
+    warning.
+  - New "Shared cache and proxies" section: REDIS_URL, CACHE_KEY_PREFIX,
+    MPESA_TRUSTED_PROXIES, NUM_PROXIES (unused, W903).
+  - "What happens if missing" table for all 9 requested variables, for
+    DEBUG=False and DEBUG=true.
+  - Repaired the table that the APP_ENV paragraph had split in two.
+- docs/API_URL_AUDIT.md: the M-Pesa URL table (signed URLs, result route,
+  legacy route, review endpoints); callback authentication; the response
+  changes (403 / 404 / 400 on callbacks; 403 / 409 / 400 on STK push;
+  artwork 400; resolve-review; the custody/dispute 500 fixed in #10d); and
+  where checkout_request_id was removed and where it was kept.
+- docs/api_contract.md
+  - Every /api/ path was resolved against the URLconf. Unrouted ones are
+    marked NOT ROUTED row by row:
+    - /api/products/gallery/ and the shop gallery endpoints;
+    - rating-summary;
+    - job-requests / job-claims;
+    - favorites;
+    - finishing-categories;
+    - setup/status;
+    - quote-requests/{id}/price/;
+    - the subscription endpoints.
+  - The subscription and STK section was replaced by the real Payments
+    section: callbacks, error codes, checkout_request_id.
+  - CORRECTION to the Section B finding: /api/public/shops/{slug}/catalog/
+    IS routed, as an action on PublicShopViewSet. It is gated by
+    PrintManagerMarketplaceAccess (verified managers / super_admin), so the
+    visibility rule holds. The doc said "Auth: No", which was wrong. The
+    public shop rows and nearby now say "verified manager / super_admin".
+  - The /api/public/products/ example no longer shows a shop object (the
+    serializer has none).
+  - The client quote-draft shop routes are marked disabled (always 400).
+- README.md: law.txt is not in the repo, its git history (git log --all),
+  or the rest of the project folder (/home/user holds only this repo).
+  The wording now says so: the section is a summary, LAW n comments cite
+  that external document, and nothing was invented.
+- docs/DEPLOY_NOTES.md (new):
+  1. New hard-required variables (MPESA_CALLBACK_SECRET, ALLOWED_HOSTS,
+     REDIS_URL), plus recommended ones.
+  2. pip install (google-auth, redis).
+  3. The 4 new migrations.
+  4. report_duplicate_emails and report_financial_split_anomalies
+     (read-only; both verified to never modify data).
+  5. nginx log masking for the callback path, and the gunicorn access log.
+  6. Pre-payment steps.
+  7. Secret rotation: the callback URL changes, in-flight prompts are
+     refused, and how to reconcile them.
+  8. Frontend follow-ups.
+  9. Known gaps.
+- docs/PRODUCTION_DEPLOYMENT_RUNBOOK.md: the "M-Pesa callback fails"
+  bullets now cover the secret URL and the meaning of 403 / 404.
+- .env.local.example: commented REDIS_URL (optional in DEBUG). This closes
+  the Section A leftover.
+
+Code change (needed so that a documented variable is real):
+- config/settings.py: MPESA_STK_IN_FLIGHT_SECONDS is now read from the
+  environment. Before, it was read only via getattr(settings, ..., 180), so
+  the env var had no effect. It must be an integer >= 60 (the handset
+  prompt lives about 60 s), otherwise ImproperlyConfigured. Default 180,
+  unchanged.
+
+Tests: tests/test_audit_documentation.py (19 tests)
+- The env var: default 180; 240 changes the window; non-integer and < 60
+  refused.
+- CANONICAL_MODELS: every model listed; JobPayment deprecated and absent;
+  the dead formula gone; worked examples and minimum markups equal the
+  code.
+- API docs: every path resolves or is marked NOT ROUTED (both files); the
+  stale gallery/catalog rows are fixed; the catalog permission is the
+  marketplace gate; callback auth, 403 / 404 / 409 and checkout_request_id
+  are documented.
+- Prose: README law.txt wording; env_vars covers all 9 variables in the
+  "if missing" table, and each one is read in settings.py; the checklist
+  covers the lifecycle items; the 180 s default; DEPLOY_NOTES covers the
+  required steps and the report commands exist.
+Fail-before (git worktree at the Section D commit, only this test file
+copied in): 17 of 19 fail. The 2 controls pass: the catalog permission
+gate, and the 180 s default via override_settings.
+
+Counts:
+- SQLite: manage.py test -> Ran 1869, OK (skipped=1); pytest -> 1868
+  passed, 1 skipped.
+- PostgreSQL 16.2: manage.py test -> Ran 1869, OK; pytest -> 1869 passed.
+- makemigrations --check: no changes.
+- Production check (DEBUG=False with every required variable set): only
+  E002/E003 (SMTP placeholders in the check environment) and W902
+  (sandbox), as before.
+
+Not verified (stated in the docs as well): the nginx masking config (no
+nginx here); real Daraja callback IPs; the migrations on a copy of
+production data.
+
+Findings (not changed):
+- No automatic Daraja status query for canonical Payment rows. mpesa_reconcile
+  only covers the cashier MpesaPayment, and the managed-job query endpoint
+  only reads local state. A lost callback on a "processing" Payment cannot
+  be resolved through resolve-review (that needs needs_review), so it needs
+  an engineer.
+- Payment.STATUS_EXPIRED is defined but never set by any code.
+- PlatformFeePolicy.get_max_client_price returns P + P x 2.00 = 3x, which
+  is inconsistent with the guardrail (2x). It has no callers.
+
+################################################################################
+PROMPT 6 - FINAL SUMMARY
+################################################################################
+Branch: arena/9db94b23-printy-api (not main/master). Nothing pushed.
+Commits (one per section, exact messages):
+  audit(#10b): config and proxy trust   (Section A)
+  audit(#10c): repo hygiene             (Section B)
+  audit(#6b): fee policy cleanup        (Section C)
+  audit(#10d): CI on PostgreSQL         (Section D)
+  audit(tier3): documentation           (Section E, HEAD)
+(preceded by the restore commit of the Prompt 0-5 work after the sandbox
+reset)
+
+Test counts: baseline 1798 -> A 1827 -> B 1834 -> C 1841 -> D 1850 ->
+E 1869. Green under pytest and manage.py test, on SQLite (zero setup) and on
+PostgreSQL 16.2 (TEST_DB_ENGINE=postgresql). The single SQLite skip is the
+PostgreSQL-only row-lock test.
+
+Bugs found and fixed beyond the brief:
+- D: admin custody-release and dispute-resolve returned 500 on PostgreSQL
+  for every call (FOR UPDATE on a nullable outer join).
+- E: MPESA_STK_IN_FLIGHT_SECONDS was documented but never read.
+
+Decisions for the user:
+- Partner markup cap: a flat 2.00x for every tier makes the tier A/B max
+  client price (3.00 / 2.50) unreachable. Keep it flat or make it per-tier?
+- Whether the 38 "additional" models should become canonical.
+- catalog/urls.py (CatalogBrowseView) stays unwired. Delete it once printy_ui
+  is confirmed not to call it.
+
+Not verifiable offline: live Redis, real SMTP, real Daraja (and Safaricom's
+current callback IP list), real SMS/WhatsApp, real Google sign-in, nginx,
+and the GitHub Actions run itself.
+PostgreSQL was verified locally with the bundled PostgreSQL 16.2 from the
+pip package pgserver; it is not the CI container.
+
+################################################################################
+PROMPT 7
+################################################################################
+==============================================================================
+PROMPT 7 / STEP 0 - branch check and baseline
+==============================================================================
+Branch: arena/9db94b23-printy-api (git branch --show-current; not main or
+master). Nothing pushed.
+The sandbox was reset again: HEAD was back at 70fd070, with the Prompt 0-6
+work present as uncommitted working-tree changes, and no venv or local
+PostgreSQL. I recreated the venv and the pgserver PostgreSQL 16.2 cluster,
+and committed the tree as "audit: restore Prompt 0-6 audit work after
+sandbox reset". Its content is identical to the Prompt 6 HEAD (b07a4e6).
+Baseline:
+- SQLite: manage.py test -> Ran 1869, OK (skipped=1); pytest -> 1868
+  passed, 1 skipped.
+- PostgreSQL 16.2 (TEST_DB_ENGINE=postgresql): manage.py test -> Ran 1869,
+  OK.
+
+==========================================================================
+PROMPT 7 / PART 0 - audit(#1c): recover lost payment confirmations
+==========================================================================
+Branch: arena/9db94b23-printy-api (not main/master). Not pushed.
+
+Problem
+- A canonical payments.Payment whose Daraja STK callback was lost stayed in
+  `processing` forever: nothing queried Daraja, and the super-admin
+  resolve-review path only accepts `needs_review`, so it needed an engineer.
+- Payment.STATUS_EXPIRED existed but no code set it.
+- PlatformFeePolicy.get_max_client_price returned P + P x 2.00 = 3x (the
+  enforced partner cap is 2x) and had no callers.
+
+Changes
+- payments/services.py
+  * MpesaDarajaClient.query_stk_status(checkout_request_id): POST
+    /mpesa/stkpushquery/v1/query with the same shortcode/password/token as
+    the push. Returns {"state": "final"|"processing", "data"}; "processing"
+    = errorCode 500.001.1001 / "being processed". Anything else (network,
+    401, 429, malformed) raises MpesaDarajaError with .http_status. It never
+    changes state.
+  * handle_stk_callback(..., source="callback"|"stk_query"): checks are
+    unchanged; `source` only changes the needs_review reason text for a
+    query success without receipt/amount.
+  * ACTIVE_PAYMENT_STATUSES now includes `expired`, so a retry after expiry
+    reuses the SAME Payment row (a late success for the old prompt and a new
+    push can never settle two rows for one quote; a second debit is flagged
+    needs_review by the existing callback rule).
+- payments/recovery.py (new): recover_payment(payment, ...) and
+  recover_stale_payments(limit, older_than, max_age, interval_seconds, ...).
+  * Candidates: MpesaSTKRequest in pending/sent/expired, no callback
+    received, real checkout id (TEST-CR- stub ids skipped), sent before
+    now - MPESA_STK_IN_FLIGHT_SECONDS and after now - MAX_AGE, on a payment
+    in pending/processing/expired.
+  * Final answer -> rebuilt callback body (only fields Daraja returned;
+    nothing invented) -> handle_stk_callback, i.e. the same state machine,
+    amount and receipt checks, select_for_update and idempotency as a
+    verified callback.
+  * Still processing + prompt past the window -> MpesaSTKRequest(expired),
+    Payment(processing -> expired) when no other prompt is in flight.
+  * Daraja error / ImproperlyConfigured / malformed answer -> no state change
+    (the HTTP call is made with no lock held; malformed answers roll back).
+  * Final payments (paid/failed/cancelled/needs_review) are never queried.
+  * Stub mode (MPESA_FORCE_STUB / MPESA_ENVIRONMENT=test) never queries.
+  * Rate limits: sleep MPESA_RECOVERY_QUERY_INTERVAL_SECONDS between queries;
+    per-prompt cooldown MPESA_RECOVERY_QUERY_COOLDOWN_SECONDS via cache.add
+    (atomic in Redis, so concurrent runners do not double-query); --limit per
+    run; a 429 stops the batch.
+- payments/management/commands/mpesa_recover_payments.py (new): --limit,
+  --older-than-seconds, --max-age-hours, --payment-id, --dry-run. Meant for
+  cron (*/5), same mechanism as mpesa_reconcile / process_email_outbox.
+- api/admin_ops_views.py + api/urls.py: POST /api/admin/payments/<id>/recover/
+  (IsSuperUser, same as resolve-review). Queries immediately (no threshold,
+  no cooldown), writes an admin audit LogEntry (action
+  payment_recovery_query), 502 on Daraja error (nothing changed), 404 unknown.
+- api/payment_views.py: the managed-job STK push also accepts an `expired`
+  payment (same row), matching ACTIVE_PAYMENT_STATUSES.
+- config/settings.py: MPESA_RECOVERY_QUERY_INTERVAL_SECONDS (float >= 0,
+  default 1.0), MPESA_RECOVERY_QUERY_COOLDOWN_SECONDS (int >= 0, default 60),
+  MPESA_RECOVERY_MAX_AGE_HOURS (int >= 1, default 24); invalid values raise
+  ImproperlyConfigured at startup.
+- pricing/models.py: deleted PlatformFeePolicy.get_max_client_price (grep over
+  the whole repo: only its own definition referenced it).
+- Docs: DARAJA_PRODUCTION_CHECKLIST.md (lifecycle diagram, new recovery
+  section with the answer -> result table, `expired` row moved into the
+  states table, which also fixes a paragraph that had split that table),
+  env_vars.md (3 vars), DEPLOY_NOTES.md (cron step, frontend follow-ups,
+  known gap rewritten), API_URL_AUDIT.md + api_contract.md (new endpoint),
+  CANONICAL_MODELS.md (recovery + expired semantics).
+
+KEY CHOICE - a bare STK Query "success" is never paid
+- Daraja's documented STK Query answer carries ResultCode/ResultDesc but NO
+  MpesaReceiptNumber and NO Amount. The callback path requires both (Amount ==
+  stored expected amount), so a query success goes through the unchanged
+  callback rule and lands in `needs_review` with the reason "Daraja STK Query
+  reports the prompt was completed but returns no receipt or amount;
+  reconcile against the M-Pesa statement, then resolve."
+- If an answer ever does carry CallbackMetadata with a receipt and a matching
+  Amount, it is applied as `paid` exactly like a callback; a different Amount
+  -> needs_review.
+- So the required test "a lost success is recovered to paid" is covered two
+  ways: (1) answer with receipt+amount -> paid automatically; (2) Daraja's
+  real answer -> needs_review -> super-admin resolve-review with receipt and
+  amount -> paid (end-to-end test). This closes the known gap: a lost
+  callback no longer needs an engineer.
+- Fully automatic settlement would need the Transaction Status API (async,
+  initiator credentials, keyed by receipt, which we do not have for a lost
+  STK callback). Not done; recorded as a known gap.
+
+KEY CHOICE - expired is not final
+- Expired prompts keep being queried for MPESA_RECOVERY_MAX_AGE_HOURS and a
+  late callback for an expired prompt is still applied (existing
+  late_for_expired rule), so a late success becomes paid/needs_review. A late
+  FAILURE for an expired prompt leaves the payment alone (existing rule).
+- api/payment_views.py still reports `is_terminal: true` for expired (left
+  unchanged; frontend follow-up: keep refreshing / offer "pay again").
+
+Tests added: payments/tests/test_audit_stk_recovery.py (38 tests)
+- RecoverLostConfirmationTests (21): lost success with receipt+amount -> paid;
+  bare success -> needs_review never paid; bare success + admin resolution ->
+  paid; wrong amount -> needs_review; Daraja error (500, network, 429,
+  ImproperlyConfigured) -> state untouched; malformed answer -> untouched;
+  already-final (paid/failed/cancelled/needs_review) untouched and not
+  queried; running twice idempotent (one Daraja call, one ManagedJob); real
+  callback after recovery is a duplicate; 1032 -> callback failure branch
+  (cancelled); still processing past window -> expired (prompt + payment);
+  inside window -> unchanged; recent prompts not queried by the batch; late
+  success for expired prompt applied by recovery and by a callback; late
+  failure leaves expired; prompts older than max age not queried; queries
+  spaced + 429 stops the batch; cooldown; batch limit; retry after expiry
+  reuses the same Payment row.
+- AdminRecoverEndpointTests (5): only super-admin (client, manager, plain
+  staff 403; anonymous 401/403; Daraja not called); super-admin recovers and
+  it is audited; Daraja error -> 502, unchanged; final payment reported
+  skipped_final; unknown payment 404.
+- RecoverCommandTests (3): command recovers and prints counts; --dry-run
+  queries nothing; --payment-id.
+- StubModeRecoveryTests (2): stub mode never queries; expired payment can push
+  again on the same row.
+- StkQueryClientTests (4): final answer + request shape; 500.001.1001 ->
+  processing; 429/401/garbage -> MpesaDarajaError with http_status; network
+  error.
+- FeePolicyCleanupTests (1): get_max_client_price is gone.
+- RecoverySettingsTests (2): defaults/overrides; invalid values refused at
+  startup (subprocess boot).
+
+Fail-before (git worktree at HEAD before this change, new test file copied
+in): the module fails to import (payments.recovery does not exist). With that
+import made optional in the worktree copy only: 36 of 38 tests fail. The 2
+that already passed are guards, not new behaviour:
+test_unknown_payment_is_404 (the URL did not exist, so 404 anyway) and
+test_expired_payment_can_push_again_on_the_same_row (initiate_stk_push never
+blocked an expired payment).
+
+Counts (zero env setup, env -i):
+- SQLite  manage.py test : Ran 1907, OK (skipped=1)   [1869 + 38]
+- pytest                 : 1906 passed, 1 skipped
+- PostgreSQL 16.2 (pgserver, TEST_DB_ENGINE=postgresql) manage.py test:
+  Ran 1907, OK
+- makemigrations --check : No changes detected (no model/migration change).
+- Production `check --deploy` boot: E002/E003 (SMTP placeholders), W021
+  (HSTS preload, --deploy), W902 (sandbox) - identical before and after.
+
+Not verifiable offline
+- Real Daraja STK Query: request/answer shapes follow Daraja documentation
+  and are covered with mocks only (including the 500.001.1001 "being
+  processed" body). Verify one real lost-callback case in sandbox.
+- Redis-backed cooldown across processes: tests use LocMem; cache.add is
+  atomic in Redis but that was not exercised here.
+
+
+==========================================================================
+Prompt 7 — investigation (PART 1, read-only; no code changed)
+==========================================================================
+RESULT: the investigation CONTRADICTS the PART 2 design in two places
+(items A and B below). Per the instruction, PART 2 was NOT started. It
+needs the user's decisions listed at the end.
+
+1. How client money is held
+- Daraja STK collects into Printy's own paybill/till; there is no escrow
+  provider. "Custody" is bookkeeping: payments.Payment(paid) ->
+  ManagedJob.payment_status=confirmed (jobs/services/managed_job_creation.py).
+  Custody ends when an admin marks payouts released
+  (ManagedJob.payment_status=released). RELEASE_READY / PAYOUT_ON_HOLD exist
+  in ManagedJobPaymentStatus but no code assigns them.
+
+2. What marks a job delivered / complete
+- jobs/delivery_services.py: mark_managed_job_delivered (ops/shop/partner;
+  from in_production|finishing|ready) -> status=delivered, delivered_at;
+  confirm_managed_job_completed (client or ops; from ready|delivered) ->
+  status=completed, completed_at.
+- Inconsistency: release_managed_job_payouts allows job status READY or
+  COMPLETED (RELEASE_ALLOWED_JOB_STATUSES) - READY is NOT delivered - while
+  the admin custody endpoint requires COMPLETED.
+
+3. Lateness holds (user believes "10% cut until resolved" - verified, NOT
+   as believed). There are two separate, unconnected mechanisms:
+  a) jobs/admin.py action flag_late_sla_hold (Django admin, manual only):
+     sets ManagedJob.payout_hold=True and writes
+     operational_snapshot["lateness_hold"] = 10% of the shop payout
+     (rate/base/amount recorded). payout_hold blocks the WHOLE release (shop
+     AND manager), not 10% of it. Clearing it (admin action
+     clear_payout_hold, or dispute resolve) releases the FULL shop payout:
+     release_managed_job_payouts never subtracts anything. So the "10%" is
+     recorded but never deducted - there is no deduction policy in code.
+  b) jobs/timing_services.py settle_rush_lateness (automatic on lateness):
+     only for jobs with a rush premium; sets rush_premium_status
+     held/refunded/not_refunded and records a JobEvent "penalty" of 10% of
+     the RUSH PREMIUM (not of any payout). Its docstring: "neither touches
+     the printer payout automatically". No code ever resolves a "held" rush
+     premium (nothing sets "released"), and no refund is executed.
+  record_lateness itself "never touches any payout, fee or held amount".
+
+4. Disputes
+- Open: exception_status=dispute_open via the raise-issue workflow
+  (jobs/workflow.py), or status=disputed / dispute_open flag (no code path
+  sets those two today; only filters read them).
+- Resolve: POST /api/admin/disputes/<job_id>/resolve/ (IsSuperUser):
+  release (clears hold, status back to completed/ready, then CALLS
+  release_managed_job_payouts = manual "released"), dismiss, refund (job
+  cancelled, payment_status=refunded; no money moves).
+
+5. Where shop_payout / manager_payout come from
+- QuoteFinancialSplit has shop_payout, manager_payout AND broker_payout,
+  printy_fee, client_total. get_financial_split_for_job exposes
+  broker_payout (the manager share used everywhere).
+- Copies: ManagedJob.broker_payout = split.broker_payout at job creation;
+  JobAssignment.shop_payout = split.shop_payout at dispatch. The existing
+  release pays from those COPIES (refusing if the split promises a manager
+  share the job lacks), then reconciles against the split
+  (client_total - payouts - printy_fee == 0).
+
+6. can_receive_payouts
+- accounts/services/capabilities.py: True for partner/broker (manager),
+  production (shop) and is_staff/is_superuser; per-user
+  capability_overrides can turn it off/on. Helper
+  accounts.services.roles.user_can_receive_payouts. Verified phone =
+  UserProfile.phone_verified_at set + phone_normalized (unique when
+  verified). The shop payee would be Shop.owner.
+
+7. Existing payout / release code
+- jobs.ManagedJobPayout (CANONICAL: listed in docs/CANONICAL_MODELS.md under
+  jobs). Unique (managed_job, recipient_role in {manager, shop}); status
+  pending/processing/released/failed/on_hold/cancelled; disbursement_mode
+  manual|automatic; transfer_reference; provider_response JSON;
+  failure_reason/failed_at; released_at/released_by; metadata;
+  AUTOMATIC_DISBURSEMENT_AVAILABLE=False ("no outbound provider").
+- jobs/payout_services.py: release_managed_job_payouts (select_for_update
+  of=self, get_or_create per role, marks "released" = admin attests a manual
+  transfer, sets job payment_status=released, JobStatusEvent with
+  reconciliation); record_payout_failure (retryable on the same row).
+- Read by settlement projections in api/payment_views.py (parties see
+  "paid" when their row is released) and admin custody rows.
+
+8. How the Platform Admin releases money today (all manual; the API only
+   RECORDS it, the admin moves money out of band)
+- POST /api/admin/custody/<job_id>/release/ (IsSuperUser; job completed,
+  no payout_hold) -> release_managed_job_payouts + admin audit.
+- POST /api/managed-jobs/<id>/payouts/release/ (_is_admin_user: is_staff OR
+  superuser OR admin actor role).
+- POST /api/admin/disputes/<job_id>/resolve/ with resolution=release.
+- Django admin actions on ManagedJob (release / hold / clear hold).
+- transfer_reference is auto-filled "MANUAL-..." (not a real reference).
+
+9. Background mechanism
+- No Celery / RQ / scheduler in requirements (redis is only the cache).
+  Background work = management commands run by cron: mpesa_reconcile
+  (docstring: cron */10), process_email_outbox, expire_quotes,
+  notify_stage_owners, purge_pending_artwork, and now
+  mpesa_recover_payments. PART 2's worker would be a management command.
+
+10. Daraja B2C needs vs. what exists
+- B2C (/mpesa/b2c/v3/paymentrequest, v1 also exists): OriginatorConversationID
+  (our idempotency key), InitiatorName, SecurityCredential (initiator
+  password encrypted with Safaricom's public certificate), CommandID
+  (BusinessPayment / SalaryPayment / PromotionPayment), Amount (whole KES),
+  PartyA (B2C shortcode - usually NOT the STK paybill), PartyB (MSISDN),
+  Remarks, QueueTimeOutURL, ResultURL, Occasion. Answer is async: Result
+  body with ConversationID/OriginatorConversationID, ResultCode,
+  TransactionID, ResultParameters (TransactionAmount, ReceiverParty...).
+- No B2C code exists anywhere in the repo.
+- Existing MPESA_* settings: MPESA_ENV / MPESA_ENVIRONMENT, MPESA_BASE_URL,
+  MPESA_CONSUMER_KEY/SECRET, MPESA_SHORTCODE, MPESA_SHORTCODE_TYPE,
+  MPESA_PASSKEY, MPESA_INITIATOR_NAME, MPESA_INITIATOR_PASSWORD,
+  MPESA_SECURITY_CREDENTIAL (documented "Future B2C/status flows only"),
+  MPESA_TIMEOUT_SECONDS, MPESA_FORCE_STUB, MPESA_CALLBACK_URL,
+  MPESA_STK_CALLBACK_URL, MPESA_RESULT_URL, MPESA_TIMEOUT_URL (both default
+  to the STK callback URL; the callback view dispatches on body shape),
+  MPESA_CALLBACK_SECRET(+_REQUIRED), MPESA_CALLBACK_ALLOWED_IPS,
+  MPESA_TRUSTED_PROXIES, MPESA_STK_IN_FLIGHT_SECONDS, MPESA_RECOVERY_* (new),
+  MPESA_ACCOUNT_REFERENCE_DEFAULT, MPESA_TRANSACTION_DESC_DEFAULT.
+  Missing for B2C: a B2C shortcode (PartyA), CommandID, and dedicated B2C
+  result/timeout URLs (or a body-shape dispatch for B2C results).
+- B2C itself is not verifiable offline (needs a Safaricom B2C product and
+  initiator credentials).
+
+CONTRADICTIONS WITH THE PART 2 DESIGN
+A. "Payout model: one per (job, party shop|manager), unique (job, party)".
+   That model ALREADY EXISTS and is canonical: jobs.ManagedJobPayout, unique
+   (managed_job, recipient_role), used by 4 manual release paths and by the
+   party-facing settlement projections. A second Payout model for the same
+   obligation would give two sources of truth: a manual release would not
+   see an automatic B2C payout (and vice versa), which is a double-payment
+   risk - exactly what PART 2 is meant to prevent. The user's standing rule
+   is: if an item conflicts with docs/CANONICAL_MODELS.md, stop and report.
+B. "Amounts = QuoteFinancialSplit minus the lateness deduction per existing
+   policy" and "lateness hold resolved". There is no lateness deduction in
+   code: the 10% (of the shop payout) is only recorded and the whole payout
+   is held until an admin clears it, after which the full amount is
+   released; the other 10% is of the rush premium and never touches
+   payouts. "Existing policy" therefore means deduction = 0, which is not
+   what the user believes.
+Also needs a decision (not a contradiction):
+C. Which job statuses are payable: the service allows READY (not delivered);
+   the custody endpoint requires COMPLETED; PART 2 says delivered/complete.
+D. Pay from the split directly (PART 2) or from the job/assignment copies
+   (existing release, with its split cross-check)? They should be equal; a
+   mismatch would become needs_review.
+E. Dispute "release" calls the manual release. With automatic payouts on,
+   should it instead just clear the hold and let the worker pay?
+
+==========================================================================
+PROMPT 7 / PART 2 - STOPPED before building (precondition of decision 3)
+==========================================================================
+User decisions received (recorded for when PART 2 resumes):
+1. Extend jobs.ManagedJobPayout (new states, audit log, B2C ids, idempotency
+   key); no second model; every manual release path goes through the same
+   state machine and the unique (job, party) constraint.
+2. Lateness: hold-only, no deduction (current behaviour). The rush-premium
+   hold must NOT block automatic payouts; keep recording it and show it in
+   the admin money summary. OPEN DECISION: "deduction policy" (whether the
+   recorded 10% of the shop payout should ever be deducted) - undecided,
+   current code deducts nothing.
+3. Pay only when ManagedJob.status == completed - but FIRST confirm that
+   `completed` can only be reached after delivery is confirmed; otherwise
+   stop and report.
+4. AUTO_PAYOUTS_ENABLED=True: dispute "release" only clears the hold and the
+   runner pays. False: manual release behaviour unchanged.
+
+Precondition check for decision 3: FAILED - `completed` is reachable without
+delivery. Verified by code reading AND by a scratch API test (run, then
+deleted; not committed), both returning 200 with job.status=completed and
+delivered_at=None:
+a) SHOP, no client involvement: POST /api/job-assignments/<pk>/mark-completed/
+   (alias /api/shop/assignments/<pk>/complete/) -> JobAssignmentCompletedView
+   -> jobs/assignment_services.mark_assignment_completed: allowed from
+   assignment status READY, sets ManagedJob.status=COMPLETED. Permission
+   (_can_manage_assignment): ops, or the assigned shop's owner. No
+   delivered_at, no client confirmation. The payee itself can therefore make
+   its own job payable.
+b) CLIENT or OPS: POST /api/managed-jobs/<pk>/delivery/confirm/ (and the card
+   action confirm_delivery) -> jobs/delivery_services.
+   confirm_managed_job_completed: allowed from READY as well as DELIVERED, so
+   the job skips `delivered` (delivered_at stays None). For pickup jobs this
+   is the client confirming they collected it - arguably a delivery
+   confirmation, but it is not recorded as one.
+c) Django admin: ManagedJobAdmin has no readonly_fields, so staff can set
+   status=completed directly.
+Safe paths: dispute release/dismiss set COMPLETED only when delivered_at is
+set (otherwise READY); mark_managed_job_delivered sets delivered_at.
+
+Note: the existing MANUAL custody release (POST /api/admin/custody/<id>/
+release/) already treats `completed` as payable, so path (a) affects it today
+too (mitigated only by an admin choosing to release).
+
+Nothing for PART 2 was built. No AUTO_PAYOUTS_ENABLED anywhere.
+
+Sandbox reset (again) before this step: commits f17588c and ec59a3b were
+lost (objects gone), working tree intact. Re-committed as two commits with
+the same content and messages: "audit: restore Prompt 0-6 audit work after
+sandbox reset (#0-#10d, tier3)" and "audit(#1c): recover lost payment
+confirmations" (PART 0 split back out by reversing exactly its edits; file
+list identical to the original PART 0 commit). This results.txt section and
+the PART 1 investigation above are uncommitted (they go into the PART 2
+commit).
+
+======================================================================
+PROMPT 7 / HANDOVER CODE - "feat: handover code confirms delivery before completion"
+======================================================================
+Branch: arena/9db94b23-printy-api (not main/master). Not pushed.
+Why: the user's answer to the PART 2 stop (decision 3). `completed` must mean
+"the buyer confirmed receipt". Built as its own commit BEFORE PART 2.
+
+User rule (verbatim intent): the printer adds a handover code (e.g. K7-4Q)
+when marking the job dispatched; the buyer clicks "I received it" and enters
+the code; if the codes match the job is completed and the buyer sees
+"Your job is complete."
+
+What changed
+- jobs/handover.py (new): normalize_handover_code (letters+digits, upper
+  case: "k7 4q" == "K7-4Q"), validate_new_handover_code (4-12 chars),
+  constant-time compare (hmac.compare_digest), MAX_FAILED_ATTEMPTS=5,
+  HANDOVER_COMPLETE_MESSAGE="Your job is complete.", HandoverCodeError
+  (ValueError subclass with a stable `code`).
+- jobs/models.py + migration jobs/0008_managedjob_handover_code: ManagedJob
+  handover_code, handover_code_set_at/_by, handover_failed_attempts,
+  handover_confirmed_at/_by, completion_method (buyer_handover |
+  buyer_no_code | admin_dispute). Additive, nullable/defaulted; no data
+  migration.
+- jobs/delivery_services.py:
+  * mark_managed_job_delivered requires handover_code (400
+    handover_code_required / handover_code_invalid); stores it normalised and
+    who set it. The idempotent no-op on delivered/completed never changes the
+    code.
+  * confirm_managed_job_completed: only from DELIVERED (READY now refused:
+    "the printer must mark it dispatched first"). Locks the job row
+    (select_for_update of=self). Code must match; a wrong/missing code
+    increments handover_failed_attempts (saved even though the call fails)
+    and leaves the job delivered; at 5 wrong attempts -> handover_locked.
+    Success records handover_confirmed_at/_by and completion_method.
+  * Legacy: a job already `delivered` before this release has no code; the
+    buyer can still confirm it (no lock-out of in-flight jobs) but it is
+    marked completion_method=buyer_no_code so PART 2 can exclude/flag it.
+- jobs/assignment_services.mark_assignment_completed: refuses unless the job
+  is already COMPLETED (the assignment follows the job). This closes path (a)
+  - shop POST /api/job-assignments/<id>/mark-completed/ -> 400, job unchanged.
+  The internal call from confirm_managed_job_completed still works because the
+  job is saved COMPLETED first.
+- jobs/serializers.py: HandoverActionSerializer (note + handover_code); the
+  shop assignment READY row no longer advertises "mark_completed" (only
+  "mark_delivered"). ManagedJobSerializer has an explicit field list - the
+  code is never serialized.
+- jobs/views.py: ManagedJobDeliverView / ManagedJobConfirmCompletionView read
+  handover_code, return {"detail","code"} on HandoverCodeError; confirm adds
+  "message": "Your job is complete." on success.
+- jobs/card_views.py: card actions mark_dispatched / coordinate_delivery /
+  confirm_delivery pass request.data["handover_code"]; HandoverCodeError ->
+  400 with its code; confirm_delivery success adds the message.
+- jobs/action_resolver.py: READY buyer branch -> "none"; labels
+  confirm_delivery="I received it", mark_dispatched="Mark dispatched";
+  explanations mention the code; params.requires_handover_code=True on the
+  three handover actions; buyer headline on completed = "Your job is
+  complete." (other roles keep "Job completed").
+- jobs/admin.py: ManagedJobAdmin readonly status, delivered_at, completed_at
+  and the handover trail; handover_code excluded from the form (path (c)
+  closed).
+- api/admin_ops_views.py: dispute release/dismiss that lands on COMPLETED
+  (only possible with delivered_at, unchanged) records
+  completion_method=admin_dispute and completed_at.
+- README.md step 9, docs/CANONICAL_MODELS.md (Batch 7 flow): documented.
+  No new model; fields only.
+
+Choices and why
+- Who generates the code: the PRINTER types it (user wording "the printer
+  adds a handover code"). The server only validates/normalises it. A
+  system-generated code would need a way to get it onto the parcel, which
+  the frontend does not have today.
+- Stored plain (not hashed): a 4-12 char code is brute-forceable offline
+  anyway; the real protections are (1) never serialized, (2) excluded from
+  Django admin, (3) 5-attempt lock, (4) constant-time compare.
+- Ops override policy: ops/staff confirming completion ALSO need the code
+  (no silent bypass). A buyer who lost the code / locked it goes through
+  super-admin dispute resolution, which is logged with a reason and recorded
+  as completion_method=admin_dispute. Manager (partner) and printer can never
+  confirm (403, unchanged).
+- Who may mark dispatched: unchanged (ops/shop/partner); whoever dispatches
+  adds the code.
+
+Tests
+- New: jobs/test_handover_code.py - 20 tests (mark dispatched needs code,
+  too-short refused, normalised + never returned in card/list for buyer,
+  manager, printer; repeat dispatch keeps code; printer card mark_dispatched
+  needs code; matching code completes + message; missing/wrong refused and
+  counted; lock after 5; READY cannot be confirmed; ops needs the code;
+  printer cannot confirm; legacy buyer_no_code; card "I received it" wrong
+  then right + buyer headline; shop mark-completed refused from READY and
+  DELIVERED; shop READY queue no longer offers mark_completed; Django admin
+  status read-only / code hidden; admin dispute completion recorded;
+  normaliser).
+- Fail-before (git worktree at HEAD, module import shimmed): 17/19 fail
+  (the 20th, the queue test, was added afterwards and fails before too:
+  "mark_completed" was in the list). The 2 that pass before are the pure
+  normaliser test and "printer cannot confirm" (existing 403 guard kept).
+- Updated (made stricter, not weaker): api/test_managed_job_delivery_flow.py
+  * shop mark-delivered sends handover_code, asserts it is stored;
+  * ops mark-delivered sends a code; client still 403;
+  * test_ops_can_confirm_completion_and_shop_cannot now first asserts ops
+    confirm from READY -> 400, then completes from DELIVERED with the code;
+    shop still 403.
+  tests/test_e2e_job_simulation.py S10 sends the code (that simulation is
+  blocked earlier at S6 STK under test settings - pre-existing, records only).
+- Unchanged and still passing: jobs/test_stage1b_actions
+  test_buyer_confirms_delivery (legacy no-code delivered job),
+  test_client_confirms_completion_after_delivery (same), stage1a READY row.
+- Not updated: rerun_jobab_verification.py (root-level manual script, not in
+  the suite) still lists the shop mark-completed route; it will now get 400.
+
+Counts
+- manage.py test (SQLite): Ran 1927, OK (skipped=1)   [was 1907]
+- pytest: 1926 passed, 1 skipped
+- PostgreSQL (pgserver): Ran 1927, OK
+- makemigrations --check: No changes detected
+- printy_test.sqlite3 removed.
+
+Frontend follow-ups (printy_ui not edited)
+- Mark dispatched / Coordinate delivery: a handover-code input (send
+  `handover_code`), shown when next_action.params.requires_handover_code.
+- Buyer "I received it": code input; show `message` ("Your job is
+  complete.") on 200; show `detail` for handover_code_mismatch /
+  handover_code_required / handover_locked (locked -> "contact support").
+- Shop assignment queue: remove the "Mark completed" button (route now 400).
+
+PART 2 impact: decision 3 ("pay only when completed") is now satisfied -
+completed is reachable only via buyer handover confirmation (or legacy
+buyer_no_code, or super-admin dispute resolution). PART 2 should treat
+completion_method=buyer_no_code as needs_review rather than auto-pay
+(to be confirmed in PART 2).
+
+==========================================================================
+PROMPT 7 / PART 2 - automatic payouts via Daraja B2C (AUTO_PAYOUTS_ENABLED stays OFF)
+==========================================================================
+Built on decisions 1-4 (see "PART 2 - STOPPED" above) plus the user's
+follow-up: jobs completed as buyer_no_code are never auto-paid; they go to
+needs_review and need an admin approval (amount confirmed, reason logged),
+then follow the normal payout path.
+
+Test-first: NOT followed for the core, and I'm recording that honestly.
+The model fields, state machine, settings, B2C client and runner were written
+BEFORE their tests. To compensate:
+- Against the pre-PART-2 commit (89d81ac) the new test module fails (it
+  cannot even import config.payout_config / jobs.auto_payouts). That proves
+  little on its own, so:
+- Mutation check: each guard was broken on purpose, one at a time, and the
+  suite re-run. 22/22 mutations were caught by at least one test: completed
+  gate, dispute gate, lateness gate, payment gate, payment needs_review,
+  buyer_no_code, split > client total, amount mismatch, phone verified,
+  capability, per-payout max, daily cap, callback receipt+exact amount,
+  ConversationID match, duplicate callback, approve exact amount,
+  confirm_not_paid, ambiguous-never-retried, the manual-release guard, the
+  state-machine edge table, B2C 5xx/read-timeout classification. The first
+  pass found 3 untested guards (completed-at-send-time, manual guard, edge
+  table - the last two only covered each other); tests were added for each.
+- Three later fixes WERE done test-first (red, then green):
+  a) record_payout_failure (manual path) could move a `processing` (in-flight
+     B2C) payout to failed, i.e. retryable while Daraja may still pay. Edge
+     processing->failed/needs_review is now B2C/system-only.
+  b) cancel_dead_payouts would cancel a needs_review payout whose money may
+     already have moved (ambiguous send / timeouts). Now left for an admin.
+  c) Jobs completed BEFORE the handover release have completion_method=""
+     (migration 0008 has no backfill; some were completed by the shop with no
+     delivery - PART 1 finding (a)). The runner AUTO-PAID them (test red: 240 +
+     800 sent). Now an allow-list: only buyer_handover / admin_dispute are
+     auto-payable; buyer_no_code -> needs_review legacy_no_handover_code;
+     anything else -> needs_review completion_not_verified. Both are
+     approvable with confirm_amount + reason.
+
+What was built
+- jobs.ManagedJobPayout extended (decision 1, no second model; migration
+  0009): status needs_review; waiting_reason/detail; audit_log (every
+  transition: at, event, source, actor, reason, key, amount); attempt_count,
+  next_attempt_at, sent_at; idempotency_key (unique); b2c_conversation_id,
+  b2c_transaction_id; reviewed_at/by; index job_payout_due_idx. The unique
+  (managed_job, recipient_role) constraint still means one row per party.
+- jobs/payout_state.py: ONE state machine used by the manual release, the
+  failure recorder, the runner, callbacks and admin review.
+    processing -> released only via a B2C callback; -> failed / needs_review
+      only via auto/B2C/system
+    needs_review -> pending only via admin review; -> released only via a B2C
+      callback (late success); -> cancelled
+    released, cancelled: final
+  Manual release refuses processing / needs_review / cancelled
+  (PayoutTransitionError, a ValidationError -> 400 in every release view and
+  the Django admin action).
+- payments/b2c.py: B2CClient.send() -> /mpesa/b2c/v3/paymentrequest.
+  B2CNotSent (OAuth fail, connect timeout, 4xx, ResponseCode != 0) = safe to
+  retry with a NEW key. B2CAmbiguous (read timeout, dropped connection, 5xx,
+  unparseable body) = never retried automatically. Stub mode never touches the
+  network and can never produce a released payout.
+- jobs/auto_payouts.py: runner, callbacks, admin actions, money summary.
+  Eligibility (re-checked under row locks, job then payout, at send time):
+  completed with buyer_handover/admin_dispute; no open dispute; no lateness
+  hold (payout_hold); payment verified (a Payment paid, none needs_review).
+  A held rush premium does NOT block (decision 2), and the money summary
+  shows it. Amounts come from the stored QuoteFinancialSplit and must match
+  the job/assignment copies, be whole KES, and shop+manager <= client_total.
+  Payee: can_receive_payouts + verified phone, otherwise pending with a
+  waiting_reason. Limits: AUTO_PAYOUT_MAX_AMOUNT per payout,
+  AUTO_PAYOUT_DAILY_CAP per Nairobi day -> needs_review.
+  Send: commit `processing` + key PRINTY-PO<id>-A<n> BEFORE the request.
+  Retry with backoff base*2^(n-1); after AUTO_PAYOUT_MAX_ATTEMPTS ->
+  needs_review retries_exhausted. No result in
+  AUTO_PAYOUT_RESULT_TIMEOUT_MINUTES -> needs_review.
+  Callbacks: matched on key + stored ConversationID. Success needs a receipt +
+  the exact amount. Duplicate = no-op; unknown/stale/mismatch/wrong amount
+  change nothing. A queue timeout -> needs_review. When all payouts for a job
+  are released, job.payment_status=released and the event
+  payout_released_auto is recorded.
+- Decision 4: AUTO_PAYOUTS_ENABLED on -> dispute "release" only clears the
+  hold and completes the job; the runner pays. Off -> unchanged manual
+  release. A release blocked by an in-flight/review payout now returns 400
+  release_blocked and rolls the resolution back (it was a 500 before).
+- Endpoints (jobs/payout_views.py):
+    POST /api/payments/mpesa/b2c/result/<secret>/, /b2c/timeout/<secret>/ -
+      same gate as STK (secret path + Safaricom IP; X-Forwarded-For spoof
+      refused); always 200 to Daraja.
+    super_admin only: GET /api/admin/payouts/ (status, role, job,
+      waiting_reason, mode filters); POST /api/admin/payouts/<id>/approve/
+      {confirm_amount, reason, confirm_not_paid}; POST .../retry/ {reason};
+      GET /api/admin/jobs/<id>/money-summary/ (read-only). Approve/retry are
+      written to the Django admin LogEntry plus the payout audit_log.
+      confirm_not_paid is required for possibly-paid reasons. Data problems
+      (no split, split > total, mismatch, cents) can't be approved.
+    GET /api/payouts/mine/: shop owner sees own, manager own, client 403;
+      read-only (POST 405 for everyone).
+- Cron: python manage.py run_auto_payouts [--limit N]. Says "disabled" and
+  sends nothing while the flag is off.
+- Settings (config/settings.py + config/payout_config.py): AUTO_PAYOUTS_ENABLED
+  default off; MPESA_B2C_* (initiator/credential fall back to the existing
+  ones; result/timeout URLs derived from MPESA_CALLBACK_URL); limits above.
+  Production refuses to boot with the flag on and anything missing, a
+  placeholder, http:// URLs or a short secret. Enabled with an incomplete
+  config in non-production = fails closed (nothing sent, errors reported).
+  config/test_settings.py forces it all empty; tests opt in with the fake
+  TEST_B2C_SETTINGS.
+- api/payment_views.py: automatic_disbursement_available is now computed
+  (flag on and config valid) instead of the hard-coded False.
+- docs/DARAJA_PRODUCTION_CHECKLIST.md: new "Automatic payouts (B2C)" section
+  (gates, settings, money-safety rules, admin API, go-live checklist).
+- rerun_jobab_verification.py: no longer calls the removed shop
+  mark-completed route. The chain is now accept -> in production -> finishing
+  -> ready -> printer marks dispatched with a handover code -> the job's buyer
+  confirms with the code. pyflakes is clean apart from one pre-existing unused
+  import. Not run end-to-end: it needs a live server + seeded forensic actors.
+
+Tests added (71)
+- jobs/test_auto_payouts.py (66): disabled by default / command / fail
+  closed; happy path (amounts from split, one send per party, distinct keys,
+  callbacks release + close job); double run + double callback pay once;
+  every blocked case pays nothing (not completed, payment pending, payment
+  needs_review, buyer_no_code, blank completion method, no split, split >
+  total, mismatch, dispute, lateness hold, dispute opened after prepare, job
+  un-completed at send time); rush premium doesn't block; admin_dispute
+  auto-pays; payee waiting reasons then send; retry/backoff ->
+  retries_exhausted; ambiguous -> review, never retried; failure callback;
+  admin retry; result-timeout sweep; callback security (unsigned, wrong
+  secret, foreign IP, spoofed XFF, unknown key, ConversationID mismatch, wrong
+  amount, missing receipt, stale attempt, queue timeout, late success); max
+  + daily cap (+ approval, today-only); approval rules (exact amount, reason,
+  confirm_not_paid, non-approvable, super_admin only, LogEntry written);
+  manual path shares the state machine; dispute release with flag on/off +
+  rollback; money summary; my payouts; payouts + Printy fee == client total
+  across the fee-tier boundaries (waived and not); state machine unit tests;
+  production boot (refuses when misconfigured, boots when complete, default
+  off).
+- payments/tests/test_b2c.py (4): payload, not-sent vs ambiguous
+  classification, stub never touches the network.
+- tests/test_audit_role_visibility_matrix.py (+1): payout surfaces per role.
+
+Counts
+- manage.py test (SQLite): Ran 1998, OK (skipped=1)   [was 1927]
+- pytest: 1997 passed, 1 skipped
+- PostgreSQL (pgserver): Ran 1998, OK
+- makemigrations --check: No changes detected
+- No printy_test.sqlite3 artifacts in the tree.
+
+Commit note: the Prompt 0-6 restore and PART 0 share commit 0563135 (after
+the third sandbox reset, PART 0 could not be split back out cleanly because it
+touches the same files). Handover = 89d81ac. PART 2 = this one commit,
+including the PART 1 investigation / STOPPED sections above. Not pushed.
+
+Not verifiable offline: a real Daraja B2C sandbox round trip (send ->
+result callback), the Safaricom B2C callback IPs, nginx routing for
+/b2c/result|timeout/. These are in the docs go-live checklist.
+
+Still open
+- "Deduction policy" for lateness (decision 2) - undecided; nothing deducted.
+- Rush premium is recorded/held only; its own payout is not automated.
+- B2C needs the payee's verified phone; there is no SMS provider, so phone
+  verification depends on the existing flow.
+
+Frontend follow-ups (printy_ui not edited)
+- Admin: payouts queue (GET /api/admin/payouts/?status=needs_review) showing
+  waiting_detail; Approve dialog (amount re-typed, reason, "I checked the
+  M-Pesa statement - not paid" checkbox when the reason is
+  ambiguous_send_result / result_timeout / b2c_queue_timeout); Retry button
+  for failed; per-job money summary panel (incl. rush premium held).
+- Admin dispute "release": with auto payouts on, the response has
+  released=[] and an `auto_payouts` note - show "Hold cleared, will be paid
+  automatically"; handle 400 release_blocked.
+- Shop / manager: "My payouts" (GET /api/payouts/mine/) with status +
+  waiting_detail (e.g. "verify your M-Pesa number").
+- Payment cards: automatic_disbursement_available is now computed (still
+  false while the flag is off).
+
+Sandbox reset (fourth) before merge: commits 0563135 (Prompt 0-6 restore +
+PART 0), 89d81ac (handover code) and 30ea2da (PART 2) were lost again; the
+working tree survived intact. They could not be re-split reproducibly (the
+three steps touch the same files: results.txt, jobs/models.py,
+api/admin_ops_views.py, ...), so everything was recommitted as ONE commit
+before merging. Content is identical to the three commits described above.

@@ -12,6 +12,7 @@ from django.utils import timezone
 from jobs.audit_services import EVENT_PAYOUT_RELEASED, record_job_status_event
 from jobs.choices import ManagedJobPaymentStatus, ManagedJobStatus
 from jobs.models import ManagedJob, ManagedJobPayout
+from jobs.payout_state import SOURCE_MANUAL, assert_manual_release_allowed, transition
 from payments.models import Payment
 
 
@@ -62,35 +63,44 @@ def _promised_manager_payout(managed_job: ManagedJob) -> Decimal:
 
 
 def _release_payout(*, managed_job: ManagedJob, released_by, role: str, recipient, amount: Decimal, assignment=None, released_at, transfer_reference: str = ""):
-    payout, created = ManagedJobPayout.objects.get_or_create(
-        managed_job=managed_job,
-        recipient_role=role,
-        defaults={
-            "assignment": assignment,
-            "recipient": recipient,
-            "amount": amount,
-            "status": ManagedJobPayout.STATUS_RELEASED,
-            "released_at": released_at,
-            "released_by": released_by,
-            "release_reference": _release_reference(managed_job, role),
-            "disbursement_mode": ManagedJobPayout.DISBURSEMENT_MANUAL,
-            "transfer_reference": transfer_reference or _release_reference(managed_job, role),
-            "metadata": {"release_mode": "manual"},
-        },
+    """Mark one party's payout released by MANUAL transfer.
+
+    Goes through jobs.payout_state (Prompt 7 PART 2): a payout whose B2C
+    transfer is in flight, that needs admin review, or that was cancelled is
+    refused instead of being overwritten -- otherwise a manual release could
+    pay a party twice. The caller holds the job row lock.
+    """
+    payout = (
+        ManagedJobPayout.objects.select_for_update(of=("self",))
+        .filter(managed_job=managed_job, recipient_role=role)
+        .first()
     )
-    changed = created
-    if not created and payout.status != ManagedJobPayout.STATUS_RELEASED:
-        payout.assignment = assignment or payout.assignment
-        payout.recipient = recipient or payout.recipient
-        payout.amount = amount
-        payout.status = ManagedJobPayout.STATUS_RELEASED
-        payout.released_at = payout.released_at or released_at
-        payout.released_by = payout.released_by or released_by
-        payout.release_reference = payout.release_reference or _release_reference(managed_job, role)
-        payout.disbursement_mode = ManagedJobPayout.DISBURSEMENT_MANUAL
-        payout.transfer_reference = transfer_reference or payout.transfer_reference or payout.release_reference
-        # A payout that previously failed is being retried, so clear the
-        # failure trail and persist who retried it.
+    created = payout is None
+    if created:
+        payout = ManagedJobPayout(
+            managed_job=managed_job,
+            recipient_role=role,
+            amount=amount,
+            status=ManagedJobPayout.STATUS_PENDING,
+            metadata={"release_mode": "manual"},
+        )
+    if payout.status == ManagedJobPayout.STATUS_RELEASED:
+        return payout, False
+    assert_manual_release_allowed(payout)
+    previous_status = payout.status
+    payout.assignment = assignment or payout.assignment
+    payout.recipient = recipient or payout.recipient
+    payout.amount = amount
+    payout.released_at = payout.released_at or released_at
+    payout.released_by = payout.released_by or released_by
+    payout.release_reference = payout.release_reference or _release_reference(managed_job, role)
+    payout.disbursement_mode = ManagedJobPayout.DISBURSEMENT_MANUAL
+    payout.transfer_reference = transfer_reference or payout.transfer_reference or payout.release_reference
+    payout.waiting_reason = ""
+    payout.waiting_detail = ""
+    if not created:
+        # A payout that previously failed (or waited) is being retried by hand,
+        # so clear the failure trail and persist who retried it.
         payout.failure_reason = ""
         payout.failed_at = None
         metadata = dict(payout.metadata or {})
@@ -98,23 +108,17 @@ def _release_payout(*, managed_job: ManagedJob, released_by, role: str, recipien
         metadata["retried_at"] = released_at.isoformat()
         metadata["retried_by"] = getattr(released_by, "id", None)
         payout.metadata = metadata
-        payout.save(update_fields=[
-            "assignment",
-            "recipient",
-            "amount",
-            "status",
-            "released_at",
-            "released_by",
-            "release_reference",
-            "disbursement_mode",
-            "transfer_reference",
-            "failure_reason",
-            "failed_at",
-            "metadata",
-            "updated_at",
-        ])
-        changed = True
-    return payout, changed
+    transition(
+        payout,
+        ManagedJobPayout.STATUS_RELEASED,
+        source=SOURCE_MANUAL,
+        actor=released_by,
+        reason="manual release",
+        amount=str(amount),
+        previous=previous_status if not created else None,
+    )
+    payout.save()
+    return payout, True
 
 
 def record_payout_failure(
@@ -130,42 +134,33 @@ def record_payout_failure(
     """Persist a failed payout without ever marking it as successfully paid.
 
     The row is kept (never deleted) so the failure is auditable, and it stays
-    retryable: a later release call re-uses this same row via get_or_create, so
-    a retry can never produce a duplicate transfer.
+    retryable: a later release call re-uses this same row, so a retry can
+    never produce a duplicate transfer. A released, cancelled or in-flight
+    payout is never downgraded (jobs.payout_state refuses the edge).
     """
-    payout, _ = ManagedJobPayout.objects.get_or_create(
-        managed_job=managed_job,
-        recipient_role=role,
-        defaults={
-            "assignment": assignment,
-            "recipient": recipient,
-            "amount": amount if amount is not None else Decimal("0.00"),
-            "status": ManagedJobPayout.STATUS_FAILED,
-            "failure_reason": reason,
-            "provider_response": provider_response or {},
-            "failed_at": timezone.now(),
-            "disbursement_mode": ManagedJobPayout.DISBURSEMENT_MANUAL,
-        },
-    )
-    if payout.status != ManagedJobPayout.STATUS_FAILED:
-        payout.status = ManagedJobPayout.STATUS_FAILED
-    payout.recipient = recipient or payout.recipient
-    payout.assignment = assignment or payout.assignment
-    if amount is not None:
-        payout.amount = amount
-    payout.failure_reason = reason
-    payout.provider_response = provider_response or payout.provider_response or {}
-    payout.failed_at = payout.failed_at or timezone.now()
-    payout.save(update_fields=[
-        "assignment",
-        "recipient",
-        "amount",
-        "status",
-        "failure_reason",
-        "provider_response",
-        "failed_at",
-        "updated_at",
-    ])
+    with transaction.atomic():
+        payout = (
+            ManagedJobPayout.objects.select_for_update(of=("self",))
+            .filter(managed_job=managed_job, recipient_role=role)
+            .first()
+        )
+        if payout is None:
+            payout = ManagedJobPayout(
+                managed_job=managed_job,
+                recipient_role=role,
+                amount=amount if amount is not None else Decimal("0.00"),
+                status=ManagedJobPayout.STATUS_PENDING,
+                disbursement_mode=ManagedJobPayout.DISBURSEMENT_MANUAL,
+            )
+        payout.recipient = recipient or payout.recipient
+        payout.assignment = assignment or payout.assignment
+        if amount is not None:
+            payout.amount = amount
+        payout.failure_reason = reason
+        payout.provider_response = provider_response or payout.provider_response or {}
+        payout.failed_at = payout.failed_at or timezone.now()
+        transition(payout, ManagedJobPayout.STATUS_FAILED, source=SOURCE_MANUAL, reason=reason)
+        payout.save()
     return payout
 
 

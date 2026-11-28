@@ -97,8 +97,12 @@ receives the full uplift; manager margin and Printy fee are then computed on the
 8. **Production.** Shop works the assignment through the one-action flow: accept → artwork check →
    printing start/done → each finishing step → quality check → ready for dispatch. Each advance writes
    a `JobEvent`; the most recent advance can be undone for two minutes.
-9. **Delivery.** Shop marks delivered (`printy_rider` / `own_rider` / `pickup`); client confirms
-   completion → job `completed`.
+9. **Delivery.** The printer (or manager/ops) marks the job dispatched and adds a **handover code**
+   (e.g. `K7-4Q`) that travels with the parcel. The buyer taps "I received it" and enters the code;
+   only a match completes the job (`completed`, "Your job is complete."). Codes compare
+   case/space/dash-insensitively, are never returned by the API, and lock after 5 wrong tries
+   (Printy support then resolves it through dispute resolution). Nothing else completes a job:
+   the shop's assignment "mark-completed" no longer does, and the Django admin cannot edit status.
 10. **Settlement.** Payment status advances to `release_ready`, then
     `release_managed_job_payouts()` creates the manager and shop payout rows **from the frozen split**.
     Settlement states: `pending → held → release_ready → released`, with `refunded` / `cancelled`
@@ -187,7 +191,12 @@ The printer dashboard receives one primary action per active job from the server
 
 ## Manager onboarding fee tiers
 
-The fee-tier policy is defined in `law.txt`: jobs 1–20 waived, 21–40 reduced (default 50%), 41+ normal,
+The fee-tier policy below comes from a product rules document referred to as `law.txt`. That file is
+**not in this repository**. The audit (Prompt 6, tier3) searched the working tree, the full git history
+(`git log --all`) and the rest of the project folder on the audit machine (`/home/user`, which holds only
+this repo) and did not find it. If it exists, it lives outside the repo, e.g. with the product owner. Code
+comments such as `LAW 4` or `LAW 10.2` cite its numbered rules. Treat this section as a summary of intent,
+not as a copy of that document. As summarised here: jobs 1–20 waived, 21–40 reduced (default 50%), 41+ normal,
 counted per manager from paid + delivered jobs above a configurable minimum value. The waiver applies
 to the Printy fee only, never to the printer's rush uplift, and Printy absorbs it without reducing the
 printer payout floor.
@@ -463,9 +472,11 @@ python manage.py send_test_email --to you@example.com
 ## Housekeeping note
 
 The repo root contains local debugging residue — `jobA_*.json` / `jobB_*.json` fixtures,
-`runserver*.log`, `verify_*.py`, `rerun_jobab_*.py`, `_forensics_tmp.py`, and `forensic_creds.json`
-(which holds plaintext credentials). These are scratch artefacts, not project files. They are already
-covered by `.gitignore` so they cannot be committed by accident, but they clutter the working tree and
+`runserver*.log`, `verify_*.py`, `rerun_jobab_*.py` and `forensic_creds.json`
+(which holds plaintext credentials). These are scratch artefacts, not project files. The JSON captures
+and credentials file are covered by `.gitignore`; `_forensics_tmp.py` (a NUL-corrupted scratch script
+that was committed despite this note) was removed in audit #10c. The tracked `_verify_*.py` scripts at
+the repo root are throwaway checks, not tests. They clutter the working tree and
 `forensic_creds.json` is worth deleting outright after any investigation that needed it.
 
 `scripts/deploy.sh` is the one-command production deploy; see

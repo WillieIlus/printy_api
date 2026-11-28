@@ -216,7 +216,9 @@ def _next_action_key(stage_key: str, owner_role: str, job: ManagedJob, viewer_ro
         return "none"
     if stage_key == ManagedJobStatus.READY:
         if owner_role == BUYER:
-            return "confirm_delivery"
+            # Prompt 7: the buyer can only confirm receipt after dispatch,
+            # with the handover code that travels with the parcel.
+            return "none"
         if owner_role == PRINTER:
             return "mark_dispatched"
         if owner_role == MANAGER:
@@ -267,8 +269,9 @@ def _next_action_label(key: str, status: str | None = None, viewer_role: str = "
         "start_printing": "Start printing",
         "advance_production": "Advance the production stage",
         "pass_qc": "QC passed",
-        "confirm_delivery": "Confirm the job is complete",
+        "confirm_delivery": "I received it",
         "coordinate_delivery": "Coordinate delivery",
+        "mark_dispatched": "Mark dispatched",
     }.get(key, "No action needed")
 
 
@@ -316,8 +319,9 @@ _ACTION_EXPLANATIONS = {
     "start_printing": "Everything is checked — put the job on press.",
     "advance_production": "Mark the next production stage as complete.",
     "pass_qc": "Check the print against the approved artwork, then pass QC.",
-    "confirm_delivery": "You have your print — confirm delivery to release the payout.",
-    "coordinate_delivery": "Hand to the rider or courier and mark it out for delivery.",
+    "confirm_delivery": "Got your print? Enter the handover code that came with it to complete the job.",
+    "coordinate_delivery": "Hand to the rider or courier, add the handover code and mark it dispatched.",
+    "mark_dispatched": "Add the handover code that goes with the parcel, then mark it dispatched.",
 }
 
 
@@ -346,6 +350,9 @@ def _phase_for_status(status: str | None) -> str:
     return "production"
 
 
+HANDOVER_CODE_ACTIONS = frozenset({"confirm_delivery", "coordinate_delivery", "mark_dispatched"})
+
+
 def _action_params(key: str, job: ManagedJob, owner_role: str) -> dict[str, Any]:
     """Small, non-sensitive parameter bag for the one primary action."""
     params: dict[str, Any] = {"job_id": job.id}
@@ -363,6 +370,9 @@ def _action_params(key: str, job: ManagedJob, owner_role: str) -> dict[str, Any]
         params["assignment_id"] = assignment_id
     if key == "pass_qc":
         params["printer_stage"] = "quality_check"
+    if key in HANDOVER_CODE_ACTIONS:
+        # The client must send ``handover_code`` with this action.
+        params["requires_handover_code"] = True
     if owner_role:
         params["owner_role"] = owner_role
     return params
@@ -386,7 +396,7 @@ def resolve_next_step(job: ManagedJob, viewer_role: str) -> dict[str, Any]:
     label = _next_action_label(key, status, viewer_role)
     if key != "none" and printer_action.get("label"):
         label = str(printer_action["label"])
-    headline = "Job completed" if completed else label
+    headline = ("Your job is complete." if viewer_role == BUYER else "Job completed") if completed else label
     explanation = (
         "Payout released per the escrow rules."
         if completed

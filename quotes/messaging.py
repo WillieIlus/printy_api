@@ -8,7 +8,7 @@ from django.db import transaction
 from django.template.loader import render_to_string
 from django.utils import timezone
 
-from api.visibility import CLIENT_ACTOR, project_identity
+from api.visibility import CLIENT_ACTOR, SHOP_ACTOR, project_client_identity, project_identity
 from quotes.models import EmailOutbox, QuoteRequestMessage
 
 logger = logging.getLogger(__name__)
@@ -165,14 +165,24 @@ def _build_email_payload(message):
     is_client_recipient = message.recipient_role == QuoteRequestMessage.RecipientRole.CLIENT
     actor = CLIENT_ACTOR if is_client_recipient else "ops"
     shop_name = project_identity(raw_shop_name, actor=actor)
-    
+    # Audit #3b: printers never see the client's identity, emails included.
+    is_shop_recipient = message.recipient_role in (
+        QuoteRequestMessage.RecipientRole.SHOP_OWNER,
+        QuoteRequestMessage.RecipientRole.PRINTER,
+    )
+    client_name = (
+        project_client_identity(quote_request.customer_name, actor=SHOP_ACTOR)
+        if is_shop_recipient
+        else (quote_request.customer_name or "Client")
+    )
+
     common = {
         "brand_name": "Printy",
         "preheader": message.subject,
         "subject": message.subject,
-        "greeting_name": quote_request.customer_name or "there",
+        "greeting_name": "there" if is_shop_recipient else (quote_request.customer_name or "there"),
         "shop_name": shop_name,
-        "client_name": quote_request.customer_name or "Client",
+        "client_name": client_name,
         "request_id": quote_request.id,
         "request_reference": quote_request.request_reference or f"QR-{quote_request.id}",
         "cta_url": default_action_url,
@@ -314,8 +324,29 @@ def _create_email_outbox_entry(message_id: int):
     return outbox_entry
 
 
+def _create_email_outbox_entry_safely(message_id: int):
+    """on_commit callback: create and (auto-)send the outbox row.
+
+    It runs after the surrounding transaction commits - or immediately in
+    autocommit mode - so it must not raise into the caller's commit. Failures
+    are logged and recorded on the message.
+    """
+    try:
+        return _create_email_outbox_entry(message_id)
+    except Exception as exc:
+        error_text = _safe_email_error(exc)
+        logger.warning("Quote message email outbox creation failed message=%s: %s", message_id, error_text)
+        QuoteRequestMessage.objects.filter(pk=message_id).update(
+            email_sent=False,
+            email_status=QuoteRequestMessage.EmailStatus.FAILED,
+            email_error=error_text,
+            updated_at=timezone.now(),
+        )
+        return None
+
+
 def _send_email_for_message(message):
-    transaction.on_commit(lambda: _create_email_outbox_entry(message.pk))
+    transaction.on_commit(lambda: _create_email_outbox_entry_safely(message.pk))
 
 
 def send_email_outbox_entry(outbox_entry: EmailOutbox):
@@ -466,6 +497,13 @@ def create_quote_message(
         metadata=payload,
     )
     if send_email_copy and message.recipient_email:
+        # Audit #8: record "not sent yet" BEFORE scheduling the send. In
+        # autocommit mode on_commit runs the send immediately, and this save
+        # used to come afterwards and overwrite SENT/FAILED with NOT_SENT.
+        message.email_status = QuoteRequestMessage.EmailStatus.NOT_SENT
+        message.email_error = ""
+        message.email_sent = False
+        message.save(update_fields=["email_status", "email_error", "email_sent", "updated_at"])
         try:
             _send_email_for_message(message)
         except Exception as exc:
@@ -502,10 +540,8 @@ def create_quote_message(
                     },
                 )
             return message
-        message.email_status = QuoteRequestMessage.EmailStatus.NOT_SENT
-        message.email_error = ""
-        message.email_sent = False
-        message.save(update_fields=["email_status", "email_error", "email_sent", "updated_at"])
+        # The send may already have run (autocommit); reflect its outcome.
+        message.refresh_from_db(fields=["email_status", "email_error", "email_sent", "updated_at"])
     return message
 
 

@@ -141,7 +141,7 @@ class ShopAsManagerAccessTestCase(TestCase):
             managed_job=managed_job,
             assignment=managed_job.assignments.filter(reassigned_from__isnull=True).first(),
             uploaded_by=self.shop_owner,
-            file=SimpleUploadedFile(f"proof-{managed_job.id}.pdf", b"proof", content_type="application/pdf"),
+            file=SimpleUploadedFile(f"proof-{managed_job.id}.pdf", b"%PDF-1.4 proof", content_type="application/pdf"),
             original_filename=f"proof-{managed_job.id}.pdf",
         )
 

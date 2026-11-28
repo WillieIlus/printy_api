@@ -7,6 +7,7 @@ double-processing, and route amount mismatches to needs_review.
 
 from __future__ import annotations
 
+from payments.testing import DARAJA_TEST_PEER_IP, daraja_callback_path
 from decimal import Decimal
 from unittest.mock import patch
 
@@ -96,7 +97,10 @@ class StkPushApiTests(APITestCase):
         # The single most important rule: initiating a push is never success.
         self.assertEqual(response.data["status"], MpesaPaymentStatus.PENDING)
         self.assertFalse(response.data["is_paid"])
-        self.assertTrue(response.data["checkout_request_id"])
+        # The Daraja identifiers stay server-side (audit #1); the UI polls by id.
+        self.assertNotIn("checkout_request_id", response.data)
+        self.assertNotIn("merchant_request_id", response.data)
+        self.assertTrue(MpesaPayment.objects.get(pk=response.data["id"]).checkout_request_id)
 
     def test_stk_push_normalizes_phone_before_sending(self):
         with patch("mpesa_payments.services.requests.post") as post, patch(
@@ -130,9 +134,10 @@ class StkPushApiTests(APITestCase):
         self._push()
         payment = MpesaPayment.objects.first()
         response = self.client.post(
-            "/api/payments/mpesa/callback/",
+            daraja_callback_path("/api/payments/mpesa/callback/"),
             success_callback(payment.checkout_request_id),
             format="json",
+            REMOTE_ADDR=DARAJA_TEST_PEER_IP,
         )
         self.assertEqual(response.status_code, status.HTTP_200_OK)
 

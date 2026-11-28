@@ -1,7 +1,10 @@
+"""Project throttles. All IP keys come from the trusted resolver (audit #10b)."""
 from rest_framework.throttling import SimpleRateThrottle
 
+from common.throttling import TrustedIdentMixin
 
-class AnalyticsEventThrottle(SimpleRateThrottle):
+
+class AnalyticsEventThrottle(TrustedIdentMixin, SimpleRateThrottle):
     """Conservative per-client throttle for analytics ingestion."""
 
     scope = "analytics_event"
@@ -18,7 +21,7 @@ class AnalyticsEventThrottle(SimpleRateThrottle):
         }
 
 
-class GuestQuoteRequestThrottle(SimpleRateThrottle):
+class GuestQuoteRequestThrottle(TrustedIdentMixin, SimpleRateThrottle):
     """Rate-limit anonymous quote request submissions to prevent spam."""
 
     scope = "guest_quote_request"
@@ -32,7 +35,7 @@ class GuestQuoteRequestThrottle(SimpleRateThrottle):
         }
 
 
-class TrackLookupIPThrottle(SimpleRateThrottle):
+class TrackLookupIPThrottle(TrustedIdentMixin, SimpleRateThrottle):
     """Law 7.7: rate-limit signed-out tracking lookups per client IP."""
 
     scope = "track_lookup_ip"
@@ -45,7 +48,7 @@ class TrackLookupIPThrottle(SimpleRateThrottle):
         }
 
 
-class TrackLookupCodeThrottle(SimpleRateThrottle):
+class TrackLookupCodeThrottle(TrustedIdentMixin, SimpleRateThrottle):
     """Law 7.7: rate-limit signed-out tracking lookups per looked-up code."""
 
     scope = "track_lookup_code"

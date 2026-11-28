@@ -10,7 +10,11 @@ from django.utils import timezone
 
 from api.visibility import TOPOLOGY_MANAGED
 from pricing.services.fee_waiver import fee_waived_for_pair, fee_waived_for_quote_request
-from pricing.services.platform_fee_policy import calculate_financial_split, create_quote_financial_split
+from pricing.services.platform_fee_policy import (
+    calculate_financial_split,
+    create_quote_financial_split,
+    minimum_manager_markup,
+)
 from pricing.services.production_cost_calculator import calculate_client_price_with_waste_setup_and_quantity_tier
 from quotes.choices import QuoteStatus, QuoteOfferStatus
 from quotes.guardrails import build_partner_markup_warning, calculate_quote_expiry, validate_partner_markup_amount
@@ -85,6 +89,12 @@ def _product_category_for_speed(pricing_snapshot: dict[str, Any], shop_preview: 
     return ""
 
 
+# Upper end of the "suggested selling range" shown when canonical pricing is
+# unavailable. This is a UI selling hint, not a fee: it never feeds the split,
+# which always reads PlatformFeePolicy (audit #6).
+SUGGESTED_MARKUP_HINT_RATE = Decimal("0.35")
+
+
 def build_partner_quote_preview(*, pricing_snapshot: dict[str, Any], shop: Shop, partner_markup: Decimal, fee_waived: bool = False) -> dict[str, Any]:
     shop_preview = _extract_shop_preview(pricing_snapshot, shop)
     raw_payload = _as_dict(shop_preview.get("preview")) or shop_preview
@@ -100,13 +110,21 @@ def build_partner_quote_preview(*, pricing_snapshot: dict[str, Any], shop: Shop,
     # entirely whenever canonical pricing was available, so the quoted client
     # price silently ignored the markup the manager entered.
     broker_client_price = production_estimate + _money(partner_markup)
+    # Audit #6: the lowest price the manager can actually send is production
+    # plus the policy's minimum markup (MIN_MARKUP_MULTIPLE and the tier margin
+    # floor), not the bare production cost.
+    floor_price = production_estimate + (
+        minimum_manager_markup(production_cost=production_estimate, fee_waived=fee_waived)
+        if production_estimate > 0
+        else Decimal("0.00")
+    )
     if canonical_pricing:
-        minimum_price = production_estimate
+        minimum_price = floor_price
         suggested_max = broker_client_price
     else:
-        minimum_price = production_estimate
+        minimum_price = floor_price
         suggested_max = production_estimate + max(
-            partner_markup, production_estimate * Decimal("0.35")
+            partner_markup, production_estimate * SUGGESTED_MARKUP_HINT_RATE
         )
     split = _financial_split_payload(
         production_base_price=production_estimate,

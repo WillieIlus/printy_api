@@ -70,6 +70,13 @@ def accept_quote_for_payment(*, quote: Quote, accepted_by, payer_phone: str = ""
             "The price for this quote was updated. Please review and acknowledge "
             "the new price before payment can start."
         )
+    # Audit #8: a revised due date needs the same acknowledgement (law 6.5)
+    # before the buyer commits money against it.
+    if quote_request.date_updated:
+        raise ValidationError(
+            "The due date for this quote was updated. Please review and acknowledge "
+            "the new date before payment can start."
+        )
 
     now = timezone.now()
     if quote.status != QuoteOfferStatus.ACCEPTED:

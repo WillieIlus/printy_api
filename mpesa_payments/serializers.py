@@ -19,13 +19,19 @@ class MpesaStkPushSerializer(serializers.Serializer):
     """Body of POST /api/payments/mpesa/stk-push/."""
 
     phone_number = serializers.CharField(max_length=20)
-    amount = serializers.DecimalField(max_digits=12, decimal_places=2, min_value=Decimal("0.01"))
+    # Only honoured for an ad-hoc payment with no payable. For a managed job or
+    # quote the amount is derived server-side and this value is ignored.
+    amount = serializers.DecimalField(
+        max_digits=12, decimal_places=2, min_value=Decimal("0.01"), required=False
+    )
     account_reference = serializers.CharField(required=False, allow_blank=True, max_length=40)
     description = serializers.CharField(required=False, allow_blank=True, max_length=100)
 
     # The payable is optional — a payment can exist before a job does.
     managed_job_id = serializers.IntegerField(required=False, min_value=1)
     quote_id = serializers.IntegerField(required=False, min_value=1)
+    # Retired: a QuoteRequest has no price of its own and nothing settled a
+    # payment attached to it. Pay the accepted quote (quote_id) instead.
     quote_request_id = serializers.IntegerField(required=False, min_value=1)
 
     def validate_phone_number(self, value: str) -> str:
@@ -36,6 +42,10 @@ class MpesaStkPushSerializer(serializers.Serializer):
         if len(targets) > 1:
             raise serializers.ValidationError(
                 "Pass only one of managed_job_id, quote_id or quote_request_id."
+            )
+        if attrs.get("quote_request_id"):
+            raise serializers.ValidationError(
+                {"quote_request_id": "Paying a quote request directly is not supported. Pay its quote with quote_id."}
             )
         return attrs
 
@@ -63,8 +73,9 @@ class MpesaPaymentReadSerializer(serializers.ModelSerializer):
             "paid_amount",
             "result_desc",
             "customer_message",
-            "merchant_request_id",
-            "checkout_request_id",
+            # merchant_request_id / checkout_request_id are deliberately NOT
+            # exposed (audit #1): the checkout UI polls by payment id, and the
+            # Daraja identifiers are what a forged callback would need.
             "initiated_at",
             "stk_pushed_at",
             "confirmed_at",

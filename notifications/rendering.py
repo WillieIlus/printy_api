@@ -415,7 +415,8 @@ def _render_new_request(ctx: RenderContext) -> dict[str, Any] | None:
     request_id = ctx.param("request_id") or ctx.notification.object_id
     client_name = ctx.param("client_name") or _client_name(ctx.entity)
     body = [segment(f"Request #{request_id}", bold=True)]
-    if client_name and ctx.viewer in {VIEWER_SHOP, VIEWER_MANAGER, VIEWER_ADMIN}:
+    # Audit #3b: printers never see the client's identity.
+    if client_name and ctx.viewer in {VIEWER_MANAGER, VIEWER_ADMIN}:
         body.append(segment(f" from {client_name}"))
     body.append(segment(". Review and send a quote."))
     return {
@@ -441,6 +442,8 @@ def _render_question(ctx: RenderContext) -> dict[str, Any] | None:
 def _render_clarification(ctx: RenderContext) -> dict[str, Any] | None:
     request_id = ctx.param("request_id") or ctx.notification.object_id
     client_name = ctx.param("client_name") or _client_name(ctx.entity) or "The client"
+    if ctx.viewer == VIEWER_SHOP:
+        client_name = "The client"  # Audit #3b: printers never see client identity.
     return {
         "title": ctx.t("clarification.title", "Client replied"),
         "body": [segment(client_name, bold=True), segment(f" replied to request #{request_id}.")],

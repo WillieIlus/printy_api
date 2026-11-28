@@ -99,7 +99,7 @@ class ManagedJobDeliveryCompletionTestCase(TestCase):
 
         response = self.client.post(
             f"/api/managed-jobs/{self.managed_job.id}/delivery/mark-delivered/",
-            {"note": "Handed to rider at 2pm."},
+            {"note": "Handed to rider at 2pm.", "handover_code": "K7-4Q"},
             format="json",
         )
 
@@ -108,6 +108,7 @@ class ManagedJobDeliveryCompletionTestCase(TestCase):
         self.managed_job.refresh_from_db()
         self.assertEqual(self.managed_job.status, "delivered")
         self.assertIsNotNone(self.managed_job.delivered_at)
+        self.assertEqual(self.managed_job.handover_code, "K74Q")
         self.assertEqual(self.managed_job.operational_snapshot.get("delivery_note"), "Handed to rider at 2pm.")
 
         self.production_order.refresh_from_db()
@@ -123,7 +124,7 @@ class ManagedJobDeliveryCompletionTestCase(TestCase):
         self.client.force_authenticate(user=self.ops)
         ops_response = self.client.post(
             f"/api/managed-jobs/{self.managed_job.id}/delivery/mark-delivered/",
-            {},
+            {"handover_code": "OPS-1234"},
             format="json",
         )
         self.assertEqual(ops_response.status_code, 200)
@@ -133,7 +134,7 @@ class ManagedJobDeliveryCompletionTestCase(TestCase):
         self.client.force_authenticate(user=self.client_user)
         forbidden = self.client.post(
             f"/api/managed-jobs/{self.managed_job.id}/delivery/mark-delivered/",
-            {},
+            {"handover_code": "OPS-1234"},
             format="json",
         )
         self.assertEqual(forbidden.status_code, 403)
@@ -179,13 +180,26 @@ class ManagedJobDeliveryCompletionTestCase(TestCase):
         self.assertTrue(self._notifications_for(self.partner).exists())
 
     def test_ops_can_confirm_completion_and_shop_cannot(self):
+        # Prompt 7: completion needs dispatch + the handover code, for ops too.
         self.managed_job.status = "ready"
         self.managed_job.save(update_fields=["status"])
         self.client.force_authenticate(user=self.ops)
 
+        not_dispatched = self.client.post(
+            f"/api/managed-jobs/{self.managed_job.id}/delivery/confirm/",
+            {"handover_code": "K7-4Q"},
+            format="json",
+        )
+        self.assertEqual(not_dispatched.status_code, 400)
+        self.managed_job.refresh_from_db()
+        self.assertEqual(self.managed_job.status, "ready")
+
+        self.managed_job.status = "delivered"
+        self.managed_job.handover_code = "K74Q"
+        self.managed_job.save(update_fields=["status", "handover_code"])
         response = self.client.post(
             f"/api/managed-jobs/{self.managed_job.id}/delivery/confirm/",
-            {},
+            {"handover_code": "K7-4Q"},
             format="json",
         )
 
@@ -287,7 +301,7 @@ class ManagedJobNotificationWiringTestCase(TestCase):
 
         response = self.client.post(
             f"/api/managed-jobs/{self.managed_job.id}/files/artwork/",
-            {"file": SimpleUploadedFile("client-artwork.pdf", b"artwork-bytes", content_type="application/pdf")},
+            {"file": SimpleUploadedFile("client-artwork.pdf", b"%PDF-1.4 artwork-bytes", content_type="application/pdf")},
             format="multipart",
         )
 
@@ -301,7 +315,7 @@ class ManagedJobNotificationWiringTestCase(TestCase):
 
         response = self.client.post(
             f"/api/managed-jobs/{self.managed_job.id}/files/proofs/",
-            {"file": SimpleUploadedFile("proof.pdf", b"proof-bytes", content_type="application/pdf")},
+            {"file": SimpleUploadedFile("proof.pdf", b"%PDF-1.4 proof-bytes", content_type="application/pdf")},
             format="multipart",
         )
 
@@ -313,7 +327,7 @@ class ManagedJobNotificationWiringTestCase(TestCase):
             managed_job=self.managed_job,
             assignment=self.assignment,
             uploaded_by=self.shop_owner,
-            file=SimpleUploadedFile("proof.pdf", b"proof-bytes", content_type="application/pdf"),
+            file=SimpleUploadedFile("proof.pdf", b"%PDF-1.4 proof-bytes", content_type="application/pdf"),
         )
 
         manager_approve_job_proof(job_file=proof, actor=self.partner, notes="Looks good.")
@@ -326,7 +340,7 @@ class ManagedJobNotificationWiringTestCase(TestCase):
             managed_job=self.managed_job,
             assignment=self.assignment,
             uploaded_by=self.shop_owner,
-            file=SimpleUploadedFile("proof.pdf", b"proof-bytes", content_type="application/pdf"),
+            file=SimpleUploadedFile("proof.pdf", b"%PDF-1.4 proof-bytes", content_type="application/pdf"),
         )
         manager_approve_job_proof(job_file=proof, actor=self.partner)
         self.client.force_authenticate(user=self.client_user)
@@ -346,7 +360,7 @@ class ManagedJobNotificationWiringTestCase(TestCase):
             managed_job=self.managed_job,
             assignment=self.assignment,
             uploaded_by=self.shop_owner,
-            file=SimpleUploadedFile("proof.pdf", b"proof-bytes", content_type="application/pdf"),
+            file=SimpleUploadedFile("proof.pdf", b"%PDF-1.4 proof-bytes", content_type="application/pdf"),
         )
         manager_approve_job_proof(job_file=proof, actor=self.partner)
         self.client.force_authenticate(user=self.client_user)

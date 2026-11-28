@@ -378,9 +378,12 @@ def drive_job_to_completion(quote_id: int) -> dict:
     Payouts are only releasable once the job is READY or COMPLETED
     (jobs.payout_services.RELEASE_ALLOWED_JOB_STATUSES), so a paid-but-assigned
     job legitimately has no payout rows. This walks the documented assignment
-    chain -- accept -> in production -> finishing -> ready -> completed -- then
-    calls the payout release endpoint, so the payout result is not confounded by
-    an incomplete job.
+    chain -- accept -> in production -> finishing -> ready -- then the delivery
+    handover (Prompt 7): the printer marks the job dispatched with a handover
+    code and the buyer confirms receipt with that code, which is the only
+    non-admin way a job becomes ``completed`` (the shop mark-completed endpoint
+    was removed). It then calls the payout release endpoint, so the payout
+    result is not confounded by an incomplete job.
     """
     from jobs.models import JobAssignment, ManagedJob
 
@@ -403,11 +406,25 @@ def drive_job_to_completion(quote_id: int) -> dict:
         ("mark-in-production", "/api/job-assignments/{pk}/mark-in-production/", shop_headers),
         ("mark-finishing", "/api/job-assignments/{pk}/mark-finishing/", shop_headers),
         ("mark-ready", "/api/job-assignments/{pk}/mark-ready/", shop_headers),
-        ("mark-completed", "/api/job-assignments/{pk}/mark-completed/", shop_headers),
     ]
-    for label, path, headers in chain:
+    # Prompt 7 handover: printer dispatches with a code, the buyer confirms it.
+    handover_code = f"V{job.id % 10}-{assignment.id % 100:02d}Q"
+    buyer_email = getattr(job.client, "email", None)
+    chain += [
+        ("mark-dispatched (handover code)", f"/api/managed-jobs/{job.id}/delivery/mark-delivered/", shop_headers,
+         {"handover_code": handover_code}),
+        ("buyer confirms receipt with code", f"/api/managed-jobs/{job.id}/delivery/confirm/",
+         auth(buyer_email) if buyer_email in CREDS else None, {"handover_code": handover_code}),
+    ]
+    for entry in chain:
+        label, path, headers = entry[:3]
+        payload = entry[3] if len(entry) > 3 else {}
         url = path.format(pk=assignment.id)
-        response = requests.post(f"{BASE}{url}", json={}, headers=headers, timeout=60)
+        if headers is None:
+            steps.append({"step": label, "url": url, "status": 599,
+                          "body": f"no forensic credentials for the job's buyer ({buyer_email})"})
+            break
+        response = requests.post(f"{BASE}{url}", json=payload, headers=headers, timeout=60)
         try:
             body: object = response.json()
         except Exception:

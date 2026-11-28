@@ -1,5 +1,6 @@
 """Transaction Status Query: request shape, async Result handling, endpoints."""
 
+from payments.testing import DARAJA_TEST_PEER_IP, daraja_callback_path
 from datetime import datetime
 from decimal import Decimal
 from unittest.mock import MagicMock, patch
@@ -76,8 +77,12 @@ class QueryTransactionStatusTests(TestCase):
         self.assertEqual(payload["BusinessShortCode"], "174379")
         self.assertEqual(payload["PartyB"], "174379")
         self.assertTrue(payload["Password"])
-        self.assertEqual(payload["ResultURL"], "https://api.printy.ke/api/payments/mpesa/callback/")
-        self.assertEqual(payload["QueueTimeOutURL"], "https://api.printy.ke/api/payments/mpesa/callback/")
+        # The documented callback URL, carrying the callback secret as Daraja
+        # must call it back (audit #1); unchanged when no secret is configured.
+        expected_url = daraja_callback_path("https://api.printy.ke/api/payments/mpesa/callback/")
+        self.assertTrue(expected_url.startswith("https://api.printy.ke/api/payments/mpesa/callback/"))
+        self.assertEqual(payload["ResultURL"], expected_url)
+        self.assertEqual(payload["QueueTimeOutURL"], expected_url)
         self.assertEqual(post.call_args[1]["headers"]["Authorization"], "Bearer tok")
 
     @patch("mpesa_payments.services.get_access_token", return_value="tok")
@@ -103,11 +108,16 @@ class QueryTransactionStatusTests(TestCase):
             query_transaction_status(transaction_id="NOPE", party_a="0712345678")
         self.assertIn("Invalid TransactionID", str(ctx.exception))
 
+    # The token is mocked like the sibling tests: otherwise the real OAuth call
+    # decides the outcome (unreachable offline, HTTP 400 on CI runners that can
+    # reach the Daraja sandbox) and the POST failure is never exercised.
+    @patch("mpesa_payments.services.get_access_token", return_value="tok")
     @patch("mpesa_payments.services.requests.post", side_effect=__import__("requests").ConnectionError("boom"))
-    def test_network_failure_is_typed(self, _post):
+    def test_network_failure_is_typed(self, post, _token):
         with self.assertRaises(MpesaError) as ctx:
             query_transaction_status(transaction_id="QG1234XY", party_a="0712345678")
         self.assertIn("could not reach", str(ctx.exception).lower())
+        post.assert_called_once()
 
     def test_receipt_is_required(self):
         with self.assertRaises(MpesaError):
@@ -206,13 +216,17 @@ class TransactionStatusEndpointTests(TestCase):
         self.client = APIClient()
 
     def test_result_url_is_public_and_always_200(self):
-        response = self.client.post(STATUS_URL, RESULT_SUCCESS, format="json")
+        response = self.client.post(
+            daraja_callback_path(STATUS_URL), RESULT_SUCCESS, format="json", REMOTE_ADDR=DARAJA_TEST_PEER_IP
+        )
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data["ResultCode"], 0)
 
     def test_result_url_never_500s_on_garbage(self):
-        response = self.client.post(STATUS_URL, {"garbage": True}, format="json")
+        response = self.client.post(
+            daraja_callback_path(STATUS_URL), {"garbage": True}, format="json", REMOTE_ADDR=DARAJA_TEST_PEER_IP
+        )
         self.assertEqual(response.status_code, 200)
 
     def test_main_callback_routes_result_payloads(self):
@@ -220,7 +234,10 @@ class TransactionStatusEndpointTests(TestCase):
         # Imported inside the view, so patch the source module.
         with patch("payments.services.handle_stk_callback") as canonical:
             response = self.client.post(
-                "/api/payments/mpesa/callback/", RESULT_SUCCESS, format="json"
+                daraja_callback_path("/api/payments/mpesa/callback/"),
+                RESULT_SUCCESS,
+                format="json",
+                REMOTE_ADDR=DARAJA_TEST_PEER_IP,
             )
 
         self.assertEqual(response.status_code, 200)
@@ -246,7 +263,9 @@ class TransactionStatusEndpointTests(TestCase):
         }
         payment = make_payment()
 
-        response = self.client.post("/api/payments/mpesa/callback/", body, format="json")
+        response = self.client.post(
+            daraja_callback_path("/api/payments/mpesa/callback/"), body, format="json", REMOTE_ADDR=DARAJA_TEST_PEER_IP
+        )
 
         self.assertEqual(response.status_code, 200)
         payment.refresh_from_db()

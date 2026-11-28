@@ -7,7 +7,7 @@ from typing import Any
 from django.conf import settings
 from django.utils import timezone
 
-from pricing.services.platform_fee_policy import MIN_MARKUP_MULTIPLE, get_active_platform_fee_policy
+from pricing.services.platform_fee_policy import get_active_platform_fee_policy
 from quotes.choices import QuoteStatus, QuoteOfferStatus
 from quotes.messaging import create_quote_message
 from quotes.models import QuoteRequestMessage, QuoteVersionOutcome
@@ -40,7 +40,9 @@ def calculate_quote_expiry(*, sent_at=None):
 
 
 def get_partner_markup_min_rate() -> Decimal:
-    return (MIN_MARKUP_MULTIPLE - Decimal("1.00")).quantize(Decimal("0.0001"))
+    # Audit #6: read the floor from the active policy, not a module constant.
+    policy = get_active_platform_fee_policy()
+    return (Decimal(str(policy.min_markup_multiple)) - Decimal("1.00")).quantize(Decimal("0.0001"))
 
 
 def get_partner_markup_max_rate() -> Decimal:

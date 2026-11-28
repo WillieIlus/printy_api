@@ -6,6 +6,7 @@ code or password to a BuyGoodsOnline app is rejected as "Wrong credentials" —
 so the product has to be config-driven rather than hardcoded to paybill.
 """
 
+from payments.testing import daraja_callback_path
 from unittest.mock import patch
 
 from django.test import TestCase, override_settings
@@ -105,7 +106,9 @@ class StkPayloadTests(TestCase):
         )
         self.assertEqual(payload["PhoneNumber"], "254712345678")
         self.assertEqual(payload["Amount"], 2500)
-        self.assertEqual(payload["CallBackURL"], "https://example.com/api/payments/mpesa/callback/")
+        self.assertEqual(
+            payload["CallBackURL"], daraja_callback_path("https://example.com/api/payments/mpesa/callback/")
+        )
 
 
 class CredentialRequirementTests(TestCase):

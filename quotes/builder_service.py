@@ -120,7 +120,7 @@ def send_quote_request_item_to_shop(*, draft: QuoteRequest, item: QuoteItem, use
             notify(
                 recipient=draft.shop.owner,
                 notification_type=Notification.QUOTE_REQUEST_SUBMITTED,
-                message=f"New quote request #{single_request.id} from {single_request.customer_name or 'customer'}",
+                message=f"New quote request #{single_request.id} from a client",
                 object_type="quote_request",
                 object_id=single_request.id,
                 actor=user,

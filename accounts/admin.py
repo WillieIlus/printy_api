@@ -117,8 +117,33 @@ class UserProfileAdmin(admin.ModelAdmin):
     # LAW 2: a client's origin manager is set once when the client is created and
     # is never editable afterwards, so the admin shows it read-only. The public
     # id, verification timestamp and rotation stamp are derived/staff-only.
-    readonly_fields = ["origin_manager", "public_id", "manager_verified_at", "last_assigned_at"]
+    readonly_fields = [
+        "origin_manager",
+        "public_id",
+        "manager_verified_at",
+        "last_assigned_at",
+        "phone_normalized",
+        "phone_verified_at",
+    ]
     actions = ["activate_broker_profiles", "deactivate_broker_profiles"]
+
+    def get_form(self, request, obj=None, **kwargs):
+        form = super().get_form(request, obj, **kwargs)
+        phone_field = form.base_fields.get("phone")
+        if phone_field is not None:
+            from django.core.exceptions import ValidationError as DjangoValidationError
+            from rest_framework import serializers as drf_serializers
+
+            from accounts.services.phone import normalize_phone
+
+            def _validate_phone(value):
+                try:
+                    normalize_phone(value)
+                except drf_serializers.ValidationError as exc:
+                    raise DjangoValidationError(str(exc.detail[0]))
+
+            phone_field.validators.append(_validate_phone)
+        return form
 
     def save_model(self, request, obj, form, change):
         """Keep the verification timestamp in step with the staff toggle."""
@@ -128,6 +153,15 @@ class UserProfileAdmin(admin.ModelAdmin):
         else:
             obj.manager_verified_at = None
         super().save_model(request, obj, form, change)
+        if "phone" in getattr(form, "changed_data", ()):
+            # Audit #3: route admin phone edits through the canonical writer so
+            # phone_normalized stays in step and a new number loses verification.
+            # phone_normalized / phone_verified_at are read-only in this form, so
+            # the stored normalised value is still the previous number here.
+            from accounts.services.phone import set_profile_phone
+
+            set_profile_phone(obj.user, obj.phone, verified=False)
+            obj.refresh_from_db()
 
     @admin.action(description="Activate selected broker/partner profiles")
     def activate_broker_profiles(self, request, queryset):

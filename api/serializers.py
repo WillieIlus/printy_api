@@ -302,8 +302,9 @@ class PublicShopListSerializer(serializers.ModelSerializer):
         tags = []
         seen = set()
         finishings = (
+            # FinishingRate has no ``category`` relation; select_related("category")
+            # raised FieldError and 500'd the whole roster (found during audit #3).
             FinishingRate.objects.filter(shop=obj, is_active=True)
-            .select_related("category")
             .order_by("name")[:8]
         )
         for finishing in finishings:
