@@ -20,7 +20,14 @@ Templates in this repo:
 | `SECRET_KEY` | `replace-with-long-random-secret` | Required. Never commit. |
 | `DEBUG` | `false` | Must be `false` in production. |
 | `APP_ENV` | `production` | Deployment label, see below. Unset is treated as `production`. |
-| `ALLOWED_HOSTS` | `api.printy.ke,printy.ke,www.printy.ke` | Add IP only if operationally needed. |
+| `ALLOWED_HOSTS` | `api.printy.ke,printy.ke,www.printy.ke` | **Required when `DEBUG=False`; there is no default.** Startup fails if it is unset or empty, contains `*`, or names only local hosts. With `DEBUG=true` it defaults to `localhost,127.0.0.1,[::1],testserver`. Add an IP only if operationally needed. |
+| `REDIS_URL` | `redis://127.0.0.1:6379/1` | **Required when `DEBUG=False`.** See "Shared cache and proxies" below. |
+
+| `SITE_DOMAIN` | `printy.ke` | Run `python manage.py configure_site` after changes. |
+| `SITE_NAME` | `Printy` | Used by Django Sites and auth flows. |
+| `FRONTEND_URL` | `https://printy.ke` | Required for email links. Backend fails if unsafe when `DEBUG=False`. |
+| `CORS_ALLOWED_ORIGINS` | `https://printy.ke,https://www.printy.ke` | Add local dev origins only in local env. |
+| `CSRF_TRUSTED_ORIGINS` | `https://printy.ke,https://www.printy.ke,https://api.printy.ke` | Required for admin/allauth form origins. |
 
 ## Environment label (`APP_ENV`)
 
@@ -33,11 +40,6 @@ defaults to `production` **on purpose** so forgetting it is safe:
   check (`printy.E001`, see `docs/EMAIL_DELIVERY.md`) fails startup if
   `EMAIL_BACKEND` is the console backend, instead of silently printing mail to
   the console and never delivering it.
-| `SITE_DOMAIN` | `printy.ke` | Run `python manage.py configure_site` after changes. |
-| `SITE_NAME` | `Printy` | Used by Django Sites and auth flows. |
-| `FRONTEND_URL` | `https://printy.ke` | Required for email links. Backend fails if unsafe when `DEBUG=False`. |
-| `CORS_ALLOWED_ORIGINS` | `https://printy.ke,https://www.printy.ke` | Add local dev origins only in local env. |
-| `CSRF_TRUSTED_ORIGINS` | `https://printy.ke,https://www.printy.ke,https://api.printy.ke` | Required for admin/allauth form origins. |
 
 ## Database
 
@@ -119,16 +121,33 @@ Recommended production security flags:
 | `MPESA_SECURITY_CREDENTIAL` | optional | Future B2C/status flows only. |
 | `MPESA_TIMEOUT_URL` | `https://api.printy.ke/api/payments/mpesa/callback/` | `QueueTimeOutURL` of the Transaction Status Query. Defaults to `MPESA_CALLBACK_URL`; the callback view dispatches on body shape, so one public URL serves both. |
 | `MPESA_RESULT_URL` | `https://api.printy.ke/api/payments/mpesa/callback/` | `ResultURL` of the Transaction Status Query — where Daraja delivers the receipt verdict. Defaults to `MPESA_CALLBACK_URL`. A dedicated route also exists at `/api/payments/mpesa/result/`. |
+| `MPESA_CALLBACK_SECRET` | `python -c "import secrets; print(secrets.token_urlsafe(48))"` | **Required when `DEBUG=False`** (startup fails otherwise, and `printy.E017` in `manage.py check`). At least 32 URL-safe characters `[A-Za-z0-9_-]` (`printy.E018`). Daraja does not sign callbacks, so this secret is the authentication: it is appended automatically as the final path segment of every URL handed to Daraja (`CallBackURL`, `ResultURL`, `QueueTimeOutURL`), e.g. `…/mpesa/callback/<secret>/`. Keep `MPESA_CALLBACK_URL` at the canonical value without the secret. Inbound callbacks on `/api/payments/mpesa/callback/`, `/api/payments/mpesa/result/` and legacy `/api/payments/mpesa-callback/` must carry it as that path segment or `?token=<secret>` (compared with `hmac.compare_digest`); missing/wrong → 403, no state change. If it is ever unset in production every callback is refused (fail closed). Optional only for local/test runs (`DEBUG=true`, which `MPESA_FORCE_STUB` also requires). Rotating it: set the new value and restart; prompts already in flight still call the old URL and will be refused — reconcile those with `mpesa_reconcile` / Transaction Status. Treat it like a password: it appears in proxy access logs, so restrict log access. |
+| `MPESA_CALLBACK_ALLOWED_IPS` | `196.201.214.200,196.201.214.206,…` | Comma-separated IPs/CIDRs allowed to deliver callbacks (`printy.E019` on an invalid entry). When set it is always enforced. **If missing** with `DEBUG=False`, the built-in `SAFARICOM_CALLBACK_IPS` list in `payments/callback_security.py` is enforced. **That list has not been verified against Safaricom's current published list.** Log the real callback source IPs first, then pin this variable explicitly. If missing with `DEBUG=true`, no IP restriction applies. Non-allowlisted source → 403. |
+| `MPESA_STK_IN_FLIGHT_SECONDS` | `180` (default) | How long an unanswered STK prompt counts as in flight and blocks a second prompt for the same payment. Older unanswered prompts are marked `expired` on the next push, and by `mpesa_recover_payments`. **If missing**, 180 is used. It must be a whole number ≥ 60, otherwise startup fails with `ImproperlyConfigured`. |
+| `MPESA_RECOVERY_QUERY_INTERVAL_SECONDS` | `1.0` (default) | Pause between consecutive Daraja STK Query calls in one `mpesa_recover_payments` run (audit #1c). **If missing**, 1.0. A number ≥ 0, otherwise startup fails with `ImproperlyConfigured`. |
+| `MPESA_RECOVERY_QUERY_COOLDOWN_SECONDS` | `60` (default) | Minimum time before the same STK prompt is queried again by the recovery run (kept in the shared cache, so it only holds across processes with `REDIS_URL`). **If missing**, 60. A whole number ≥ 0, otherwise startup fails. |
+| `MPESA_RECOVERY_MAX_AGE_HOURS` | `24` (default) | Prompts older than this are no longer queried by the recovery run. **If missing**, 24. A whole number ≥ 1, otherwise startup fails. |
+| `MPESA_TRUSTED_PROXIES` | `127.0.0.1,::1` (default) | Reverse proxies whose `X-Forwarded-For` is trusted when resolving the callback source IP. The source IP is `REMOTE_ADDR` unless that peer is a trusted proxy; only then is `X-Forwarded-For` read right-to-left, skipping trusted hops. A raw `X-Forwarded-For` from any other peer is ignored, so it cannot be spoofed to pass the allowlist. Add your load balancer's address if nginx is not on the same host. |
 
 Production safety behavior already enforced in code:
 - `SECRET_KEY` cannot stay as a placeholder when `DEBUG=False`
-- `ALLOWED_HOSTS` must include non-local production hosts when `DEBUG=False`
+- `ALLOWED_HOSTS` must be set explicitly, contain no wildcard, and include
+  non-local production hosts when `DEBUG=False` (no default)
+- `REDIS_URL` must be set when `DEBUG=False` (shared cache for throttles and
+  the Daraja token)
 - `CSRF_TRUSTED_ORIGINS` must be HTTPS when `DEBUG=False`
 - `CORS_ALLOWED_ORIGINS` must be HTTPS when `DEBUG=False`
 - `FRONTEND_URL` cannot be localhost when `DEBUG=False`
 - `FRONTEND_URL` must be HTTPS when `DEBUG=False`
 - `MPESA_CALLBACK_URL` must be set, public, and HTTPS when `MPESA_ENV=production`
 - `MPESA_CALLBACK_URL` cannot be localhost when `MPESA_ENV=production`
+- `MPESA_CALLBACK_SECRET` must be set (≥32 URL-safe chars) when `DEBUG=False`;
+  startup raises `ImproperlyConfigured` and `manage.py check` reports
+  `printy.E017` otherwise. Callbacks without the secret, from a non-allowlisted
+  IP, or for a CheckoutRequestID we never persisted are refused (403 / 404)
+  and change nothing. A success callback is applied only with a receipt AND an
+  amount equal to the server-stored expected amount; any mismatch is recorded
+  as `needs_review`, never `paid`.
 - M-Pesa Daraja credentials (consumer key/secret, shortcode, passkey) must be
   real — the startup check `printy.E013–E016` fails `manage.py check` on
   missing/placeholder values when `MPESA_ENV=production` (see
@@ -136,6 +155,47 @@ Production safety behavior already enforced in code:
   For `MPESA_SHORTCODE_TYPE=buygoodsonline` the check inverts: `printy.E015`
   fails when a shortcode or passkey *is* set, because that app is authorised by
   the OAuth bearer token alone.
+
+## Google sign-in and auth throttles (audit #4)
+
+| Variable | Example | Notes |
+| --- | --- | --- |
+| `GOOGLE_CLIENT_ID` | `123-abc.apps.googleusercontent.com` | Required for `POST /api/auth/social/google/`. The ID token is verified locally with google-auth (signature, expiry, issuer, audience == this value). Comma-separate several client ids. Unset => the endpoint returns 503 `google_oauth_not_configured`. |
+| `GOOGLE_OAUTH_DEV_SKIP_AUDIENCE` | `false` | Dev/test only. Skips just the audience check when no client id is set. Ignored unless `DEBUG=true` and `APP_ENV` is local/dev/test. |
+| `THROTTLE_RATE_AUTH_LOGIN` | `10/min` | Login / token obtain, per client IP. |
+| `THROTTLE_RATE_AUTH_REGISTER` | `10/hour` | All `/api/auth/register*` routes. |
+| `THROTTLE_RATE_AUTH_PASSWORD_RESET` | `5/hour` | Password reset request. |
+| `THROTTLE_RATE_AUTH_PASSWORD_RESET_CONFIRM` | `10/hour` | Password reset confirm. |
+| `THROTTLE_RATE_AUTH_EMAIL_RESEND` | `5/hour` | Resend confirmation email. |
+| `THROTTLE_RATE_AUTH_GOOGLE_LOGIN` | `20/min` | Google login. |
+| `THROTTLE_RATE_AUTH_INVITE_CLAIM` | `10/hour` | Client invite claim. |
+
+Throttle keys use the real client IP: `X-Forwarded-For` is trusted only from
+`MPESA_TRUSTED_PROXIES`. Client-link OTP request/verify keep their existing
+`client_otp_request` / `client_otp_verify` rates.
+
+## Shared cache and proxies (audit #10b)
+
+| Variable | Example | Notes / if missing |
+| --- | --- | --- |
+| `REDIS_URL` | `redis://127.0.0.1:6379/1` | The default cache holds every throttle counter (auth, OTP request/verify), the Daraja OAuth token and the cached manager listings. It must be shared by all gunicorn workers. **If missing with `DEBUG=False`**, startup fails ("REDIS_URL must be set when DEBUG=False"), and `manage.py check` reports `printy.E020` if the cache is not RedisCache. It must start with `redis://`, `rediss://` or `unix://`. **If missing with `DEBUG=true`** (or in tests), a per-process LocMemCache is used. Requires the `redis` package (in `requirements.txt`). OTP codes and attempt counters are database rows and do not need Redis. |
+| `CACHE_KEY_PREFIX` | `printy` (default) | Key prefix inside Redis. Change it only if several apps share one Redis database. |
+| `MPESA_TRUSTED_PROXIES` | `127.0.0.1,::1` (default) | The one "trusted proxy" list for the whole app. It decides the real client IP for **every** throttle and for the M-Pesa callback allowlist (`common.client_ip.resolve_client_ip`). **If missing**, the default (local nginx on loopback) applies. If a load balancer sits in front of nginx and is not listed, every request appears to come from the balancer: all users share one throttle bucket and callbacks are refused. |
+| `NUM_PROXIES` | leave unset | **Not used.** DRF's `NUM_PROXIES` trusts the last N `X-Forwarded-For` hops from any peer, which can be spoofed. Every throttle uses `MPESA_TRUSTED_PROXIES` instead. If it is set (env or `REST_FRAMEWORK`), `manage.py check` warns with `printy.W903` and the value is ignored. |
+
+### Summary: what happens if a security-critical variable is missing
+
+| Variable | Missing with `DEBUG=False` | Missing with `DEBUG=true` |
+| --- | --- | --- |
+| `ALLOWED_HOSTS` | startup fails | defaults to local hosts |
+| `REDIS_URL` | startup fails (`printy.E020` in check) | LocMem cache per process |
+| `MPESA_CALLBACK_SECRET` | startup fails (`printy.E017`); callbacks refused | callbacks accepted without a secret |
+| `MPESA_CALLBACK_ALLOWED_IPS` | built-in Safaricom list enforced (unverified; pin it) | no IP restriction |
+| `MPESA_TRUSTED_PROXIES` | loopback only (`127.0.0.1,::1`) | same |
+| `MPESA_STK_IN_FLIGHT_SECONDS` | 180 s | 180 s |
+| `GOOGLE_CLIENT_ID` | Google login returns 503 `google_oauth_not_configured` | same, unless the dev skip below applies |
+| `GOOGLE_OAUTH_DEV_SKIP_AUDIENCE` | ignored (no effect without `DEBUG=true`) | treated as `false`: with no client id, Google login returns 503. Only `true` with `APP_ENV` local/dev/test skips the audience check, and only while no client id is set |
+| `NUM_PROXIES` | not used (W903 if set) | not used |
 
 ## Frontend required for production
 

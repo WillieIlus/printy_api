@@ -23,6 +23,10 @@ class Payment(TimeStampedModel):
     STATUS_FAILED = "failed"
     STATUS_CANCELLED = "cancelled"
     STATUS_EXPIRED = "expired"
+    # Daraja reported money moved but it could not be verified (amount differs
+    # from expected_amount, receipt/amount missing). Never paid; an operator
+    # must reconcile it (audit #1/#2).
+    STATUS_NEEDS_REVIEW = "needs_review"
     STATUS_CHOICES = [
         (STATUS_PENDING, _("Pending")),
         (STATUS_PROCESSING, _("Processing")),
@@ -30,6 +34,7 @@ class Payment(TimeStampedModel):
         (STATUS_FAILED, _("Failed")),
         (STATUS_CANCELLED, _("Cancelled")),
         (STATUS_EXPIRED, _("Expired")),
+        (STATUS_NEEDS_REVIEW, _("Needs review")),
     ]
 
     quote = models.ForeignKey(
@@ -104,6 +109,7 @@ class MpesaSTKRequest(TimeStampedModel):
     STATUS_FAILED = "failed"
     STATUS_CANCELLED = "cancelled"
     STATUS_EXPIRED = "expired"
+    STATUS_NEEDS_REVIEW = "needs_review"
     STATUS_CHOICES = [
         (STATUS_PENDING, _("Pending")),
         (STATUS_SENT, _("Sent")),
@@ -111,7 +117,9 @@ class MpesaSTKRequest(TimeStampedModel):
         (STATUS_FAILED, _("Failed")),
         (STATUS_CANCELLED, _("Cancelled")),
         (STATUS_EXPIRED, _("Expired")),
+        (STATUS_NEEDS_REVIEW, _("Needs review")),
     ]
+    IN_FLIGHT_STATUSES = (STATUS_PENDING, STATUS_SENT)
 
     payment = models.ForeignKey(
         Payment,

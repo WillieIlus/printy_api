@@ -406,7 +406,6 @@ class ClientDashboardHomeView(BaseDashboardHomeView):
                 "payment_status": payment.status,
                 "method": payment.method,
                 "channel": payment.method,
-                "checkout_request_id": payment.checkout_request_id,
             }
             for payment in payments.select_related("managed_job")[:6]
         ]
@@ -800,7 +799,9 @@ def _quote_product_label(quote_request: QuoteRequest, latest_response: Quote | N
     return str(label or "Print request")
 
 
-def _quote_partner_pricing_payload(quote_request: QuoteRequest, latest_response: Quote | None) -> dict[str, object]:
+def _quote_partner_pricing_payload(
+    quote_request: QuoteRequest, latest_response: Quote | None, *, client_view: bool = False
+) -> dict[str, object]:
     split = getattr(latest_response, "financial_split", None) if latest_response is not None else None
     response_snapshot = _dashboard_dict(getattr(latest_response, "response_snapshot", None))
     customer_pricing = _dashboard_dict(response_snapshot.get("customer_pricing"))
@@ -854,6 +855,17 @@ def _quote_partner_pricing_payload(quote_request: QuoteRequest, latest_response:
         else bool(fee_waived_for_quote_request(quote_request))
     )
 
+    if client_view:
+        # Audit #3b: clients see what they pay, never production cost or the
+        # manager's margin. Keys are kept (as null) so the row shape is stable.
+        return {
+            "client_total": str(client_total) if client_total is not None else None,
+            "production_cost": None,
+            "gross_margin": None,
+            "manager_margin": None,
+            "margin_percent": None,
+            "fee_waived": fee_waived,
+        }
     return {
         "client_total": str(client_total) if client_total is not None else None,
         "production_cost": str(production_cost) if production_cost is not None else None,
@@ -991,12 +1003,16 @@ class BaseRoleDetailView(BaseDashboardHomeView):
             "public_token": None,
         }
 
-    def _quote_row(self, quote_request: QuoteRequest, *, request=None, viewer_read_at=None) -> dict[str, object]:
+    def _quote_row(self, quote_request: QuoteRequest, *, request=None, viewer_read_at=None, client_view: bool = False) -> dict[str, object]:
         serialized = QuoteRequestReadSerializer(quote_request, context={"request": request}).data
         latest_response = quote_request.quotes.exclude(status=Quote.PENDING).select_related("financial_split").order_by("-created_at", "-id").first()
         latest_response_payload = serialized.get("latest_response")
         roles = set(resolve_user_roles(request.user)) if request is not None and getattr(request, "user", None) else set()
-        can_view_internal_pricing = bool(roles.intersection({CANONICAL_PARTNER_ROLE, CANONICAL_SUPER_ADMIN_ROLE}))
+        # Audit #3b: the client dashboard never shows production cost or the
+        # shop's identity, even when the buyer also holds a manager role.
+        can_view_internal_pricing = (not client_view) and bool(
+            roles.intersection({CANONICAL_PARTNER_ROLE, CANONICAL_SUPER_ADMIN_ROLE})
+        )
         customer_pricing = _quote_customer_pricing_payload(latest_response) if can_view_internal_pricing else {}
         if latest_response_payload and customer_pricing:
             latest_response_payload = dict(latest_response_payload)
@@ -1018,7 +1034,11 @@ class BaseRoleDetailView(BaseDashboardHomeView):
             "raw_status": serialized.get("raw_status") or quote_request.status,
             "status_label": serialized.get("status_label") or quote_request.status,
             "customer_name": quote_request.customer_name or "Client",
-            "shop_name": getattr(quote_request.shop, "name", "") or "Awaiting production match",
+            "shop_name": (
+                (getattr(quote_request.shop, "name", "") or "Awaiting production match")
+                if not client_view
+                else ("Verified Print Partner" if quote_request.shop_id else "Awaiting production match")
+            ),
             "assigned_manager": serialized.get("assigned_manager"),
             "assigned_manager_name": (serialized.get("assigned_manager") or {}).get("display_name") or "",
             "request_snapshot": serialized.get("request_snapshot") or {},
@@ -1027,14 +1047,15 @@ class BaseRoleDetailView(BaseDashboardHomeView):
             "latest_response": latest_response_payload,
             "created_at": quote_request.created_at,
             "updated_at": quote_request.updated_at,
-            **_quote_partner_pricing_payload(quote_request, latest_response),
+            **_quote_partner_pricing_payload(quote_request, latest_response, client_view=client_view),
             # Law 7.5: section + attention/muted flags for the quote list.
             **quote_flags(
                 request_status=serialized.get("status") or quote_request.status,
                 latest_response_status=getattr(latest_response, "status", ""),
                 viewer_role=(
                     "partner"
-                    if request is not None
+                    if not client_view
+                    and request is not None
                     and CANONICAL_PARTNER_ROLE in set(resolve_user_roles(request.user))
                     else "client"
                 ),
@@ -1149,7 +1170,7 @@ class ClientQuoteListView(BaseRoleDetailView):
             .distinct()
             .order_by("-updated_at", "-created_at")
         )
-        payload = [self._quote_row(item, request=request) for item in rows]
+        payload = [self._quote_row(item, request=request, client_view=True) for item in rows]
         read_states = read_map(viewer=request.user, item_type=READ_STATE_QUOTE_REQUEST, item_ids=[row["id"] for row in payload])
         for row in payload:
             row.update(read_fields(read_states.get(row["id"])))
@@ -1588,11 +1609,15 @@ class PartnerQuoteSendToClientView(ManagerCapablePartnerQuoteView):
                 base_price = Decimal(str(speed_option["production_total"]))
                 broker_client_price = base_price + markup_amount
                 chosen_speed = apply_speed_selection(quote_request=quote_request, option=speed_option)
-            financial_split = calculate_financial_split(
-                production_cost=base_price,
-                broker_client_price=broker_client_price,
-                fee_waived=fee_waived,
-            )
+            try:
+                financial_split = calculate_financial_split(
+                    production_cost=base_price,
+                    broker_client_price=broker_client_price,
+                    fee_waived=fee_waived,
+                )
+            except ValidationError as exc:
+                # Audit #6: policy cap / margin floor is a client error, not a 500.
+                return Response({"detail": exc.messages[0] if exc.messages else str(exc)}, status=400)
             quantity_pricing_snapshot = {
                 "raw_sheets": canonical_pricing["raw_sheets"],
                 "fixed_waste_sheets": canonical_pricing["fixed_waste_sheets"],
@@ -1652,11 +1677,15 @@ class PartnerQuoteSendToClientView(ManagerCapablePartnerQuoteView):
             if speed_option is not None:
                 base_price = Decimal(str(speed_option["production_total"]))
                 chosen_speed = apply_speed_selection(quote_request=quote_request, option=speed_option)
-            financial_split = calculate_financial_split(
-                production_cost=base_price,
-                broker_client_price=base_price + gross_margin_amount,
-                fee_waived=fee_waived,
-            )
+            try:
+                financial_split = calculate_financial_split(
+                    production_cost=base_price,
+                    broker_client_price=base_price + gross_margin_amount,
+                    fee_waived=fee_waived,
+                )
+            except ValidationError as exc:
+                # Audit #6: policy cap / margin floor is a client error, not a 500.
+                return Response({"detail": exc.messages[0] if exc.messages else str(exc)}, status=400)
         client_send_key = _partner_quote_send_key(
             production_cost_inputs=production_cost_inputs,
             financial_split=financial_split,
@@ -1824,8 +1853,8 @@ class PartnerQuoteSendToClientView(ManagerCapablePartnerQuoteView):
                     "currency": payment.currency,
                     "method": payment.method,
                     "payer_phone": payment.payer_phone,
-                    "checkout_request_id": payment.checkout_request_id,
-                    "merchant_request_id": payment.merchant_request_id,
+                    # The manager sending the quote is not the payer: no Daraja
+                    # identifiers here (audit #1).
                     "stk_request_id": stk_request.id,
                     "stk_status": stk_request.status,
                 }
@@ -2119,8 +2148,10 @@ class ManagerQuoteRequestPricingPreviewView(PartnerAssignedRequestShopOptionsVie
                     broker_client_price=production_cost + markup_amount,
                     fee_waived=fee_waived_for_quote_request(quote_request),
                 )
-            except ValueError as exc:
-                return Response({"detail": str(exc)}, status=400)
+            except (ValueError, ValidationError) as exc:
+                # Audit #6: below the margin floor / above the cap is a 400.
+                messages = getattr(exc, "messages", None)
+                return Response({"detail": messages[0] if messages else str(exc)}, status=400)
             # Item 4 — the margin panel never calculates on the client: the
             # printer's quote, markup, Printy fee, client total and per-piece
             # price all come back from this response.
@@ -2544,6 +2575,14 @@ class PartnerProductionShopListView(BaseRoleDetailView):
     dashboard_role = "partner"
     allowed_roles = (CANONICAL_PARTNER_ROLE,)
 
+    def has_dashboard_access(self, user) -> bool:
+        # Audit #3b: the printer roster is for verified, active managers only.
+        # Pending applicants and rejected managers keep the partner role but
+        # must not see shop identities.
+        from api.permissions import is_verified_active_manager
+
+        return super().has_dashboard_access(user) and is_verified_active_manager(user)
+
     def get_queryset(self, request):
         queryset = (
             # Single source of truth for the D4 confirmation gate (see
@@ -2624,7 +2663,8 @@ class ProductionJobListDetailView(BaseRoleDetailView):
 
     def get(self, request, pk=None):
         if pk is not None:
-            job = self.get_queryset(request).get(pk=pk)
+            # Audit #3b: another shop's job is a 404, not an unhandled 500.
+            job = get_object_or_404(self.get_queryset(request), pk=pk)
             job_read_at = mark_read(viewer=request.user, item_type=READ_STATE_JOB, item_id=job.id)
             return Response(
                 {

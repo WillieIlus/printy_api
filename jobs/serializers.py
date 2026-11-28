@@ -421,7 +421,9 @@ class JobAssignmentSerializer(serializers.ModelSerializer):
         if status == "finishing":
             return ["upload_proof", "mark_ready"]
         if status == "ready":
-            return ["mark_completed", "mark_delivered"]
+            # Prompt 7: the shop dispatches with a handover code; only the
+            # buyer's matching code completes the job.
+            return ["mark_delivered"]
         return []
 
     def get_payment_confirmed(self, obj):
@@ -649,6 +651,12 @@ class JobStatusEventSerializer(serializers.ModelSerializer):
 
 class JobActionSerializer(serializers.Serializer):
     note = serializers.CharField(required=False, allow_blank=True, max_length=500)
+
+
+class HandoverActionSerializer(JobActionSerializer):
+    """Mark dispatched / "I received it": carries the delivery handover code."""
+
+    handover_code = serializers.CharField(required=False, allow_blank=True, max_length=32, trim_whitespace=True)
 
 
 class PrinterAdvanceSerializer(serializers.Serializer):

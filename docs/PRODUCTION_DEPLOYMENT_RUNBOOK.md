@@ -151,7 +151,8 @@ Then deploy according to the actual hosting target:
 
 ### M-Pesa callback fails
 
-- verify Daraja portal callback URL matches `https://api.printy.ke/api/payments/mpesa/callback/`
+- verify `MPESA_CALLBACK_URL` is `https://api.printy.ke/api/payments/mpesa/callback/`. The code appends `MPESA_CALLBACK_SECRET` automatically, so Daraja is given `…/callback/<secret>/`. Any URL registered by hand must include the secret.
+- a 403 in the logs means the secret or the source IP was rejected: check `MPESA_CALLBACK_ALLOWED_IPS` / `MPESA_TRUSTED_PROXIES` (see `docs/DARAJA_PRODUCTION_CHECKLIST.md`). A 404 means an unknown CheckoutRequestID.
 - verify `MPESA_ENV`, shortcode, passkey, consumer key, and consumer secret all belong to the same environment
 - check nginx/gunicorn logs for callback requests and response codes
 - confirm no firewall or proxy issue blocks Safaricom reachability

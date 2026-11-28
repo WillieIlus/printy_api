@@ -1,4 +1,4 @@
-﻿"""Normalize existing shops to the standard 320 x 450 mm (SRA3) sheet.
+"""Normalize existing shops to the standard 320 x 450 mm (SRA3) sheet.
 
 Dry-run by default. `--apply` writes a JSON backup first, so `--reverse` can
 restore every changed machine/paper dimension. The command never creates or

@@ -197,6 +197,9 @@ class DirectShopSubmissionTestCase(TestCase):
     def test_preview_price_matches_submission_price_for_same_direct_shop_draft(self):
         draft = self._draft()
         preview_manager = self._broker("preview-manager@test.com", active=True)
+        # Audit #3: the shop preview is behind the marketplace gate, which now
+        # requires a staff-verified manager.
+        UserProfile.objects.filter(user=preview_manager).update(manager_verified=True)
         self.client.force_authenticate(user=preview_manager)
         preview_response = self.client.post(
             "/api/public/shops/direct-submit-shop/quote-preview/",

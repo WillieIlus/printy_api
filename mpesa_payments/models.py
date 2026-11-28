@@ -120,7 +120,10 @@ class MpesaPayment(models.Model):
 
     # Daraja identifiers — CheckoutRequestID is the idempotency key
     merchant_request_id = models.CharField(max_length=64, blank=True, default="", db_index=True)
-    checkout_request_id = models.CharField(max_length=64, blank=True, default="", unique=True)
+    # NULL until Daraja accepts the push. NULLs never collide on a UNIQUE
+    # index, so failed/concurrent initiations no longer raise IntegrityError
+    # (the old default="" made the second never-pushed row a duplicate).
+    checkout_request_id = models.CharField(max_length=64, blank=True, null=True, default=None, unique=True)
     customer_message = models.TextField(blank=True, default="")
 
     # confirmation

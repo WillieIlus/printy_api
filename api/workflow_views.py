@@ -1,4 +1,5 @@
 import logging
+import os
 import random
 from decimal import Decimal
 
@@ -18,6 +19,7 @@ from rest_framework.views import APIView
 from .permissions import IsBuyerActor, IsBuyerActorOrGuest
 
 from accounts.models import User, UserProfile
+from accounts.throttling import AuthScopedRateThrottle
 from accounts.services.capabilities import has_capability
 from accounts.services.roles import CANONICAL_PARTNER_ROLE, get_actor_role, is_client, is_shop_owner, resolve_user_roles
 from accounts.services.system_accounts import ensure_printy_manager_user, get_printy_manager_user, is_system_account
@@ -163,7 +165,10 @@ def _can_source_calculator_production(user) -> bool:
     if getattr(user, "is_staff", False) or getattr(user, "is_superuser", False):
         return True
     if CANONICAL_PARTNER_ROLE in roles:
-        return has_capability(user, "can_source_jobs")
+        # Audit #3b: production matches reveal shops; verified managers only.
+        from api.permissions import is_verified_active_manager
+
+        return has_capability(user, "can_source_jobs") and is_verified_active_manager(user)
     return False
 
 
@@ -1289,11 +1294,53 @@ class GuestCalculatorDraftClaimView(APIView):
         return Response(CalculatorDraftReadSerializer(draft).data)
 
 
+# Multipart framing (boundaries, part headers, the session_key field) on top
+# of the file itself. Bodies larger than the artwork cap plus this are refused
+# from Content-Length before DRF reads or spools them.
+GUEST_ARTWORK_MULTIPART_OVERHEAD_BYTES = 64 * 1024
+
+
+def _guarded_file_response(stored_file, *, filename: str, inline: bool) -> FileResponse:
+    """Serve an uploaded file without letting the browser execute it.
+
+    ``inline`` is only honoured by callers after validation; everything else is
+    a download. ``nosniff`` stops content sniffing and the sandbox CSP stops a
+    document from running script even if it were rendered.
+    """
+    from common.uploads import CONTENT_TYPES
+
+    extension = os.path.splitext(filename or "")[1].lower().lstrip(".")
+    response = FileResponse(
+        stored_file,
+        as_attachment=not inline,
+        filename=filename,
+        content_type=CONTENT_TYPES.get(extension, "application/octet-stream"),
+    )
+    response["X-Content-Type-Options"] = "nosniff"
+    response["Content-Security-Policy"] = "default-src 'none'; sandbox"
+    return response
+
+
 class GuestArtworkUploadView(APIView):
     permission_classes = [AllowAny]
     parser_classes = [MultiPartParser]
+    # Audit #9: signed-out uploads (up to 50MB each) are rate-limited per
+    # trusted client IP.
+    throttle_classes = [AuthScopedRateThrottle]
+    throttle_scope = "guest_artwork_upload"
 
     def post(self, request):
+        from common.uploads import ARTWORK
+
+        try:
+            declared_length = int(request.META.get("CONTENT_LENGTH") or 0)
+        except (TypeError, ValueError):
+            declared_length = 0
+        if declared_length > ARTWORK.max_bytes + GUEST_ARTWORK_MULTIPART_OVERHEAD_BYTES:
+            return Response(
+                {"detail": f"Artwork files must be {ARTWORK.max_mb}MB or smaller."},
+                status=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            )
         serializer = GuestArtworkUploadSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         try:
@@ -1323,17 +1370,25 @@ class GuestArtworkUploadPreviewView(APIView):
     permission_classes = [AllowAny]
 
     def get(self, request, token):
+        from common.uploads import content_matches_extension, read_head
+        from quotes.pending_artwork import IMAGE_PENDING_ARTWORK_EXTENSIONS
+
         upload = get_pending_artwork_for_token(token=token)
         if upload is None or not upload.file:
             return Response({"detail": "Artwork preview not found."}, status=status.HTTP_404_NOT_FOUND)
         if pending_artwork_is_expired(upload):
             delete_pending_artwork(upload)
             return Response({"detail": "Artwork upload expired."}, status=status.HTTP_410_GONE)
-        return FileResponse(
-            upload.file.open("rb"),
-            as_attachment=False,
-            filename=upload.original_filename or upload.file.name.rsplit("/", 1)[-1],
+        filename = upload.original_filename or upload.file.name.rsplit("/", 1)[-1]
+        extension = os.path.splitext(filename)[1].lower()
+        handle = upload.file.open("rb")
+        # Audit #9: inline only for a raster image whose stored bytes still
+        # match its extension. PDF, AI, EPS and anything unexpected (rows
+        # stored before validation existed) are served as a download.
+        inline = extension in IMAGE_PENDING_ARTWORK_EXTENSIONS and content_matches_extension(
+            read_head(handle), extension
         )
+        return _guarded_file_response(handle, filename=filename, inline=inline)
 
 
 class CalculatorDraftListCreateView(generics.ListCreateAPIView):
@@ -2583,7 +2638,7 @@ class ClientResponseReplyView(APIView):
             notify_quote_event(
                 recipient=quote.shop.owner,
                 notification_type=Notification.BUYER_CLARIFICATION_SENT,
-                message=f"{quote.quote_request.customer_name or 'Client'} replied on Request #{quote.quote_request_id}.",
+                message=f"The client replied on Request #{quote.quote_request_id}.",
                 object_type="quote",
                 object_id=quote.id,
                 actor=request.user,

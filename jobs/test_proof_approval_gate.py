@@ -64,7 +64,7 @@ class ManagerProofApprovalGateTestCase(TestCase):
             managed_job=self.managed_job,
             assignment=self.assignment,
             uploaded_by=self.owner,
-            file=SimpleUploadedFile("proof.pdf", b"proof bytes", content_type="application/pdf"),
+            file=SimpleUploadedFile("proof.pdf", b"%PDF-1.4 proof bytes", content_type="application/pdf"),
             original_filename="proof.pdf",
         )
 

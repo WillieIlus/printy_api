@@ -4,7 +4,9 @@ from django.test import TestCase
 from rest_framework.test import APIClient
 
 from accounts.models import User
-from api.test_actor_visibility import ActorVisibilityTestCase
+# Imported as a module: a bare class import would make pytest collect and run
+# ActorVisibilityTestCase a second time from this file (audit #10a).
+from api import test_actor_visibility
 from quotes.models import Quote, QuoteRequest
 from shops.models import Shop
 from workflow.models import WorkflowJob, WorkflowManager
@@ -188,7 +190,7 @@ class ShopHomeDashboardPrivacyTest(TestCase):
         return client
 
     def _assert_no_forbidden(self, payload, path="root"):
-        forbidden = ActorVisibilityTestCase.SHOP_FORBIDDEN
+        forbidden = test_actor_visibility.ActorVisibilityTestCase.SHOP_FORBIDDEN
         if isinstance(payload, dict):
             for key, value in payload.items():
                 self.assertNotIn(key, forbidden, f"{key} leaked at {path}")

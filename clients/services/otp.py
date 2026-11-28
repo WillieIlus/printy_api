@@ -100,6 +100,11 @@ def validate_action_token(token: str, *, quote_request=None, phone_normalized: s
 
     Used by link-scoped action endpoints to enforce that the client verified
     their phone (law 10.4) before an action.
+
+    Audit #7: the challenge's ``expires_at`` is enforced. Before, a verified
+    token stayed valid forever, so one OTP unlocked every later action on the
+    link (artwork, acknowledgement, payment) indefinitely. A verified token now
+    lives exactly as long as the code it came from (``OTP_TTL_MINUTES``).
     """
     token = str(token or "").strip()
     if not token:
@@ -109,7 +114,11 @@ def validate_action_token(token: str, *, quote_request=None, phone_normalized: s
         queryset = queryset.filter(quote_request=quote_request)
     if phone_normalized:
         queryset = queryset.filter(phone_normalized=phone_normalized)
-    return queryset.filter(verified_at__isnull=False).exclude(verified_token="").exists()
+    return (
+        queryset.filter(verified_at__isnull=False, expires_at__gt=timezone.now())
+        .exclude(verified_token="")
+        .exists()
+    )
 
 
 def verify_otp(*, phone_normalized: str, code: str, purpose: str = ClientOtp.Purpose.CLIENT_ACTIONS, quote_request=None) -> ClientOtp:

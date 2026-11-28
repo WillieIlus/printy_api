@@ -17,6 +17,7 @@ from datetime import timedelta
 from unittest.mock import patch
 
 from django.contrib.auth.hashers import check_password
+from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import TestCase, override_settings
 from django.utils import timezone
 from rest_framework.test import APIClient
@@ -175,12 +176,24 @@ class OtpGateTests(ClientFlowBase):
         self.assertEqual(verify.status_code, 200, verify.content)
         headers = {"HTTP_X_PRINTY_OTP": verify.data["otp_token"]}
 
-        artwork = self.api().post(link_url(token, "artwork/"), {}, format="json", **headers)
+        # Audit #7: the upload must carry a real file, and it is stored.
+        artwork = self.api().post(
+            link_url(token, "artwork/"),
+            {"file": SimpleUploadedFile("art.pdf", b"%PDF-1.4 client artwork", content_type="application/pdf")},
+            format="multipart",
+            **headers,
+        )
         self.assertEqual(artwork.status_code, 202, artwork.content)
+        self.assertTrue(quote_request.attachments.filter(pk=artwork.data["attachment_id"]).exists())
+        # Audit #7: acknowledgement goes through the canonical services and
+        # clears the model flags (it no longer writes request_snapshot keys).
+        quote_request.price_updated = True
+        quote_request.save(update_fields=["price_updated"])
         ack = self.api().post(link_url(token, "acknowledge/"), {"acknowledge": "both"}, format="json", **headers)
         self.assertEqual(ack.status_code, 200, ack.content)
         quote_request.refresh_from_db()
-        self.assertIn("price_acknowledged_at", quote_request.request_snapshot)
+        self.assertFalse(quote_request.price_updated)
+        self.assertIsNotNone(quote_request.price_acknowledged_at)
 
     def test_otp_resend_is_rate_limited(self):
         quote_request = quote_request_from(self.create_request(self.manager))
@@ -317,7 +330,10 @@ class MessagingTests(ClientFlowBase):
         self.create_link(quote_request)
         delivery = MessageDelivery.objects.filter(quote_request=quote_request).first()
         self.assertIsNotNone(delivery)
-        self.assertEqual(delivery.status, MessageDelivery.Status.SENT)
+        # Audit #7: the logging stub delivers nothing, so the attempt is
+        # recorded as QUEUED (not sent), never SENT.
+        self.assertEqual(delivery.status, MessageDelivery.Status.QUEUED)
+        self.assertIsNone(delivery.sent_at)
         self.assertIn("on behalf of", delivery.body)
 
     def test_opt_out_is_honoured(self):

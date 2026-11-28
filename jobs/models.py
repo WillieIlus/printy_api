@@ -225,6 +225,37 @@ class ManagedJob(TimeStampedModel):
     delivered_at = models.DateTimeField(null=True, blank=True)
     completed_at = models.DateTimeField(null=True, blank=True)
     disputed_at = models.DateTimeField(null=True, blank=True)
+    # --- delivery handover (Prompt 7) -------------------------------------
+    # The printer (or whoever dispatches) records a handover code when marking
+    # the job dispatched; it travels with the parcel. The buyer completes the
+    # job by typing the same code ("I received it"). Never exposed by the API.
+    COMPLETION_BUYER_HANDOVER = "buyer_handover"
+    COMPLETION_BUYER_NO_CODE = "buyer_no_code"
+    COMPLETION_ADMIN_DISPUTE = "admin_dispute"
+    COMPLETION_METHOD_CHOICES = [
+        (COMPLETION_BUYER_HANDOVER, _("Buyer entered the handover code")),
+        (COMPLETION_BUYER_NO_CODE, _("Buyer confirmed a job dispatched before handover codes")),
+        (COMPLETION_ADMIN_DISPUTE, _("Platform admin dispute resolution")),
+    ]
+    handover_code = models.CharField(max_length=12, blank=True, default="")
+    handover_code_set_at = models.DateTimeField(null=True, blank=True)
+    handover_code_set_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="+",
+    )
+    handover_failed_attempts = models.PositiveSmallIntegerField(default=0)
+    handover_confirmed_at = models.DateTimeField(null=True, blank=True)
+    handover_confirmed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="+",
+    )
+    completion_method = models.CharField(max_length=32, blank=True, default="", choices=COMPLETION_METHOD_CHOICES)
     cancelled_at = models.DateTimeField(null=True, blank=True)
     # --- timeliness (law Part 4) -----------------------------------------
     due_date = models.DateTimeField(
@@ -413,6 +444,10 @@ class ManagedJobPayout(TimeStampedModel):
     STATUS_FAILED = "failed"
     STATUS_ON_HOLD = "on_hold"
     STATUS_CANCELLED = "cancelled"
+    # Prompt 7 PART 2: a payout an admin must look at before any (further)
+    # money moves -- limits, legacy no-handover-code jobs, ambiguous B2C sends,
+    # exhausted retries. Leaves only via jobs.payout_state transitions.
+    STATUS_NEEDS_REVIEW = "needs_review"
     STATUS_CHOICES = [
         (STATUS_PENDING, _("Pending")),
         (STATUS_PROCESSING, _("Processing")),
@@ -420,6 +455,7 @@ class ManagedJobPayout(TimeStampedModel):
         (STATUS_FAILED, _("Failed")),
         (STATUS_ON_HOLD, _("On hold")),
         (STATUS_CANCELLED, _("Cancelled")),
+        (STATUS_NEEDS_REVIEW, _("Needs review")),
     ]
 
     DISBURSEMENT_MANUAL = "manual"
@@ -428,10 +464,12 @@ class ManagedJobPayout(TimeStampedModel):
         (DISBURSEMENT_MANUAL, _("Manual")),
         (DISBURSEMENT_AUTOMATIC, _("Automatic")),
     ]
-    # Printy currently has no outbound money-movement provider, so every payout
-    # is manual: an admin moves the money out of band and then records the
-    # transfer reference here. "released" therefore attests that the money was
-    # sent by hand, not that an API transferred it.
+    # Manual payouts: an admin moves the money out of band and records the
+    # transfer reference; "released" then attests the money was sent by hand.
+    # Automatic payouts (Daraja B2C, Prompt 7 PART 2) exist but are OFF unless
+    # settings.AUTO_PAYOUTS_ENABLED; this class constant is the shipped default
+    # and is kept for API compatibility. The live answer is
+    # jobs.auto_payouts.automatic_disbursement_available().
     AUTOMATIC_DISBURSEMENT_AVAILABLE = False
 
     managed_job = models.ForeignKey(
@@ -497,6 +535,35 @@ class ManagedJobPayout(TimeStampedModel):
         verbose_name=_("released by"),
     )
     metadata = models.JSONField(default=dict, blank=True)
+    # --- automatic payouts (Prompt 7 PART 2) --------------------------------
+    waiting_reason = models.CharField(
+        max_length=64,
+        blank=True,
+        default="",
+        help_text=_("Why an automatic payout is not being sent (admin-visible code)."),
+    )
+    waiting_detail = models.TextField(blank=True, default="")
+    audit_log = models.JSONField(
+        default=list,
+        blank=True,
+        help_text=_("Append-only trail of every status change and B2C event."),
+    )
+    attempt_count = models.PositiveSmallIntegerField(default=0)
+    next_attempt_at = models.DateTimeField(null=True, blank=True)
+    sent_at = models.DateTimeField(null=True, blank=True)
+    # OriginatorConversationID of the CURRENT B2C request: one per attempt,
+    # never reused, unique across all payouts.
+    idempotency_key = models.CharField(max_length=64, null=True, blank=True, unique=True)
+    b2c_conversation_id = models.CharField(max_length=64, blank=True, default="", db_index=True)
+    b2c_transaction_id = models.CharField(max_length=64, blank=True, default="")
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+    reviewed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="+",
+    )
 
     class Meta:
         ordering = ["-created_at", "-id"]
@@ -511,6 +578,7 @@ class ManagedJobPayout(TimeStampedModel):
         indexes = [
             models.Index(fields=["managed_job", "status"], name="job_payout_job_status_idx"),
             models.Index(fields=["recipient", "status"], name="job_payout_recipient_idx"),
+            models.Index(fields=["status", "next_attempt_at"], name="job_payout_due_idx"),
         ]
 
     def __str__(self):

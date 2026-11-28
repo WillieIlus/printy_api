@@ -155,7 +155,10 @@ class _StkFixture(TestCase):
                     "ResultCode": 0,
                     "ResultDesc": "Success",
                     "CallbackMetadata": {
-                        "Items": [
+                        # Daraja's key is "Item". The old "Items" typo meant no
+                        # receipt/amount reached the handler, which only passed
+                        # because missing metadata used to be treated as paid.
+                        "Item": [
                             {"Name": "Amount", "Value": float(stk.amount)},
                             {"Name": "MpesaReceiptNumber", "Value": receipt},
                         ]

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from decimal import Decimal, ROUND_HALF_UP
+from decimal import ROUND_CEILING, Decimal
 from typing import Any, Iterator
 
 from django.core.exceptions import ValidationError
@@ -12,9 +12,27 @@ from common.money import MONEY_QUANT, RATE_QUANT, money, rate, to_decimal, whole
 from pricing.models import PlatformFeePolicy
 
 
-MIN_MARKUP_MULTIPLE = Decimal("1.05")
-TIER_A_MAX_PRODUCTION_COST = Decimal("1000.00")
-TIER_B_MAX_PRODUCTION_COST = Decimal("10000.00")
+def _field_default(name: str) -> Decimal:
+    return Decimal(str(PlatformFeePolicy._meta.get_field(name).default))
+
+
+# Audit #6: these names are kept for existing importers, but they are only the
+# *defaults* of the PlatformFeePolicy fields. Runtime pricing reads the active
+# policy row (see _tier_parameters), so admin edits take effect.
+MIN_MARKUP_MULTIPLE = _field_default("min_markup_multiple")
+TIER_A_MAX_PRODUCTION_COST = _field_default("under_production_threshold")
+TIER_B_MAX_PRODUCTION_COST = _field_default("high_production_threshold")
+
+
+class MarginFloorError(ValidationError, ValueError):
+    """The markup is below the policy floor (audit #6).
+
+    It subclasses ValueError as well, so existing callers that turn ValueError
+    into an HTTP 400 report it instead of returning a 500.
+    """
+
+    def __str__(self) -> str:
+        return "; ".join(self.messages)
 
 # Re-exported for the many modules that already import `money` from here. The
 # definitions live in common.money so there is exactly one rounding rule.
@@ -22,6 +40,8 @@ __all__ = [
     "MONEY_QUANT",
     "RATE_QUANT",
     "MIN_MARKUP_MULTIPLE",
+    "MarginFloorError",
+    "minimum_manager_markup",
     "TIER_A_MAX_PRODUCTION_COST",
     "TIER_B_MAX_PRODUCTION_COST",
     "money",
@@ -129,8 +149,93 @@ def get_active_platform_fee_policy() -> PlatformFeePolicy:
     return PlatformFeePolicy.objects.create(effective_from=timezone.now())
 
 
-def _policy_value(policy: PlatformFeePolicy, field: str, default: str) -> Decimal:
-    return Decimal(str(getattr(policy, field, Decimal(default))))
+@dataclass(frozen=True)
+class _TierParameters:
+    pricing_tier: str
+    shop_floor_multiple: Decimal
+    manager_commission_cap_rate: Decimal
+    max_client_price_multiple: Decimal
+
+
+def _policy_decimal(policy, field: str) -> Decimal:
+    value = getattr(policy, field, None)
+    if value in (None, ""):
+        return _field_default(field)
+    return Decimal(str(value))
+
+
+def _tier_parameters(policy, production_cost: Decimal) -> _TierParameters:
+    """Read the tier for ``production_cost`` from the policy row."""
+    under_threshold = _policy_decimal(policy, "under_production_threshold")
+    high_threshold = _policy_decimal(policy, "high_production_threshold")
+    if production_cost < under_threshold:
+        tier = "a"
+    elif production_cost <= high_threshold:
+        tier = "b"
+    else:
+        tier = "c"
+    return _TierParameters(
+        pricing_tier=f"tier_{tier}",
+        shop_floor_multiple=_policy_decimal(policy, f"tier_{tier}_shop_floor_multiple"),
+        manager_commission_cap_rate=_policy_decimal(policy, f"tier_{tier}_manager_commission_cap_rate"),
+        max_client_price_multiple=_policy_decimal(policy, f"tier_{tier}_max_client_price_multiple"),
+    )
+
+
+def _ceil_kes(value: Decimal) -> Decimal:
+    integral = value.to_integral_value(rounding=ROUND_CEILING)
+    return integral.quantize(MONEY_QUANT)
+
+
+def _split_amounts(*, production_cost: Decimal, manager_markup: Decimal, params: _TierParameters, fee_waived: bool):
+    """Shop payout, manager payout and residual Printy fee, all whole KES."""
+    broker_client_price = production_cost + manager_markup
+    gross_margin = whole_kes(broker_client_price - production_cost)
+    shop_payout = whole_kes(production_cost * params.shop_floor_multiple)
+    if fee_waived:
+        # The manager keeps everything the printer is not paid. For tier A that is
+        # the whole markup; for tiers B/C the printer-side uplift still comes out
+        # of the markup first, exactly as it does when the fee is charged.
+        manager_payout = whole_kes(max(broker_client_price - shop_payout, Decimal("0.00")))
+    else:
+        manager_payout = whole_kes(min(manager_markup, whole_kes(gross_margin * params.manager_commission_cap_rate)))
+    printy_fee = whole_kes(broker_client_price - shop_payout - manager_payout)
+    return shop_payout, manager_payout, printy_fee
+
+
+def minimum_manager_markup(*, production_cost, policy=None, fee_waived: bool = False) -> Decimal:
+    """Smallest whole-KES markup the policy accepts for ``production_cost``.
+
+    Two floors apply, and the larger wins:
+    - ``min_markup_multiple``: client price >= production cost x multiple.
+    - the tier's margin floor: the client pays at least the shop payout plus the
+      manager payout, i.e. the Printy fee is never negative. With the fee
+      charged that needs markup x (1 - commission cap) >= production x
+      (shop floor - 1); with the fee waived, markup >= production x
+      (shop floor - 1).
+    """
+    policy = policy or get_active_platform_fee_policy()
+    production_cost = whole_kes(to_decimal(production_cost))
+    params = _tier_parameters(policy, production_cost)
+    min_multiple = _policy_decimal(policy, "min_markup_multiple")
+    floors = [_ceil_kes(production_cost * (min_multiple - Decimal("1")))]
+    uplift = production_cost * (params.shop_floor_multiple - Decimal("1"))
+    if fee_waived:
+        floors.append(_ceil_kes(uplift))
+    else:
+        keep_rate = Decimal("1") - params.manager_commission_cap_rate
+        floors.append(_ceil_kes(uplift / keep_rate) if keep_rate > 0 else _ceil_kes(uplift))
+    markup = max(max(floors), Decimal("0.00"))
+    # Whole-KES rounding of the payouts can leave the residual a shilling short
+    # at the boundary; step up until the split is non-negative.
+    for _ in range(5):
+        _, _, printy_fee = _split_amounts(
+            production_cost=production_cost, manager_markup=markup, params=params, fee_waived=fee_waived
+        )
+        if printy_fee >= 0:
+            break
+        markup += Decimal("1.00")
+    return markup
 
 
 def calculate_quote_financials(*, production_cost, manager_markup, policy: PlatformFeePolicy, fee_waived: bool = False) -> QuoteFinancialResult:
@@ -176,45 +281,38 @@ def calculate_quote_financials(*, production_cost, manager_markup, policy: Platf
     if production_cost <= 0:
         raise ValidationError("Production cost must be at least KES 1.")
 
-    if production_cost < TIER_A_MAX_PRODUCTION_COST:
-        pricing_tier = "tier_a"
-        shop_floor_multiple = Decimal("1.00")
-        manager_commission_cap_rate = Decimal("0.60")
-        max_client_price_multiple = Decimal("3.00")
-    elif production_cost <= TIER_B_MAX_PRODUCTION_COST:
-        pricing_tier = "tier_b"
-        shop_floor_multiple = Decimal("1.05")
-        manager_commission_cap_rate = Decimal("0.45")
-        max_client_price_multiple = Decimal("2.50")
-    else:
-        pricing_tier = "tier_c"
-        shop_floor_multiple = Decimal("1.08")
-        manager_commission_cap_rate = Decimal("0.35")
-        max_client_price_multiple = Decimal("2.00")
+    params = _tier_parameters(policy, production_cost)
+    pricing_tier = params.pricing_tier
 
     # Both inputs are whole KES now, so the sum is exact and needs no rounding.
     broker_client_price = production_cost + manager_markup
-    max_allowed_client_price = whole_kes(production_cost * max_client_price_multiple)
+    max_allowed_client_price = whole_kes(production_cost * params.max_client_price_multiple)
     # Guard the cap on the raw input *and* on the rounded price, so rounding can
     # never let a quote through that policy would have rejected.
     if broker_client_price > max_allowed_client_price or (
         raw_production_cost + raw_manager_markup
-    ) > (raw_production_cost * max_client_price_multiple):
+    ) > (raw_production_cost * params.max_client_price_multiple):
         raise ValidationError("Manager markup exceeds the policy cap.")
 
-    gross_margin = whole_kes(broker_client_price - production_cost)
-    shop_payout = whole_kes(production_cost * shop_floor_multiple)
+    # Audit #6: margin floor. Reject (never clamp) a markup that is below the
+    # policy minimum, because it would make the Printy fee negative, i.e. pay
+    # out more than the client is charged.
+    minimum_markup = minimum_manager_markup(production_cost=production_cost, policy=policy, fee_waived=fee_waived)
+    if manager_markup < minimum_markup:
+        raise MarginFloorError(
+            f"Manager markup is below the minimum of KES {minimum_markup} for a production cost of "
+            f"KES {production_cost} (client price must be at least KES {production_cost + minimum_markup})."
+        )
+
+    shop_payout, manager_payout, printy_fee = _split_amounts(
+        production_cost=production_cost, manager_markup=manager_markup, params=params, fee_waived=bool(fee_waived)
+    )
     production_fee_component = whole_kes(shop_payout - production_cost)
-    if fee_waived:
-        # The manager keeps everything the printer is not paid. For tier A that is
-        # the whole markup; for tiers B/C the printer-side uplift still comes out
-        # of the markup first, exactly as it does when the fee is charged.
-        manager_payout = whole_kes(max(broker_client_price - shop_payout, Decimal("0.00")))
-    else:
-        manager_payout = whole_kes(min(manager_markup, whole_kes(gross_margin * manager_commission_cap_rate)))
+    if printy_fee < 0 or shop_payout + manager_payout > broker_client_price:
+        # Defensive: the floor above makes this unreachable.
+        raise MarginFloorError("The split would pay out more than the client is charged.")
     # Residual: guarantees the three payout components sum to client_total. With the
     # fee waived this is 0 whenever the markup covers the printer-side fee.
-    printy_fee = whole_kes(broker_client_price - shop_payout - manager_payout)
     markup_fee_component = printy_fee
     client_total = broker_client_price
     applied_markup_multiple = rate(manager_markup / production_cost) if production_cost else Decimal("0.0000")

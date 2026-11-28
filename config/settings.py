@@ -83,9 +83,14 @@ SECRET_KEY = _get_env(
     required=True,
 )
 
+# Audit #10b: no permissive default outside DEBUG. A deployment must name its
+# hosts explicitly (see docs/env_vars.md); the DEBUG=False guard below refuses
+# to boot when ALLOWED_HOSTS is unset, empty, "*" or only local names.
+_ALLOWED_HOSTS_DEV_DEFAULT = "localhost,127.0.0.1,[::1],testserver"
+ALLOWED_HOSTS_FROM_ENV = os.environ.get("ALLOWED_HOSTS") is not None
 ALLOWED_HOSTS = _get_env_list(
     "ALLOWED_HOSTS",
-    default="api.printy.ke,printy.ke,www.printy.ke,178.128.206.240,localhost,127.0.0.1,testserver",
+    default=_ALLOWED_HOSTS_DEV_DEFAULT if DEBUG else "",
 )
 # =============================================================================
 # Apps
@@ -154,9 +159,11 @@ REST_FRAMEWORK = {
     "DEFAULT_PAGINATION_CLASS": "rest_framework.pagination.PageNumberPagination",
     "PAGE_SIZE": 20,
     "DEFAULT_THROTTLE_CLASSES": [
-        "rest_framework.throttling.AnonRateThrottle",
-        "rest_framework.throttling.UserRateThrottle",
-        "rest_framework.throttling.ScopedRateThrottle",
+        # Audit #10b: keyed by common.client_ip.resolve_client_ip, never by a
+        # raw X-Forwarded-For (DRF's stock get_ident / NUM_PROXIES).
+        "common.throttling.TrustedAnonRateThrottle",
+        "common.throttling.TrustedUserRateThrottle",
+        "common.throttling.TrustedScopedRateThrottle",
     ],
     "DEFAULT_THROTTLE_RATES": {
         "anon": "1000/hour",
@@ -174,6 +181,18 @@ REST_FRAMEWORK = {
         # Public recommendation preview: payload-keyed and cheap, but still
         # capped so it cannot be used to scrape the manager roster.
         "recommended_managers": "120/hour",
+        # Audit #4: credential and account-creation endpoints. Keyed per client
+        # IP (trusted-proxy aware, accounts.throttling). Override per scope with
+        # THROTTLE_RATE_<SCOPE> env vars, e.g. THROTTLE_RATE_AUTH_LOGIN=20/min.
+        "auth_login": os.environ.get("THROTTLE_RATE_AUTH_LOGIN", "10/min"),
+        "auth_register": os.environ.get("THROTTLE_RATE_AUTH_REGISTER", "10/hour"),
+        "auth_password_reset": os.environ.get("THROTTLE_RATE_AUTH_PASSWORD_RESET", "5/hour"),
+        "auth_password_reset_confirm": os.environ.get("THROTTLE_RATE_AUTH_PASSWORD_RESET_CONFIRM", "10/hour"),
+        "auth_email_resend": os.environ.get("THROTTLE_RATE_AUTH_EMAIL_RESEND", "5/hour"),
+        "auth_google_login": os.environ.get("THROTTLE_RATE_AUTH_GOOGLE_LOGIN", "20/min"),
+        "auth_invite_claim": os.environ.get("THROTTLE_RATE_AUTH_INVITE_CLAIM", "10/hour"),
+        # Audit #9: signed-out calculator artwork uploads (up to 50MB each).
+        "guest_artwork_upload": os.environ.get("THROTTLE_RATE_GUEST_ARTWORK_UPLOAD", "30/hour"),
     },
 }
 
@@ -244,6 +263,20 @@ SOCIALACCOUNT_PROVIDERS = {
         "SCOPE": ["user", "user:email"],
     },
 }
+
+# Audit #4: POST /api/auth/social/google/ verifies the ID token's signature,
+# issuer and audience with google-auth. GOOGLE_CLIENT_ID (comma-separated for
+# several OAuth clients, e.g. web + Android) is the required audience; without
+# it the endpoint fails closed with a 503 configuration error.
+GOOGLE_CLIENT_IDS = [
+    part.strip() for part in os.environ.get("GOOGLE_CLIENT_ID", "").split(",") if part.strip()
+]
+# Explicit dev/test escape hatch: skip ONLY the audience check when no client id
+# is configured. Honoured only while DEBUG is on and APP_ENV is local/dev/test;
+# signature, issuer, expiry and email_verified are still enforced.
+GOOGLE_OAUTH_DEV_SKIP_AUDIENCE = os.environ.get(
+    "GOOGLE_OAUTH_DEV_SKIP_AUDIENCE", "false"
+).strip().lower() in ("1", "true", "yes")
 
 # =============================================================================
 # Email
@@ -439,7 +472,14 @@ if not DEBUG:
         raise ImproperlyConfigured(
             "SECRET_KEY must be replaced with a real secret when DEBUG=False."
         )
-    if not ALLOWED_HOSTS or not _contains_production_host(ALLOWED_HOSTS):
+    if not ALLOWED_HOSTS_FROM_ENV or not ALLOWED_HOSTS:
+        raise ImproperlyConfigured(
+            "ALLOWED_HOSTS must be set explicitly when DEBUG=False "
+            "(comma-separated, e.g. api.printy.ke). There is no default."
+        )
+    if any(host.strip() in {"*", ".*"} for host in ALLOWED_HOSTS):
+        raise ImproperlyConfigured("ALLOWED_HOSTS must not contain a wildcard '*' when DEBUG=False.")
+    if not _contains_production_host(ALLOWED_HOSTS):
         raise ImproperlyConfigured(
             "ALLOWED_HOSTS must include the real production hosts when DEBUG=False."
         )
@@ -532,6 +572,140 @@ MPESA_STK_CALLBACK_URL = MPESA_CALLBACK_URL
 # a blank ResultURL would be rejected by Daraja outright.
 MPESA_TIMEOUT_URL = _get_env("MPESA_TIMEOUT_URL", default=MPESA_CALLBACK_URL)
 MPESA_RESULT_URL = _get_env("MPESA_RESULT_URL", default=MPESA_CALLBACK_URL)
+
+# --- Callback authenticity (audit #1) ----------------------------------------
+# Daraja does not sign callbacks. The defence is a high-entropy secret carried
+# in the callback URL we register with Daraja (appended as a final path
+# segment by payments.callback_security.signed_callback_url), a Safaricom
+# source-IP allowlist, and matching every callback to a persisted pending
+# transaction. See docs/env_vars.md.
+MPESA_CALLBACK_SECRET = (_get_env("MPESA_CALLBACK_SECRET", default="") or "").strip()
+# Production (DEBUG=False) fails closed: the secret is mandatory there, both at
+# import time (below) and at request time (a missing secret rejects every
+# callback with 403 instead of accepting it unauthenticated). Local/test runs
+# (DEBUG=True, which MPESA_FORCE_STUB already requires) may omit it.
+MPESA_CALLBACK_SECRET_REQUIRED = not DEBUG
+# Comma-separated IPs/CIDRs allowed to deliver callbacks. When unset in
+# production the published Safaricom Daraja ranges are enforced
+# (payments.callback_security.SAFARICOM_CALLBACK_IPS).
+MPESA_CALLBACK_ALLOWED_IPS = _get_env_list("MPESA_CALLBACK_ALLOWED_IPS", default="")
+# Reverse proxies whose X-Forwarded-For we trust when resolving the callback
+# source IP. A raw X-Forwarded-For from any other peer is ignored. Loopback is
+# the local nginx in the documented deployment.
+MPESA_TRUSTED_PROXIES = _get_env_list("MPESA_TRUSTED_PROXIES", default="127.0.0.1,::1")
+# How long an unanswered STK prompt counts as "in flight" and blocks a second
+# prompt for the same payment (payments.services.stk_in_flight_window). Older
+# prompts with no callback are marked EXPIRED. Audit tier3: this used to be
+# read only with getattr(settings, ...), so the environment variable that the
+# docs name had no effect. The handset prompt itself lives about 60 seconds,
+# so a shorter window would allow two live prompts at once.
+_MPESA_STK_IN_FLIGHT_MIN_SECONDS = 60
+try:
+    MPESA_STK_IN_FLIGHT_SECONDS = int(str(_get_env("MPESA_STK_IN_FLIGHT_SECONDS", default="180")).strip())
+except ValueError:
+    raise ImproperlyConfigured("MPESA_STK_IN_FLIGHT_SECONDS must be a whole number of seconds.") from None
+if MPESA_STK_IN_FLIGHT_SECONDS < _MPESA_STK_IN_FLIGHT_MIN_SECONDS:
+    raise ImproperlyConfigured(
+        f"MPESA_STK_IN_FLIGHT_SECONDS must be at least {_MPESA_STK_IN_FLIGHT_MIN_SECONDS} "
+        "(the handset STK prompt stays open about a minute)."
+    )
+
+# Audit #1c: lost-confirmation recovery (payments.recovery, the
+# `mpesa_recover_payments` command). Rate limits on Daraja STK Query:
+# a pause between consecutive queries, a per-prompt cooldown so frequent cron
+# runs never re-query the same CheckoutRequestID, and a lookback after which a
+# prompt is no longer queried (the super-admin can still look at it by hand).
+def _recovery_number(name, default, cast, minimum):
+    raw = str(_get_env(name, default=str(default))).strip()
+    try:
+        value = cast(raw)
+    except ValueError:
+        raise ImproperlyConfigured(f"{name} must be a number.") from None
+    if value < minimum:
+        raise ImproperlyConfigured(f"{name} must be at least {minimum}.")
+    return value
+
+
+MPESA_RECOVERY_QUERY_INTERVAL_SECONDS = _recovery_number("MPESA_RECOVERY_QUERY_INTERVAL_SECONDS", 1.0, float, 0)
+MPESA_RECOVERY_QUERY_COOLDOWN_SECONDS = _recovery_number("MPESA_RECOVERY_QUERY_COOLDOWN_SECONDS", 60, int, 0)
+MPESA_RECOVERY_MAX_AGE_HOURS = _recovery_number("MPESA_RECOVERY_MAX_AGE_HOURS", 24, int, 1)
+
+_MPESA_CALLBACK_SECRET_MIN_LENGTH = 32
+if MPESA_CALLBACK_SECRET_REQUIRED and not _IS_TESTING_SETTINGS:
+    if _is_placeholder_secret(MPESA_CALLBACK_SECRET) or len(MPESA_CALLBACK_SECRET) < _MPESA_CALLBACK_SECRET_MIN_LENGTH:
+        raise ImproperlyConfigured(
+            "MPESA_CALLBACK_SECRET must be set to a random value of at least "
+            f"{_MPESA_CALLBACK_SECRET_MIN_LENGTH} URL-safe characters when DEBUG=False. "
+            "Daraja callbacks are unsigned; without the secret anyone could post a "
+            "forged payment confirmation. Generate one with "
+            "`python -c \"import secrets; print(secrets.token_urlsafe(48))\"`."
+        )
+# --- Automatic payouts via Daraja B2C (Prompt 7 PART 2) ---------------------
+# OFF by default and fail closed. When off, nothing is ever sent to Daraja B2C
+# and every payout stays manual (jobs.payout_services). See
+# docs/DARAJA_PRODUCTION_CHECKLIST.md "Automatic payouts (B2C)" before enabling.
+from config.payout_config import auto_payout_config_errors as _auto_payout_config_errors  # noqa: E402
+from config.payout_config import env_flag as _env_flag  # noqa: E402
+
+AUTO_PAYOUTS_ENABLED = _env_flag(_get_env("AUTO_PAYOUTS_ENABLED", default=""))
+MPESA_B2C_SHORTCODE = _get_env("MPESA_B2C_SHORTCODE", default="")
+MPESA_B2C_INITIATOR_NAME = _get_env("MPESA_B2C_INITIATOR_NAME", default="") or MPESA_INITIATOR_NAME
+MPESA_B2C_SECURITY_CREDENTIAL = _get_env("MPESA_B2C_SECURITY_CREDENTIAL", default="") or MPESA_SECURITY_CREDENTIAL
+MPESA_B2C_COMMAND_ID = _get_env("MPESA_B2C_COMMAND_ID", default="BusinessPayment")
+
+
+def _b2c_default_url(leaf):
+    base = str(MPESA_CALLBACK_URL or "").strip()
+    if base.rstrip("/").endswith("/callback"):
+        return base.rstrip("/")[: -len("callback")] + f"b2c/{leaf}/"
+    return ""
+
+
+# Both URLs get MPESA_CALLBACK_SECRET appended as the last path segment when
+# handed to Daraja (payments.callback_security.signed_callback_url).
+MPESA_B2C_RESULT_URL = _get_env("MPESA_B2C_RESULT_URL", default="") or _b2c_default_url("result")
+MPESA_B2C_TIMEOUT_URL = _get_env("MPESA_B2C_TIMEOUT_URL", default="") or _b2c_default_url("timeout")
+# Safety limits (whole KES). Above the per-payout max, or past the daily total,
+# a payout goes to needs_review instead of being sent.
+AUTO_PAYOUT_MAX_AMOUNT = _recovery_number("AUTO_PAYOUT_MAX_AMOUNT", 50000, int, 1)
+AUTO_PAYOUT_DAILY_CAP = _recovery_number("AUTO_PAYOUT_DAILY_CAP", 200000, int, 1)
+# Bounded retries for definite B2C rejections: attempt N waits
+# AUTO_PAYOUT_RETRY_BASE_SECONDS * 2**(N-1); after AUTO_PAYOUT_MAX_ATTEMPTS the
+# payout goes to needs_review. A request whose outcome is unknown is never
+# retried automatically.
+AUTO_PAYOUT_MAX_ATTEMPTS = _recovery_number("AUTO_PAYOUT_MAX_ATTEMPTS", 3, int, 1)
+AUTO_PAYOUT_RETRY_BASE_SECONDS = _recovery_number("AUTO_PAYOUT_RETRY_BASE_SECONDS", 300, int, 0)
+# A B2C request with no result callback after this long goes to needs_review.
+AUTO_PAYOUT_RESULT_TIMEOUT_MINUTES = _recovery_number("AUTO_PAYOUT_RESULT_TIMEOUT_MINUTES", 60, int, 1)
+
+
+def auto_payout_settings_snapshot():
+    return {
+        name: globals().get(name)
+        for name in (
+            "MPESA_CONSUMER_KEY",
+            "MPESA_CONSUMER_SECRET",
+            "MPESA_B2C_SHORTCODE",
+            "MPESA_B2C_INITIATOR_NAME",
+            "MPESA_B2C_SECURITY_CREDENTIAL",
+            "MPESA_B2C_RESULT_URL",
+            "MPESA_B2C_TIMEOUT_URL",
+            "MPESA_CALLBACK_SECRET",
+            "AUTO_PAYOUT_MAX_AMOUNT",
+            "AUTO_PAYOUT_DAILY_CAP",
+        )
+    }
+
+
+if AUTO_PAYOUTS_ENABLED and not DEBUG and not _IS_TESTING_SETTINGS:
+    _auto_payout_errors = _auto_payout_config_errors(auto_payout_settings_snapshot(), production=True)
+    if _auto_payout_errors:
+        raise ImproperlyConfigured(
+            "AUTO_PAYOUTS_ENABLED is on but automatic payouts are not configured: "
+            + " ".join(_auto_payout_errors)
+            + " Leave AUTO_PAYOUTS_ENABLED off until every B2C setting is in place."
+        )
+
 MPESA_ACCOUNT_REFERENCE_DEFAULT = _get_env(
     "MPESA_ACCOUNT_REFERENCE_DEFAULT",
     fallback_names=("MPESA_ACCOUNT_REFERENCE",),
@@ -725,6 +899,63 @@ def check_mpesa_production_config(app_configs=None, **kwargs):
         product=getattr(_running_settings, "MPESA_SHORTCODE_TYPE", "paybill"),
     )
 
+
+def _evaluate_mpesa_callback_security(*, required, secret, allowed_ips=()):
+    """Pure evaluation of the callback-authenticity settings (unit-testable).
+
+    printy.E017: production (secret required) without a strong secret.
+    printy.E018: the secret contains characters that are not URL-safe, so it
+    cannot be carried in the callback URL path.
+    printy.E019: an MPESA_CALLBACK_ALLOWED_IPS entry is not an IP/CIDR.
+    """
+    import ipaddress
+    import re
+
+    from django.core.checks import Error
+
+    messages = []
+    secret = (secret or "").strip()
+    if required and (_is_placeholder_secret(secret) or len(secret) < _MPESA_CALLBACK_SECRET_MIN_LENGTH):
+        messages.append(
+            Error(
+                "MPESA_CALLBACK_SECRET is missing, a placeholder, or shorter than "
+                f"{_MPESA_CALLBACK_SECRET_MIN_LENGTH} characters while DEBUG=False.",
+                hint="Set a random URL-safe secret (secrets.token_urlsafe(48)) in the deployed .env.",
+                id="printy.E017",
+            )
+        )
+    if secret and not re.fullmatch(r"[A-Za-z0-9_\-]+", secret):
+        messages.append(
+            Error(
+                "MPESA_CALLBACK_SECRET may only contain URL-safe characters [A-Za-z0-9_-].",
+                hint="Regenerate it with secrets.token_urlsafe(48).",
+                id="printy.E018",
+            )
+        )
+    for entry in allowed_ips or ():
+        try:
+            ipaddress.ip_network(str(entry).strip(), strict=False)
+        except ValueError:
+            messages.append(
+                Error(
+                    f"MPESA_CALLBACK_ALLOWED_IPS entry {entry!r} is not a valid IP address or CIDR.",
+                    id="printy.E019",
+                )
+            )
+    return messages
+
+
+@_django_checks.register(_django_checks.Tags.security)
+def check_mpesa_callback_security(app_configs=None, **kwargs):
+    """Fail startup when callbacks would be accepted without authentication."""
+    from django.conf import settings as _running_settings
+
+    return _evaluate_mpesa_callback_security(
+        required=getattr(_running_settings, "MPESA_CALLBACK_SECRET_REQUIRED", False),
+        secret=getattr(_running_settings, "MPESA_CALLBACK_SECRET", ""),
+        allowed_ips=getattr(_running_settings, "MPESA_CALLBACK_ALLOWED_IPS", ()),
+    )
+
 # =============================================================================
 # Middleware
 # =============================================================================
@@ -783,6 +1014,86 @@ DATABASES = {
 }
 
 _log_env_presence("SECRET_KEY", "DB_NAME", "DB_USER", "DB_PASSWORD", "DB_HOST", "DB_PORT")
+
+# =============================================================================
+# Cache (audit #10b)
+# =============================================================================
+# Throttle counters (every DRF throttle, incl. the client-portal OTP request /
+# verify limits), the Daraja OAuth token and cached manager listings live in
+# the default cache. With a per-process LocMemCache each gunicorn worker keeps
+# its own counters, so every limit is silently multiplied by the worker count
+# and a restart resets them. Production therefore needs the shared Redis
+# cache; LocMem is only allowed in DEBUG and test runs. (OTP codes, attempt
+# counters and action tokens are database rows, already shared.)
+REDIS_URL = (_get_env("REDIS_URL", default="") or "").strip()
+SHARED_CACHE_REQUIRED = not DEBUG and not _IS_TESTING_SETTINGS
+_SHARED_CACHE_BACKENDS = {"django.core.cache.backends.redis.RedisCache"}
+if REDIS_URL:
+    if not REDIS_URL.startswith(("redis://", "rediss://", "unix://")):
+        raise ImproperlyConfigured("REDIS_URL must start with redis://, rediss:// or unix://.")
+    CACHES = {
+        "default": {
+            "BACKEND": "django.core.cache.backends.redis.RedisCache",
+            "LOCATION": REDIS_URL,
+            "KEY_PREFIX": _get_env("CACHE_KEY_PREFIX", default="printy"),
+            "TIMEOUT": 300,
+        }
+    }
+elif not SHARED_CACHE_REQUIRED:
+    CACHES = {
+        "default": {
+            "BACKEND": "django.core.cache.backends.locmem.LocMemCache",
+            "LOCATION": "printy-local",
+        }
+    }
+else:
+    raise ImproperlyConfigured(
+        "REDIS_URL must be set when DEBUG=False: throttles and the Daraja token "
+        "cache need a cache shared by every worker (e.g. redis://127.0.0.1:6379/1). "
+        "A per-process LocMemCache is only allowed in DEBUG and test runs."
+    )
+
+
+def _evaluate_shared_cache(*, required, caches, num_proxies=None):
+    """Pure evaluation of the cache / proxy settings (unit-testable).
+
+    printy.E020: SHARED_CACHE_REQUIRED (DEBUG=False outside tests) with a default cache that is not shared between
+    workers (LocMem, dummy, file, database...).
+    printy.W903: DRF NUM_PROXIES is set; it is ignored (every throttle uses
+    common.client_ip.resolve_client_ip with MPESA_TRUSTED_PROXIES).
+    """
+    from django.core.checks import Error, Warning
+
+    messages = []
+    backend = str(((caches or {}).get("default") or {}).get("BACKEND") or "")
+    if required and backend not in _SHARED_CACHE_BACKENDS:
+        messages.append(
+            Error(
+                f"The default cache ({backend or 'unset'}) is not shared between workers while DEBUG=False.",
+                hint="Set REDIS_URL so throttles and the Daraja token cache use Redis.",
+                id="printy.E020",
+            )
+        )
+    if num_proxies not in (None, ""):
+        messages.append(
+            Warning(
+                "REST_FRAMEWORK NUM_PROXIES / the NUM_PROXIES env var is ignored.",
+                hint="Client IPs come from common.client_ip.resolve_client_ip; list your proxies in MPESA_TRUSTED_PROXIES.",
+                id="printy.W903",
+            )
+        )
+    return messages
+
+
+@_django_checks.register(_django_checks.Tags.security)
+def check_shared_cache(app_configs=None, **kwargs):
+    from django.conf import settings as _running_settings
+
+    return _evaluate_shared_cache(
+        required=getattr(_running_settings, "SHARED_CACHE_REQUIRED", False),
+        caches=_running_settings.CACHES,
+        num_proxies=os.environ.get("NUM_PROXIES") or _running_settings.REST_FRAMEWORK.get("NUM_PROXIES"),
+    )
  
 
 

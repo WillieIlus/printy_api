@@ -14,22 +14,14 @@ def _truncate(value: str | None, max_length: int) -> str:
 
 
 def get_client_ip(request) -> str | None:
-    """Return the best-effort client IP address from proxied request headers."""
-    forwarded_for = request.META.get("HTTP_X_FORWARDED_FOR", "")
-    if forwarded_for:
-        parts = [part.strip() for part in forwarded_for.split(",") if part.strip()]
-        if parts:
-            return parts[0]
+    """Return the client IP, trusting proxy headers only from our proxies.
 
-    real_ip = request.META.get("HTTP_X_REAL_IP")
-    if real_ip:
-        return real_ip.strip()
+    Audit #10b: this used to return the raw left-most X-Forwarded-For (or
+    X-Real-IP) from anyone, so analytics IPs were client-chosen.
+    """
+    from common.client_ip import resolve_client_ip
 
-    remote_addr = request.META.get("REMOTE_ADDR")
-    if remote_addr:
-        return remote_addr.strip()
-
-    return None
+    return resolve_client_ip(request)
 
 
 def get_user_agent(request, max_length: int = 512) -> str:

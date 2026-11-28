@@ -24,6 +24,14 @@ class ProductionMatchingPhaseD1TestCase(TestCase):
             partner_profile_enabled=True,
             name="Phase D1 Manager",
         )
+        # Audit #3b: production sourcing / the printer roster require a
+        # verified, active manager.
+        from accounts.models import UserProfile
+
+        UserProfile.objects.update_or_create(
+            user=self.manager,
+            defaults={"manager_verified": True, "broker_profile_active": True},
+        )
         self.other_manager = User.objects.create_user(
             email="phase-d1-other@test.com",
             password="pass12345",

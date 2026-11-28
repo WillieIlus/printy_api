@@ -37,26 +37,71 @@ class ShopPricingSettingsAdmin(admin.ModelAdmin):
 
 @admin.register(PlatformFeePolicy)
 class PlatformFeePolicyAdmin(admin.ModelAdmin):
+    """Audit #6b: only the fields the live split reads are editable.
+
+    The six DEPRECATED fields are non-editable on the model and the seven
+    LEGACY fee-rate fields are read-only here; both sit in a collapsed
+    section so nobody mistakes them for live settings.
+    """
+
+    LIVE_SPLIT_FIELDS = (
+        "under_production_threshold",
+        "high_production_threshold",
+        "min_markup_multiple",
+        "tier_a_shop_floor_multiple",
+        "tier_b_shop_floor_multiple",
+        "tier_c_shop_floor_multiple",
+        "tier_a_manager_commission_cap_rate",
+        "tier_b_manager_commission_cap_rate",
+        "tier_c_manager_commission_cap_rate",
+        "tier_a_max_client_price_multiple",
+        "tier_b_max_client_price_multiple",
+        "tier_c_max_client_price_multiple",
+        "maximum_manager_markup_multiple",
+    )
+    LEGACY_FIELDS = (
+        "under_production_fee_rate",
+        "standard_production_fee_rate",
+        "standard_markup_fee_rate",
+        "high_markup_threshold",
+        "high_markup_fee_rate",
+        "high_production_fee_rate",
+        "high_production_markup_fee_rate",
+    )
+    DEPRECATED_FIELDS = (
+        "small_job_limit",
+        "medium_job_limit",
+        "small_job_max_multiple",
+        "medium_job_max_multiple",
+        "bulk_job_max_multiple",
+        "add_platform_fee_on_top",
+        "printer_fee_rate",
+        "broker_margin_fee_rate",
+    )
+
     list_display = [
         "name",
         "policy_version",
         "currency",
         "is_active",
         "under_production_threshold",
-        "under_production_fee_rate",
-        "standard_production_fee_rate",
-        "standard_markup_fee_rate",
-        "high_markup_threshold",
-        "high_markup_fee_rate",
         "high_production_threshold",
-        "high_production_fee_rate",
-        "high_production_markup_fee_rate",
+        "min_markup_multiple",
         "maximum_manager_markup_multiple",
         "effective_from",
         "updated_at",
     ]
     list_filter = ["is_active", "currency", "policy_version"]
     search_fields = ["name"]
+    readonly_fields = LEGACY_FIELDS + DEPRECATED_FIELDS
+    fieldsets = (
+        (None, {"fields": ("name", "policy_version", "currency", "is_active", "effective_from")}),
+        ("Live split parameters (read by pricing)", {"fields": LIVE_SPLIT_FIELDS}),
+        (
+            "Legacy / deprecated - NOT used by pricing (read-only)",
+            {"classes": ("collapse",), "fields": LEGACY_FIELDS + DEPRECATED_FIELDS},
+        ),
+    )
 
 
 @admin.register(WastePolicy)

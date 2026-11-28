@@ -18,7 +18,7 @@ from jobs.choices import (
     ManagedJobExceptionStatus,
     ManagedJobStatus,
 )
-from jobs.models import JobAssignment, JobEvent
+from jobs.models import JobAssignment, JobEvent, ManagedJob
 from jobs.payment_services import initialize_settlement_for_managed_job
 from jobs.timing_services import (
     assert_due_date_for_production,
@@ -277,6 +277,15 @@ def mark_assignment_ready(*, assignment: JobAssignment, actor=None, note: str = 
 @transaction.atomic
 def mark_assignment_completed(*, assignment: JobAssignment, actor=None, note: str = "") -> JobAssignment:
     _ensure_current_status(assignment=assignment, allowed={JobAssignmentStatus.READY}, action="complete assignment")
+    # Prompt 7: only the buyer's handover confirmation (or a platform-admin
+    # dispute resolution) completes a managed job. The assignment follows the
+    # job; it can no longer complete the job by itself (e.g. the shop's
+    # /job-assignments/<id>/mark-completed/ on a job that was never delivered).
+    if not ManagedJob.objects.filter(pk=assignment.managed_job_id, status=ManagedJobStatus.COMPLETED).exists():
+        raise ValueError(
+            "The buyer completes this job by entering the handover code when they receive it. "
+            "Mark it dispatched with a handover code instead."
+        )
     assignment = _transition_assignment(
         assignment=assignment,
         actor=actor,

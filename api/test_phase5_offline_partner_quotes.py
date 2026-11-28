@@ -155,7 +155,8 @@ class OfflinePartnerQuoteFlowTests(TestCase):
         )
         self.assertEqual(second_send.status_code, 200, second_send.data)
         self.assertEqual(second_send.data["payment"]["id"], payment.id)
-        self.assertEqual(second_send.data["payment"]["checkout_request_id"], payment.checkout_request_id)
+        # The sending manager is not the payer: no Daraja identifiers (audit #1).
+        self.assertNotIn("checkout_request_id", second_send.data["payment"])
 
         self.api.force_authenticate(self.client_user)
         forbidden = self.api.post(

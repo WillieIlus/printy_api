@@ -1,9 +1,9 @@
 import logging
-import os
 
-import requests as http_requests
 from django.contrib.auth import get_user_model
 from django.core import signing
+from django.core.exceptions import ImproperlyConfigured
+from django.db import transaction
 from allauth.account.forms import (
     ChangePasswordForm,
     ResetPasswordForm,
@@ -20,6 +20,7 @@ from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
 
 from .models import User
+from .throttling import AUTH_THROTTLE_CLASSES
 from .services.roles import assign_role, get_public_assignable_roles, normalize_role_value
 from .serializers import CustomTokenObtainPairSerializer, UserCreateSerializer, UserSerializer
 
@@ -45,14 +46,18 @@ class RegisterView(generics.CreateAPIView):
 
     permission_classes = [AllowAny]
     serializer_class = UserCreateSerializer
+    throttle_classes = AUTH_THROTTLE_CLASSES
+    throttle_scope = "auth_register"
 
     default_role = User.Role.CLIENT
     role_source = "signup"
+    signup_intent = ""
 
     def get_serializer_context(self):
         context = super().get_serializer_context()
         context["default_role"] = self.default_role
         context["role_source"] = self.role_source
+        context["signup_intent"] = self.signup_intent
         return context
 
     def create(self, request, *args, **kwargs):
@@ -69,6 +74,7 @@ class RegisterView(generics.CreateAPIView):
                 "resend_available": True,
                 "activation_email_sent": getattr(serializer, "activation_email_sent", False),
                 "claimed_guest_draft_id": getattr(getattr(serializer, "claimed_guest_draft", None), "id", None),
+                **({"signup_intent": self.signup_intent} if self.signup_intent else {}),
             },
             status=status.HTTP_201_CREATED,
             headers=headers,
@@ -86,8 +92,17 @@ class PartnerRegisterView(RegisterView):
 
 
 class ProductionRegisterView(RegisterView):
-    default_role = User.Role.PRODUCTION
-    role_source = "signup_production"
+    """Printer *applicant* sign-up (audit #3).
+
+    Registration never grants ``production``. The account is created as a
+    plain client-role account and no shop is created; the printer then creates
+    their shop via POST /api/shops/ (private until an admin approves it), which
+    is what makes them production for that shop only.
+    """
+
+    default_role = User.Role.CLIENT
+    role_source = "signup_printer_applicant"
+    signup_intent = "printer_applicant"
 
 
 class CustomTokenObtainPairView(TokenObtainPairView):
@@ -95,6 +110,8 @@ class CustomTokenObtainPairView(TokenObtainPairView):
 
     serializer_class = CustomTokenObtainPairSerializer
     permission_classes = [AllowAny]
+    throttle_classes = AUTH_THROTTLE_CLASSES
+    throttle_scope = "auth_login"
 
 
 class ClientInviteClaimView(APIView):
@@ -107,6 +124,8 @@ class ClientInviteClaimView(APIView):
 
     permission_classes = [AllowAny]
     authentication_classes = []
+    throttle_classes = AUTH_THROTTLE_CLASSES
+    throttle_scope = "auth_invite_claim"
 
     def post(self, request):
         from accounts.serializers import UserSerializer
@@ -332,6 +351,8 @@ class ResendEmailConfirmationView(APIView):
     """Re-send the confirmation email for an unverified address."""
 
     permission_classes = [AllowAny]
+    throttle_classes = AUTH_THROTTLE_CLASSES
+    throttle_scope = "auth_email_resend"
 
     def post(self, request):
         email = request.data.get("email", "").strip().lower()
@@ -384,6 +405,8 @@ class ResendEmailConfirmationView(APIView):
 
 class PasswordResetRequestView(APIView):
     permission_classes = [AllowAny]
+    throttle_classes = AUTH_THROTTLE_CLASSES
+    throttle_scope = "auth_password_reset"
 
     def post(self, request):
         email = str(request.data.get("email", "")).strip()
@@ -426,6 +449,8 @@ class PasswordResetRequestView(APIView):
 
 class PasswordResetConfirmView(APIView):
     permission_classes = [AllowAny]
+    throttle_classes = AUTH_THROTTLE_CLASSES
+    throttle_scope = "auth_password_reset_confirm"
 
     def post(self, request):
         opaque_key = str(request.data.get("key", "")).strip()
@@ -466,6 +491,12 @@ class PasswordResetConfirmView(APIView):
             )
 
         reset_form.save()
+        # Audit #4b: a reset is account recovery, so refresh tokens issued
+        # before it (to whoever held the old password) stop working. The new
+        # password hash already invalidates Django sessions.
+        from .services.account_security import revoke_refresh_tokens
+
+        revoke_refresh_tokens(token_form.reset_user)
         finalize_password_reset(request, token_form.reset_user, email=getattr(token_form.reset_user, "email", None))
         return Response({"detail": "Password reset successful."})
 
@@ -506,95 +537,212 @@ class PasswordChangeView(APIView):
         return Response({"detail": "Password changed successfully."})
 
 
+def _google_token_audiences() -> list[str] | None:
+    """The configured OAuth client id(s), or raise if Google login is unconfigured.
+
+    Returns ``None`` (skip the audience check) only under the explicit dev/test
+    override; see GOOGLE_OAUTH_DEV_SKIP_AUDIENCE in config/settings.py.
+    """
+    audiences = list(getattr(django_settings, "GOOGLE_CLIENT_IDS", None) or [])
+    if audiences:
+        return audiences
+    dev_override = (
+        bool(getattr(django_settings, "GOOGLE_OAUTH_DEV_SKIP_AUDIENCE", False))
+        and bool(getattr(django_settings, "DEBUG", False))
+        and str(getattr(django_settings, "APP_ENV", "production")).lower()
+        in {"local", "dev", "development", "test"}
+    )
+    if dev_override:
+        logger.warning("google_social_login audience check skipped (GOOGLE_OAUTH_DEV_SKIP_AUDIENCE)")
+        return None
+    raise ImproperlyConfigured("GOOGLE_CLIENT_ID is not configured.")
+
+
+def verify_google_id_token(raw_token: str, audiences: list[str] | None) -> dict:
+    """Verify signature, expiry, issuer and audience with google-auth.
+
+    Raises ``ValueError`` for a token that must be rejected and
+    ``google.auth.exceptions.TransportError`` when Google's certs are unreachable.
+    """
+    from google.auth.transport import requests as google_requests
+    from google.oauth2 import id_token as google_id_token
+
+    return google_id_token.verify_oauth2_token(
+        raw_token,
+        google_requests.Request(),
+        audience=audiences,
+        clock_skew_in_seconds=10,
+    )
+
+
+def _google_email_verified(claims: dict) -> bool:
+    value = claims.get("email_verified")
+    if isinstance(value, bool):
+        return value
+    return str(value or "").strip().lower() == "true"
+
+
 class GoogleSocialLoginView(APIView):
     """
-    Verify a Google ID token and return JWT tokens for the user.
-    Creates the user account on first login.
+    POST /api/auth/social/google/ — verify a Google ID token, return JWTs.
+
+    Audit #4:
+    - The token is verified locally with google-auth (signature, expiry,
+      issuer in accounts.google.com, audience == GOOGLE_CLIENT_ID). The old
+      tokeninfo round-trip is gone. No GOOGLE_CLIENT_ID → 503, fail closed.
+    - ``email_verified`` must be true.
+    - Accounts are matched case-insensitively (Name@x == name@x). If legacy
+      data already holds several accounts for one address the login is refused
+      (409) and nothing is merged; see ``manage.py report_duplicate_emails``.
+    - Inactive accounts are refused.
+    - A role is chosen ONLY when the account is created, and only from the
+      self-service allowlist. An existing account's role is never touched.
     """
 
     permission_classes = [AllowAny]
+    authentication_classes = []
+    throttle_classes = AUTH_THROTTLE_CLASSES
+    throttle_scope = "auth_google_login"
 
     def post(self, request):
-        id_token = (request.data.get("id_token") or "").strip()
-        if not id_token:
+        from google.auth import exceptions as google_exceptions
+
+        raw_token = str(request.data.get("id_token") or "").strip()
+        if not raw_token:
             return Response({"detail": "id_token is required."}, status=status.HTTP_400_BAD_REQUEST)
 
         try:
-            resp = http_requests.get(
-                "https://oauth2.googleapis.com/tokeninfo",
-                params={"id_token": id_token},
-                timeout=10,
+            audiences = _google_token_audiences()
+        except ImproperlyConfigured:
+            logger.error("google_social_login refused: GOOGLE_CLIENT_ID is not configured")
+            return Response(
+                {
+                    "detail": "Google sign-in is not configured on this server.",
+                    "code": "google_oauth_not_configured",
+                },
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
             )
-        except http_requests.RequestException:
+
+        try:
+            claims = verify_google_id_token(raw_token, audiences)
+        except google_exceptions.TransportError:
+            logger.warning("google_social_login cert fetch failed")
             return Response({"detail": "Could not verify Google token."}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+        except (ValueError, google_exceptions.GoogleAuthError) as exc:
+            logger.info("google_social_login rejected token: %s", exc.__class__.__name__)
+            return Response(
+                {"detail": "Invalid Google token.", "code": "invalid_google_token"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
-        if resp.status_code != 200:
-            return Response({"detail": "Invalid Google token."}, status=status.HTTP_400_BAD_REQUEST)
+        if not _google_email_verified(claims):
+            return Response(
+                {"detail": "Google account email is not verified.", "code": "google_email_unverified"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
-        google_data = resp.json()
-
-        client_id = os.environ.get("GOOGLE_CLIENT_ID", "")
-        if client_id and google_data.get("aud") != client_id:
-            return Response({"detail": "Token audience mismatch."}, status=status.HTTP_400_BAD_REQUEST)
-
-        if str(google_data.get("email_verified", "")).lower() not in ("true", "1"):
-            return Response({"detail": "Google account email is not verified."}, status=status.HTTP_400_BAD_REQUEST)
-
-        email = (google_data.get("email") or "").strip().lower()
+        email = str(claims.get("email") or "").strip().lower()
         if not email:
             return Response({"detail": "Google account has no email address."}, status=status.HTTP_400_BAD_REQUEST)
-
-        name = google_data.get("name", "")
-        given_name = google_data.get("given_name", "")
-        family_name = google_data.get("family_name", "")
-        google_sub = google_data.get("sub", "")
-        requested_role = normalize_role_value((request.data.get("role") or "client").strip()) or User.Role.CLIENT
-        role = requested_role if requested_role in get_public_assignable_roles() else User.Role.CLIENT
-        partner_profile_enabled = bool(request.data.get("partner_profile_enabled", False))
-
-        user, created = User.objects.get_or_create(
-            email=email,
-            defaults={
-                "name": name,
-                "first_name": given_name,
-                "last_name": family_name,
-                "role": role,
-                "partner_profile_enabled": partner_profile_enabled,
-                "is_active": True,
-            },
-        )
-
-        if not created and not user.name and name:
-            user.name = name
-            user.save(update_fields=["name", "updated_at"] if hasattr(user, "updated_at") else ["name"])
-        if role == User.Role.PARTNER and not user.partner_profile_enabled:
-            user.partner_profile_enabled = True
-            user.save(update_fields=["partner_profile_enabled", "updated_at"] if hasattr(user, "updated_at") else ["partner_profile_enabled"])
-        assign_role(user, role, source="google_social_login")
+        google_sub = str(claims.get("sub") or "").strip()
 
         from allauth.account.models import EmailAddress
-        EmailAddress.objects.get_or_create(
-            user=user,
-            email=email,
-            defaults={"primary": True, "verified": True},
-        )
+        from allauth.socialaccount.models import SocialAccount
 
+        social = None
         if google_sub:
-            from allauth.socialaccount.models import SocialAccount
-            SocialAccount.objects.get_or_create(
-                user=user,
-                provider="google",
-                uid=google_sub,
-                defaults={"extra_data": google_data},
+            social = SocialAccount.objects.select_related("user").filter(provider="google", uid=google_sub).first()
+
+        if social is not None:
+            user = social.user
+            created = False
+        else:
+            matches = list(User.objects.filter(email__iexact=email).order_by("id")[:2])
+            if len(matches) > 1:
+                logger.warning("google_social_login duplicate accounts for email=%s", _mask_email(email))
+                return Response(
+                    {
+                        "detail": "More than one Printy account uses this email. Contact support to sort it out.",
+                        "code": "duplicate_email_accounts",
+                    },
+                    status=status.HTTP_409_CONFLICT,
+                )
+            user = matches[0] if matches else None
+            created = user is None
+
+        if user is not None and not user.is_active:
+            return Response(
+                {"detail": "This account is inactive.", "code": "account_inactive"},
+                status=status.HTTP_403_FORBIDDEN,
             )
 
+        with transaction.atomic():
+            secured_unconfirmed = False
+            if not created and social is None:
+                # Audit #4b: the address is proved by Google now, but the local
+                # account was registered by someone who never proved it. Before
+                # confirming the address (which would make that registrant's
+                # password work) remove every credential they could hold.
+                from .services.account_security import email_is_unconfirmed, secure_unconfirmed_account
+
+                user = User.objects.select_for_update().get(pk=user.pk)
+                if email_is_unconfirmed(user, email):
+                    secure_unconfirmed_account(user, reason="google_login_on_unconfirmed_email")
+                    secured_unconfirmed = True
+            if created:
+                requested_role = normalize_role_value(str(request.data.get("role") or "client").strip())
+                role = requested_role if requested_role in get_public_assignable_roles() else User.Role.CLIENT
+                user = User.objects.create_user(
+                    email=email,
+                    password=None,
+                    name=str(claims.get("name") or ""),
+                    first_name=str(claims.get("given_name") or ""),
+                    last_name=str(claims.get("family_name") or ""),
+                    role=role,
+                    is_active=True,
+                )
+                assign_role(user, role, source="google_social_login")
+                if role == User.Role.PARTNER:
+                    from .models import UserProfile
+
+                    UserProfile.objects.update_or_create(
+                        user=user, defaults={"manager_verified": False, "manager_verified_at": None}
+                    )
+            elif not user.name and claims.get("name"):
+                user.name = str(claims.get("name"))
+                user.save(update_fields=["name", "updated_at"])
+
+            address = EmailAddress.objects.filter(user=user, email__iexact=email).first()
+            if address is None:
+                EmailAddress.objects.create(
+                    user=user,
+                    email=email,
+                    primary=not EmailAddress.objects.filter(user=user, primary=True).exists(),
+                    verified=True,
+                )
+            elif not address.verified:
+                address.verified = True
+                address.save(update_fields=["verified"])
+
+            if google_sub and social is None:
+                SocialAccount.objects.get_or_create(
+                    provider="google",
+                    uid=google_sub,
+                    defaults={"user": user, "extra_data": dict(claims)},
+                )
+
         refresh = RefreshToken.for_user(user)
-        logger.info("google_social_login email=%s created=%s", _mask_email(email), created)
+        logger.info(
+            "google_social_login email=%s created=%s secured_unconfirmed=%s",
+            _mask_email(email),
+            created,
+            secured_unconfirmed,
+        )
 
         return Response(
             {
                 "access": str(refresh.access_token),
                 "refresh": str(refresh),
-                "user": UserSerializer(user).data,
+                "user": UserSerializer(user, context={"request": request}).data,
             }
         )

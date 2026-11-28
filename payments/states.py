@@ -2,7 +2,7 @@
 
 Money is recorded by three models with three different vocabularies:
 
-* ``payments.Payment``               -> pending / processing / paid / failed / cancelled / expired
+* ``payments.Payment``               -> pending / processing / paid / failed / cancelled / expired / needs_review
 * ``mpesa_payments.MpesaPayment``    -> initiated / pending / paid / failed / cancelled / needs_review
 * ``jobs.ManagedJob.payment_status`` -> pending / confirmation_pending / confirmed / release_ready / ...
 
@@ -56,6 +56,8 @@ _PAYMENT_STATUS_STATES = {
     "failed": PaymentState.FAILED,
     "cancelled": PaymentState.CANCELLED,
     "expired": PaymentState.TIMED_OUT,
+    # Money may have moved but could not be verified: never "paid".
+    "needs_review": PaymentState.AWAITING_CONFIRMATION,
 }
 
 # ``mpesa_payments.MpesaPayment.status`` mapping. ``initiated`` means the row

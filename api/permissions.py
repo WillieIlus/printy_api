@@ -190,15 +190,47 @@ class IsShopOwner(BasePermission):
         return bool(shop and shop.owner_id == user.pk)
 
 
+def is_verified_active_manager(user) -> bool:
+    """A printing manager Printy staff have verified and not suspended (audit #3).
+
+    Holding the partner role is not enough: self-service sign-up creates
+    manager *applicants*, which stay unverified (pending) until staff approve
+    them. Rejected managers have broker_profile_active=False.
+    """
+    if not has_role(user, "partner"):
+        return False
+    from accounts.models import UserProfile
+
+    profile = UserProfile.objects.filter(user=user).only(
+        "manager_verified", "broker_profile_active"
+    ).first()
+    return bool(profile and profile.manager_verified and profile.broker_profile_active)
+
+
+def _owns_shop_in_view(user, view) -> bool:
+    slug = view.kwargs.get("shop_slug") or view.kwargs.get("slug")
+    if not slug:
+        return False
+    return Shop.objects.filter(slug=str(slug), owner_id=user.pk).exists()
+
+
 class PrintManagerMarketplaceAccess(BasePermission):
     """
-    Restrict a printer-facing resource to verified printing managers, shop
-    staff and platform admins. Buyers, clients and anonymous visitors are
-    always denied.
+    Restrict a printer-facing resource (shop roster, raw rate cards, shop
+    calculator previews) to verified printing managers and platform admins.
+    Buyers, clients and anonymous visitors are always denied.
 
-    A user qualifies when the canonical role resolver yields `partner`
-    (printing manager), `production` (shop staff / shop owner) or
-    `super_admin`.
+    Audit #3:
+    - ``super_admin`` always passes.
+    - A ``partner`` (printing manager) passes only once Printy staff have
+      verified it (``profile.manager_verified``) and it is not suspended or
+      rejected (``profile.broker_profile_active``). Pending applicants and
+      rejected managers get 403.
+    - A ``production`` account (shop owner) passes only on shop-scoped views
+      for a shop it owns, i.e. its own rate card. CANONICAL_MODELS: shop actors
+      never see competing shop rates or the roster. Shop creation is
+      self-service, so without this a rejected manager could regain access
+      just by creating a shop.
     """
 
     message = "Printer details are only available to verified printing managers."
@@ -207,4 +239,10 @@ class PrintManagerMarketplaceAccess(BasePermission):
         user = getattr(request, "user", None)
         if not user or not getattr(user, "is_authenticated", False):
             return False
-        return has_role(user, "partner", "production", "super_admin")
+        if has_role(user, "super_admin"):
+            return True
+        if is_verified_active_manager(user):
+            return True
+        if has_role(user, "production") and _owns_shop_in_view(user, view):
+            return True
+        return False

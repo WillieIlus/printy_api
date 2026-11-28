@@ -1,0 +1,102 @@
+# Audit #10a: run the full test suite on every push and pull request.
+# No secrets are needed: config/test_settings.py supplies clearly fake
+# test-only values (SECRET_KEY, M-Pesa sandbox credentials, callback secret)
+# and an SQLite database, so nothing here reads a repository secret.
+#
+# Audit #10d: production runs on PostgreSQL (config/settings.py), so a second
+# job runs the same suite against a PostgreSQL 16 service container
+# (TEST_DB_ENGINE=postgresql). SQLite ignores select_for_update(); only the
+# PostgreSQL job exercises real row locks. The database password below is a
+# throwaway value for the ephemeral CI container, not a secret.
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Tests (Python 3.11)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          # No version is pinned elsewhere in the repo; 3.11 is the version
+          # the suite was verified on (Django 5.2 supports 3.10-3.13).
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip check
+
+      - name: Migrations are in sync with models
+        run: python manage.py makemigrations --check --dry-run --settings=config.test_settings
+
+      - name: Test suite (pytest)
+        run: python -m pytest -q
+
+      - name: Test suite (Django runner)
+        run: python manage.py test --noinput
+
+  test-postgres:
+    name: Tests on PostgreSQL 16 (Python 3.11)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: printy_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      TEST_DB_ENGINE: postgresql
+      DB_NAME: printy_ci
+      DB_USER: postgres
+      DB_PASSWORD: postgres
+      DB_HOST: 127.0.0.1
+      DB_PORT: "5432"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip check
+
+      - name: Migrations are in sync with models
+        run: python manage.py makemigrations --check --dry-run --settings=config.test_settings
+
+      - name: Test suite (pytest)
+        run: python -m pytest -q
+
+      - name: Test suite (Django runner)
+        run: python manage.py test --noinput

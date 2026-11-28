@@ -1,9 +1,21 @@
 """Provider-agnostic client messaging (law 10.5 / 10.6).
 
 No vendor is hard-wired. A provider implements :class:`MessagingProvider`; the
-default :class:`StubMessagingProvider` only **logs**, so nothing is sent in
-development or tests. Every attempt — sent, failed or skipped for opt-out — is
-written to :class:`~clients.models.MessageDelivery` with its status.
+default :class:`StubMessagingProvider` sends nothing. Every attempt — sent,
+queued, failed or skipped for opt-out — is written to
+:class:`~clients.models.MessageDelivery` with its status.
+
+Audit #7:
+
+* The stub used to log the full message body (including plaintext OTP codes)
+  and record the delivery as ``SENT``. It now logs only the channel, a masked
+  recipient and the body length, and records the delivery as ``QUEUED`` (not
+  sent) in dev/test. Outside dev/test there is no stub fallback: the delivery
+  is recorded as ``FAILED`` and an error is logged, so callers (the OTP
+  request view) can tell the client the code was not sent.
+* Callers pass ``redact=`` for secrets in the body (the OTP code). The real
+  body goes to the provider; the stored ``MessageDelivery.body`` has them
+  masked.
 """
 from __future__ import annotations
 
@@ -27,6 +39,37 @@ class DeliveryResult:
     message_id: str = ""
     error: str = ""
     raw: dict = field(default_factory=dict)
+    # True when the provider accepted the message without delivering it (the
+    # dev/test stub). The delivery is recorded as QUEUED, never SENT.
+    queued: bool = False
+
+
+STUB_NOT_ALLOWED_ERROR = "No SMS/WhatsApp provider is configured; the message was not sent."
+
+
+def stub_messaging_allowed() -> bool:
+    """The logging stub may stand in for a provider only in dev and tests."""
+    explicit = getattr(settings, "MESSAGE_STUB_ALLOWED", None)
+    if explicit is not None:
+        return bool(explicit)
+    app_env = str(getattr(settings, "APP_ENV", "") or "").strip().lower()
+    return bool(getattr(settings, "DEBUG", False)) or app_env in {"local", "dev", "development", "test"}
+
+
+def mask_recipient(recipient: str) -> str:
+    value = str(recipient or "")
+    if len(value) <= 4:
+        return "*" * len(value)
+    return "*" * (len(value) - 4) + value[-4:]
+
+
+def redact_text(text: str, secrets_to_hide=()) -> str:
+    result = str(text or "")
+    for secret in secrets_to_hide or ():
+        secret = str(secret or "")
+        if secret:
+            result = result.replace(secret, "*" * len(secret))
+    return result
 
 
 class MessagingProvider(ABC):
@@ -40,13 +83,31 @@ class MessagingProvider(ABC):
 
 
 class StubMessagingProvider(MessagingProvider):
-    """A provider that only logs. Chosen when no real provider is configured."""
+    """Stands in when no real provider is configured. It never sends.
+
+    In dev/test the message is reported as queued (not sent). Anywhere else it
+    fails, so an unsent OTP or link is never recorded as delivered. The body is
+    never logged: it can hold a one-time code.
+    """
 
     name = "stub"
 
     def send(self, *, recipient: str, body: str, channel: str) -> DeliveryResult:
-        logger.info("stub_message channel=%s recipient=%s body=%s", channel, recipient, body)
-        return DeliveryResult(ok=True, provider=self.name, message_id="stub")
+        if not stub_messaging_allowed():
+            logger.error(
+                "stub_message_refused channel=%s recipient=%s: %s",
+                channel,
+                mask_recipient(recipient),
+                STUB_NOT_ALLOWED_ERROR,
+            )
+            return DeliveryResult(ok=False, provider=self.name, error=STUB_NOT_ALLOWED_ERROR)
+        logger.info(
+            "stub_message_not_sent channel=%s recipient=%s body_length=%s",
+            channel,
+            mask_recipient(recipient),
+            len(body or ""),
+        )
+        return DeliveryResult(ok=True, provider=self.name, queued=True)
 
 
 def get_provider() -> MessagingProvider:
@@ -96,10 +157,12 @@ def send_client_message(
     manager_name: str = "",
     quote_request=None,
     client=None,
+    redact=(),
 ) -> MessageDelivery:
     """Deliver (or skip) one client message and log the attempt.
 
-    Opt-out is honoured before any provider call.
+    Opt-out is honoured before any provider call. Strings in ``redact`` (an
+    OTP code) are masked in the stored body and in any error text.
     """
     try:
         normalized = normalize_client_phone(recipient)
@@ -111,9 +174,10 @@ def send_client_message(
         client=client,
         recipient=normalized or str(recipient or "").strip(),
         channel=channel,
-        body=build_client_message_body(message, manager_name=manager_name),
+        body=redact_text(build_client_message_body(message, manager_name=manager_name), redact),
         attempted_at=timezone.now(),
     )
+    provider_body = build_client_message_body(message, manager_name=manager_name)
 
     if normalized and ClientContactPreference.objects.filter(
         phone_normalized=normalized, opted_out=True
@@ -126,20 +190,24 @@ def send_client_message(
     provider = get_provider()
     delivery.provider = provider.name
     try:
-        result = provider.send(recipient=delivery.recipient, body=delivery.body, channel=channel)
+        result = provider.send(recipient=delivery.recipient, body=provider_body, channel=channel)
     except Exception as exc:  # a provider failure is recorded, never raised to the caller
         delivery.status = MessageDelivery.Status.FAILED
-        delivery.error = str(exc)[:255]
+        delivery.error = redact_text(str(exc), redact)[:255]
         delivery.save()
         return delivery
 
-    if result.ok:
+    if result.ok and result.queued:
+        # Accepted but not delivered (dev/test stub): never claim SENT.
+        delivery.status = MessageDelivery.Status.QUEUED
+        delivery.provider_message_id = result.message_id
+    elif result.ok:
         delivery.status = MessageDelivery.Status.SENT
         delivery.provider_message_id = result.message_id
         delivery.sent_at = timezone.now()
     else:
         delivery.status = MessageDelivery.Status.FAILED
-        delivery.error = str(result.error or "")[:255]
+        delivery.error = redact_text(str(result.error or ""), redact)[:255]
     delivery.save()
     return delivery
 
@@ -149,6 +217,9 @@ __all__ = [
     "MessagingProvider",
     "StubMessagingProvider",
     "get_provider",
+    "mask_recipient",
+    "redact_text",
+    "stub_messaging_allowed",
     "client_has_opted_out",
     "set_client_opt_out",
     "build_client_message_body",

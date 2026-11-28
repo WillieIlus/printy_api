@@ -39,7 +39,7 @@ class Phase8PendingArtworkVisibilityTestCase(TestCase):
 
     def test_pending_artwork_can_attach_to_multiple_quote_requests_before_cleanup(self):
         upload = create_pending_artwork_upload(
-            uploaded_file=SimpleUploadedFile("design.pdf", b"phase8 artwork", content_type="application/pdf"),
+            uploaded_file=SimpleUploadedFile("design.pdf", b"%PDF-1.4 phase8 artwork", content_type="application/pdf"),
             session_key="phase8-session",
         )
         first_request = self._quote_request(shop=self.shop)
@@ -66,7 +66,7 @@ class Phase8PendingArtworkVisibilityTestCase(TestCase):
 
     def test_multi_shop_calculator_send_copies_uploaded_artwork_to_each_request(self):
         upload = create_pending_artwork_upload(
-            uploaded_file=SimpleUploadedFile("multi-design.pdf", b"phase8 multi artwork", content_type="application/pdf"),
+            uploaded_file=SimpleUploadedFile("multi-design.pdf", b"%PDF-1.4 phase8 multi artwork", content_type="application/pdf"),
             session_key="phase8-session",
         )
         draft = CalculatorDraft.objects.create(
@@ -97,7 +97,7 @@ class Phase8PendingArtworkVisibilityTestCase(TestCase):
     def test_quote_request_attachment_uses_authenticated_download_url(self):
         quote_request = self._quote_request(shop=self.shop)
         attachment = quote_request.attachments.create(
-            file=SimpleUploadedFile("quote-artwork.pdf", b"quote artwork", content_type="application/pdf"),
+            file=SimpleUploadedFile("quote-artwork.pdf", b"%PDF-1.4 quote artwork", content_type="application/pdf"),
             name="quote-artwork.pdf",
         )
 
@@ -129,7 +129,7 @@ class Phase8PendingArtworkVisibilityTestCase(TestCase):
     def test_imported_uploaded_artwork_is_visible_to_manager_and_assigned_shop_only(self):
         quote_request = self._quote_request(shop=self.shop)
         quote_request.attachments.create(
-            file=SimpleUploadedFile("customer-artwork.pdf", b"customer artwork", content_type="application/pdf"),
+            file=SimpleUploadedFile("customer-artwork.pdf", b"%PDF-1.4 customer artwork", content_type="application/pdf"),
             name="customer-artwork.pdf",
         )
         quote = Quote.objects.create(

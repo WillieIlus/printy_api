@@ -22,7 +22,8 @@ from jobs.artwork_confirmation import respond_to_client_artwork_confirmation
 from jobs.artwork_workflow import manager_approve_artwork
 from jobs.audit_services import record_job_status_event
 from jobs.card_projection import build_job_card
-from jobs.choices import JobAssignmentStatus
+from jobs.choices import JobAssignmentStatus, ManagedJobStatus
+from jobs.handover import HANDOVER_COMPLETE_MESSAGE, HandoverCodeError
 from jobs.delivery_services import (
     confirm_managed_job_completed,
     mark_managed_job_delivered,
@@ -189,11 +190,22 @@ def _perform_next_action(*, job: ManagedJob, request, code: str, note: str) -> b
         return True
 
     if code == "confirm_delivery":
-        confirm_managed_job_completed(managed_job=job, actor=user, note=note)
+        # "I received it": the buyer types the handover code from the parcel.
+        confirm_managed_job_completed(
+            managed_job=job,
+            actor=user,
+            note=note,
+            handover_code=str(request.data.get("handover_code") or ""),
+        )
         return True
 
     if code in {"coordinate_delivery", "mark_dispatched"}:
-        mark_managed_job_delivered(managed_job=job, actor=user, note=note)
+        mark_managed_job_delivered(
+            managed_job=job,
+            actor=user,
+            note=note,
+            handover_code=str(request.data.get("handover_code") or ""),
+        )
         return True
 
     if code == "approve_artwork":
@@ -331,6 +343,11 @@ class ManagedJobNextActionView(APIView):
                 {"detail": "; ".join(exc.messages), "code": "invalid_action"},
                 status=status.HTTP_400_BAD_REQUEST,
             )
+        except HandoverCodeError as exc:
+            return Response(
+                {"detail": str(exc), "code": exc.code},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         except ValueError as exc:
             return Response(
                 {"detail": str(exc), "code": "invalid_action"},
@@ -351,17 +368,18 @@ class ManagedJobNextActionView(APIView):
             )
 
         job.refresh_from_db()
-        return Response(
-            {
-                "applied": bool(applied),
-                "code": code,
-                "card": build_job_card(
-                    job,
-                    viewer_role=viewer_role,
-                    user=request.user,
-                ),
-            }
-        )
+        payload = {
+            "applied": bool(applied),
+            "code": code,
+            "card": build_job_card(
+                job,
+                viewer_role=viewer_role,
+                user=request.user,
+            ),
+        }
+        if code == "confirm_delivery" and applied and job.status == ManagedJobStatus.COMPLETED:
+            payload["message"] = HANDOVER_COMPLETE_MESSAGE
+        return Response(payload)
 
 
 __all__ = ["ManagedJobCardView", "ManagedJobNextActionView"]

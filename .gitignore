@@ -22,9 +22,19 @@ dist/
 
 # Django
 *.log
+# SQLite databases of any name (dev db, config/test_settings.py's
+# printy_test.sqlite3, SQLITE_DATABASE_NAME overrides) and their journals
+*.sqlite
+*.sqlite3
+*.sqlite3-journal
+*.sqlite3-wal
+*.sqlite3-shm
+*.db
 db.sqlite3
-db.sqlite3-journal
+printy_test.sqlite3
+# User uploads (artwork, proofs, avatars) never belong in Git
 media/
+media/uploads/
 staticfiles/
 local_settings.py
 
@@ -40,10 +50,18 @@ local_settings.py
 htmlcov/
 .tox/
 
-# IDE
+# IDE / editors
 .vscode/
 .idea/
+*.iml
+*.code-workspace
+.project
+.pydevproject
+.settings/
+.history/
 *.swp
+*.swo
+*~
 .DS_Store
 
 # OS

@@ -36,6 +36,22 @@ class ManagedJobAdmin(admin.ModelAdmin):
     list_filter = ["status", "payment_status", "assignment_status", "payout_hold", "assigned_shop"]
     search_fields = ["managed_reference", "title"]
     actions = ["release_payouts", "flag_late_sla_hold", "clear_payout_hold"]
+    # Prompt 7: status and the delivery/handover trail move only through the
+    # workflow services (buyer handover confirmation, dispute resolution), so
+    # the admin form must not be a side door to ``completed``. The handover
+    # code itself is never shown.
+    exclude = ["handover_code"]
+    readonly_fields = [
+        "status",
+        "delivered_at",
+        "completed_at",
+        "handover_code_set_at",
+        "handover_code_set_by",
+        "handover_failed_attempts",
+        "handover_confirmed_at",
+        "handover_confirmed_by",
+        "completion_method",
+    ]
 
     @admin.action(description="Release manager and printer payouts")
     def release_payouts(self, request, queryset):

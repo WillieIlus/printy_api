@@ -99,8 +99,19 @@ def get_supported_role_values() -> set[str]:
     }
 
 
+# Audit #3: the ONLY roles a person may pick for themselves at sign-up (email
+# registration or first Google login). ``partner`` is a manager *applicant*: the
+# profile starts with manager_verified=False and the marketplace gate
+# (PrintManagerMarketplaceAccess) refuses it until Printy staff verify it.
+# ``production`` and ``super_admin`` are never self-service: a printer applicant
+# signs up as a plain account and becomes production only by creating a shop
+# (POST /api/shops/), which starts private until an admin approves it.
+SELF_SERVICE_SIGNUP_ROLES = frozenset({CANONICAL_CLIENT_ROLE, CANONICAL_PARTNER_ROLE})
+
+
 def get_public_assignable_roles() -> set[str]:
-    return {CANONICAL_CLIENT_ROLE, CANONICAL_PARTNER_ROLE, CANONICAL_PRODUCTION_ROLE}
+    """Roles a user may request for themselves at sign-up (see SELF_SERVICE_SIGNUP_ROLES)."""
+    return set(SELF_SERVICE_SIGNUP_ROLES)
 
 
 def has_role(user: User, *roles: str) -> bool:

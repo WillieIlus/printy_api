@@ -604,10 +604,10 @@ class E2EJobSimulation(TestCase):
 
     def _s10_dispatch_delivery(self, managed_job):
         self.api.force_authenticate(self.manager)
-        delivered = self.api.post(f"/api/managed-jobs/{managed_job.id}/delivery/mark-delivered/", {"note": "Handed over"}, format="json")
+        delivered = self.api.post(f"/api/managed-jobs/{managed_job.id}/delivery/mark-delivered/", {"note": "Handed over", "handover_code": "K7-4Q"}, format="json")
         self._record("S10.delivered", delivered.status_code in (200, 201), f"status={delivered.status_code}")
         self.api.force_authenticate(self.buyer)
-        confirm = self.api.post(f"/api/managed-jobs/{managed_job.id}/delivery/confirm/", {}, format="json")
+        confirm = self.api.post(f"/api/managed-jobs/{managed_job.id}/delivery/confirm/", {"handover_code": "k7-4q"}, format="json")
         self._record("S10.confirm", confirm.status_code in (200, 201), f"status={confirm.status_code}")
 
     def _s11_payout(self, managed_job, payment):

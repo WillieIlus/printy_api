@@ -8,10 +8,16 @@ duplicate notifications.
 """
 from __future__ import annotations
 
+import logging
+from functools import partial
+
 from django.conf import settings
 from django.core.mail import send_mail
+from django.db import transaction
 
 from .models import Notification
+
+logger = logging.getLogger(__name__)
 
 # Events that represent a one-time state transition and should be deduped on
 # (event_type, entity, recipient). Conversation-style events are excluded so a
@@ -117,14 +123,53 @@ def notify(
         created = True
 
     if created and send_email_notification and getattr(recipient, "email", ""):
-        send_mail(
+        # Audit #8: notify() is called from inside @transaction.atomic
+        # services (e.g. payments.services.mark_payment_paid). Sending SMTP
+        # there held row locks for the length of an SMTP round trip and
+        # emailed people about changes that could still roll back. The email
+        # now goes out after the transaction commits (immediately when there
+        # is no transaction), and a failure never breaks the caller.
+        send_mail_after_commit(
             subject=email_subject or "Printy update",
             message=email_message or message or "",
-            from_email=getattr(settings, "DEFAULT_FROM_EMAIL", None),
             recipient_list=[recipient.email],
-            fail_silently=True,
         )
     return notification
+
+
+def send_mail_after_commit(*, subject, message, recipient_list, from_email=None):
+    """Send a plain email once the current transaction commits.
+
+    The one path for ad-hoc emails outside the quote-message outbox (audit #8,
+    extended to accounts.signals and quotes.services_workflow in #10b):
+
+    * no SMTP call inside a transaction (no row locks held over SMTP);
+    * nothing is sent when the transaction rolls back;
+    * runs immediately when there is no transaction;
+    * a send failure is logged at WARNING, never raised into the caller.
+    """
+    recipients = [address for address in (recipient_list or []) if address]
+    if not recipients:
+        return
+    email_kwargs = {
+        "subject": subject,
+        "message": message,
+        "from_email": from_email or getattr(settings, "DEFAULT_FROM_EMAIL", None),
+        "recipient_list": recipients,
+    }
+    transaction.on_commit(partial(_send_notification_email, **email_kwargs), robust=True)
+
+
+def _send_notification_email(**email_kwargs):
+    try:
+        send_mail(fail_silently=False, **email_kwargs)
+    except Exception as exc:
+        logger.warning(
+            "Notification email failed recipient=%s subject=%s: %s",
+            ",".join(email_kwargs.get("recipient_list") or []),
+            email_kwargs.get("subject", ""),
+            exc,
+        )
 
 
 def notify_quote_event(

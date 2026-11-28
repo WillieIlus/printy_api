@@ -1,3 +1,4 @@
+from payments.testing import DARAJA_TEST_PEER_IP, daraja_callback_path
 from decimal import Decimal
 from datetime import timedelta
 from unittest.mock import MagicMock, patch
@@ -487,9 +488,10 @@ class CanonicalPaymentFlowTestCase(TestCase):
         self.assertFalse(payment.status == Payment.STATUS_PAID)
 
         response = self.client.post(
-            "/api/payments/mpesa/callback/",
+            daraja_callback_path("/api/payments/mpesa/callback/"),
             self._success_callback(stk),
             content_type="application/json",
+            REMOTE_ADDR=DARAJA_TEST_PEER_IP,
         )
 
         self.assertEqual(response.status_code, 200)
@@ -521,9 +523,10 @@ class CanonicalPaymentFlowTestCase(TestCase):
         )
 
         response = self.client.post(
-            "/api/payments/mpesa/callback/",
+            daraja_callback_path("/api/payments/mpesa/callback/"),
             self._success_callback(card_payment),
             content_type="application/json",
+            REMOTE_ADDR=DARAJA_TEST_PEER_IP,
         )
 
         self.assertEqual(response.status_code, 200)

@@ -1,3 +1,4 @@
+from payments.testing import DARAJA_TEST_PEER_IP, daraja_callback_path
 from datetime import time, timedelta
 from decimal import Decimal
 
@@ -59,6 +60,14 @@ class Step9BackendWorkflowTestCase(TestCase):
             password="pass",
             role=User.Role.PARTNER,
             capability_overrides={"can_source_jobs": True, "can_manage_clients": True},
+        )
+        # Audit #3b: production sourcing / the printer roster require a
+        # verified, active manager.
+        from accounts.models import UserProfile
+
+        UserProfile.objects.update_or_create(
+            user=self.broker,
+            defaults={"manager_verified": True, "broker_profile_active": True},
         )
         self.shop_owner = User.objects.create_user(
             email="step9-shop@example.com",
@@ -516,9 +525,10 @@ class Step9BackendWorkflowTestCase(TestCase):
         self.assertEqual(payment.status, Payment.STATUS_PROCESSING)
 
         callback_response = api_client.post(
-            reverse("payment-mpesa-callback"),
+            daraja_callback_path(reverse("payment-mpesa-callback")),
             self._success_callback(payment.mpesa_stk_requests.first()),
             format="json",
+            REMOTE_ADDR=DARAJA_TEST_PEER_IP,
         )
         self.assertEqual(callback_response.status_code, 200)
         payment.refresh_from_db()

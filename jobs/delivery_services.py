@@ -18,6 +18,12 @@ from jobs.choices import (
     ManagedJobExceptionStatus,
     ManagedJobStatus,
 )
+from jobs.handover import (
+    MAX_FAILED_ATTEMPTS,
+    HandoverCodeError,
+    handover_codes_match,
+    validate_new_handover_code,
+)
 from jobs.models import JobAssignment, ManagedJob
 from jobs.notify_services import notify_managed_job_recipients
 from jobs.payment_services import initialize_settlement_for_managed_job
@@ -59,11 +65,13 @@ def _completion_message(managed_job: ManagedJob, *, confirmed_by_label: str) -> 
 
 
 @transaction.atomic
-def mark_managed_job_delivered(*, managed_job: ManagedJob, actor=None, note: str = "") -> ManagedJob:
-    """Record delivery of a finished managed job.
+def mark_managed_job_delivered(*, managed_job: ManagedJob, actor=None, note: str = "", handover_code=None) -> ManagedJob:
+    """Record dispatch/delivery of a finished managed job ("mark dispatched").
 
     Allowed owners: OPS_ACTOR, SHOP_ACTOR, PARTNER_ACTOR. Precondition statuses:
-    in_production, finishing, ready (delivered/completed are idempotent no-ops).
+    in_production, finishing, ready (delivered/completed are idempotent no-ops,
+    and never change the recorded handover code). A handover code is required
+    (Prompt 7): the buyer must enter it to complete the job.
     """
     if managed_job.status in {ManagedJobStatus.DELIVERED, ManagedJobStatus.COMPLETED, ManagedJobStatus.CANCELLED, ManagedJobStatus.DISPUTED}:
         return managed_job
@@ -75,18 +83,31 @@ def mark_managed_job_delivered(*, managed_job: ManagedJob, actor=None, note: str
         raise ValueError(
             f"Cannot mark delivery from '{managed_job.status}'. Allowed states: in_production, finishing, ready."
         )
+    code = validate_new_handover_code(handover_code)
 
     managed_job.status = ManagedJobStatus.DELIVERED
     managed_job.delivered_at = timezone.now()
+    managed_job.handover_code = code
+    managed_job.handover_code_set_at = managed_job.delivered_at
+    managed_job.handover_code_set_by = actor if getattr(actor, "pk", None) else None
+    managed_job.handover_failed_attempts = 0
+    update_fields = [
+        "status",
+        "delivered_at",
+        "handover_code",
+        "handover_code_set_at",
+        "handover_code_set_by",
+        "handover_failed_attempts",
+        "updated_at",
+    ]
     if note:
         managed_job.operational_snapshot = {
             **managed_job.operational_snapshot,
             "delivery_note": note,
             "delivered_at": managed_job.delivered_at.isoformat(),
         }
-        managed_job.save(update_fields=["status", "delivered_at", "operational_snapshot", "updated_at"])
-    else:
-        managed_job.save(update_fields=["status", "delivered_at", "updated_at"])
+        update_fields.append("operational_snapshot")
+    managed_job.save(update_fields=update_fields)
 
     _sync_production_order_delivery(managed_job=managed_job, delivered=True)
     record_job_status_event(
@@ -100,22 +121,68 @@ def mark_managed_job_delivered(*, managed_job: ManagedJob, actor=None, note: str
     return managed_job
 
 
-@transaction.atomic
-def confirm_managed_job_completed(*, managed_job: ManagedJob, actor=None, note: str = "") -> ManagedJob:
-    """Client (or ops) accepts the job as finished and closes it out.
+def confirm_managed_job_completed(*, managed_job: ManagedJob, actor=None, note: str = "", handover_code=None) -> ManagedJob:
+    """The buyer (or ops on the buyer's behalf) confirms receipt: "I received it".
 
-    Allowed owners: OPS_ACTOR, CLIENT_ACTOR. Precondition statuses: ready,
-    delivered (completed is an idempotent no-op).
+    Allowed owners: OPS_ACTOR, CLIENT_ACTOR. Precondition status: delivered
+    (the printer has marked it dispatched); completed is an idempotent no-op.
+    The handover code recorded at dispatch must be entered (Prompt 7). A wrong
+    code is counted and the job stays delivered; after MAX_FAILED_ATTEMPTS the
+    code is locked. A job dispatched before handover codes existed (no code on
+    record) can still be confirmed by the buyer, but is marked
+    ``buyer_no_code`` so automatic payouts skip it.
+
+    Not wrapped in one transaction on purpose: a wrong-code attempt is saved
+    even though the call fails.
     """
     if managed_job.status == ManagedJobStatus.COMPLETED:
         return managed_job
-    if managed_job.status not in {ManagedJobStatus.READY, ManagedJobStatus.DELIVERED}:
+    if managed_job.status != ManagedJobStatus.DELIVERED:
         raise ValueError(
-            f"Cannot confirm completion from '{managed_job.status}'. Allowed states: ready, delivered."
+            f"Cannot confirm completion from '{managed_job.status}'. Allowed states: delivered "
+            "(the printer must mark it dispatched first)."
         )
 
+    error = None
+    with transaction.atomic():
+        managed_job = ManagedJob.objects.select_for_update(of=("self",)).get(pk=managed_job.pk)
+        if managed_job.status == ManagedJobStatus.COMPLETED:
+            return managed_job
+        if managed_job.status != ManagedJobStatus.DELIVERED:
+            raise ValueError(f"Cannot confirm completion from '{managed_job.status}'. Allowed states: delivered.")
+        if managed_job.handover_code:
+            if managed_job.handover_failed_attempts >= MAX_FAILED_ATTEMPTS:
+                raise HandoverCodeError(
+                    "Too many wrong handover codes. Contact Printy support to complete this job.",
+                    code="handover_locked",
+                )
+            if not handover_codes_match(managed_job.handover_code, handover_code):
+                managed_job.handover_failed_attempts += 1
+                managed_job.save(update_fields=["handover_failed_attempts", "updated_at"])
+                remaining = MAX_FAILED_ATTEMPTS - managed_job.handover_failed_attempts
+                error = HandoverCodeError(
+                    "That handover code does not match. Check the code that came with your parcel."
+                    + (f" {remaining} attempt(s) left." if remaining > 0 else " The code is now locked; contact Printy support."),
+                    code="handover_code_mismatch" if str(handover_code or "").strip() else "handover_code_required",
+                )
+            else:
+                managed_job.completion_method = ManagedJob.COMPLETION_BUYER_HANDOVER
+        else:
+            managed_job.completion_method = ManagedJob.COMPLETION_BUYER_NO_CODE
+        if error is None:
+            _complete_after_handover(managed_job=managed_job, actor=actor, note=note)
+    if error is not None:
+        raise error
+    return managed_job
+
+
+def _complete_after_handover(*, managed_job: ManagedJob, actor, note: str) -> None:
+    now = timezone.now()
+    managed_job.handover_confirmed_at = now
+    managed_job.handover_confirmed_by = actor if getattr(actor, "pk", None) else None
+    managed_job.save(update_fields=["handover_confirmed_at", "handover_confirmed_by", "completion_method", "updated_at"])
     managed_job.status = ManagedJobStatus.COMPLETED
-    managed_job.completed_at = timezone.now()
+    managed_job.completed_at = now
     if managed_job.exception_status == ManagedJobExceptionStatus.DELIVERY_ISSUE:
         managed_job.exception_status = ManagedJobExceptionStatus.CLEAR
         managed_job.delivery_issue_flag = False
@@ -145,11 +212,15 @@ def confirm_managed_job_completed(*, managed_job: ManagedJob, actor=None, note: 
         actor=actor,
         event_type=EVENT_JOB_COMPLETED,
         summary=f"Job accepted as complete by the client.",
-        metadata={"status": managed_job.status, "completed_at": managed_job.completed_at.isoformat(), "note": note},
+        metadata={
+            "status": managed_job.status,
+            "completed_at": managed_job.completed_at.isoformat(),
+            "note": note,
+            "completion_method": managed_job.completion_method,
+        },
     )
     notify_managed_job_recipients(
         managed_job=managed_job,
         actor=actor,
         message=_completion_message(managed_job, confirmed_by_label="client"),
     )
-    return managed_job

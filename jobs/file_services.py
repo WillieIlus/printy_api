@@ -62,16 +62,17 @@ def _stored_name(file_field: Any) -> str | None:
 
 
 def validate_artwork_upload_file(*, file, original_filename: str = "") -> str:
-    filename = os.path.basename(original_filename or getattr(file, "name", "") or "")
-    extension = os.path.splitext(filename)[1].lower()
-    if extension not in ALLOWED_ARTWORK_EXTENSIONS:
-        raise ValueError("Unsupported artwork file type. Upload JPG, PNG, PDF, AI, or EPS.")
-    size = int(getattr(file, "size", 0) or 0)
-    if size <= 0:
-        raise ValueError("Artwork file is empty. Choose another file.")
-    if size > MAX_ARTWORK_FILE_BYTES:
-        raise ValueError("Artwork files must be 50MB or smaller.")
-    return filename
+    """Audit #9: extension allowlist, 50MB cap and a magic-byte check."""
+    from common.uploads import ARTWORK, validate_upload
+
+    return validate_upload(file, ARTWORK, original_filename=original_filename).filename
+
+
+def validate_proof_upload_file(*, file, original_filename: str = "") -> str:
+    """Audit #9: proofs were stored unvalidated; they now get the artwork checks."""
+    from common.uploads import PROOF, validate_upload
+
+    return validate_upload(file, PROOF, original_filename=original_filename).filename
 
 
 def managed_job_has_artwork(*, managed_job: ManagedJob) -> bool:
@@ -523,12 +524,13 @@ def upload_proof_for_managed_job(
     original_filename: str = "",
     notes: str = "Proof uploaded for approval.",
 ) -> JobFile:
+    validated_filename = validate_proof_upload_file(file=file, original_filename=original_filename)
     job_file = create_job_file(
         managed_job=managed_job,
         assignment=assignment,
         uploaded_by=uploaded_by,
         file=file,
-        original_filename=original_filename,
+        original_filename=validated_filename,
         file_type=JobFileType.PROOF,
         visibility=JobFileVisibility.PARTNER,
         status=JobFileStatus.MANAGER_REVIEW,

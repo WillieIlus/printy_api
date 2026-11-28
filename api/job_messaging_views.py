@@ -1,4 +1,4 @@
-﻿"""API views for stage-scoped managed-job messages."""
+"""API views for stage-scoped managed-job messages."""
 
 from django.core.exceptions import ValidationError
 from rest_framework import status

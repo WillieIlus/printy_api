@@ -39,6 +39,17 @@ _POLICY_FIELDS = (
     "high_production_fee_rate",
     "high_production_markup_fee_rate",
     "maximum_manager_markup_multiple",
+    # Audit #6: the parameters the live split actually reads.
+    "min_markup_multiple",
+    "tier_a_shop_floor_multiple",
+    "tier_b_shop_floor_multiple",
+    "tier_c_shop_floor_multiple",
+    "tier_a_manager_commission_cap_rate",
+    "tier_b_manager_commission_cap_rate",
+    "tier_c_manager_commission_cap_rate",
+    "tier_a_max_client_price_multiple",
+    "tier_b_max_client_price_multiple",
+    "tier_c_max_client_price_multiple",
 )
 
 

@@ -15,11 +15,12 @@ from jobs.models import ManagedJob, ManagedJobPayout
 from jobs.artwork_workflow import artwork_payment_block_reason
 from jobs.services.dispatch import dispatch_job_to_shop
 from jobs.visibility import partner_can_access_managed_job
+from jobs.auto_payouts import automatic_disbursement_available
 from jobs.payout_services import release_managed_job_payouts
 from accounts.serializers import get_or_create_profile
 from payments.models import MpesaSTKRequest, Payment, PaymentPhoneConsent
 from payments.serializers import PaymentSerializer
-from payments.services import handle_stk_callback, initiate_stk_push, normalize_mpesa_phone
+from payments.services import initiate_stk_push, normalize_mpesa_phone
 from quotes.models import Quote
 from quotes.acceptance import accept_quote_for_payment
 from quotes.artwork_review import payment_block_reason as request_artwork_payment_block_reason
@@ -209,7 +210,7 @@ def _settlement_payload(managed_job: ManagedJob, settlement_status: str) -> dict
         # so every disbursement is performed manually by Printy staff. Callers
         # must not read "paid" as "an API transferred this automatically".
         "disbursement": "manual",
-        "automatic_disbursement_available": ManagedJobPayout.AUTOMATIC_DISBURSEMENT_AVAILABLE,
+        "automatic_disbursement_available": automatic_disbursement_available(),
         "requires_manual_transfer": settlement_status != "paid" or bool(failures),
         "payout_failures": failures,
         "disbursed": settlement_status == "paid",
@@ -306,8 +307,10 @@ def _truthy(value) -> bool:
 
 
 def _client_ip(request) -> str | None:
-    forwarded = str(request.META.get("HTTP_X_FORWARDED_FOR") or "").split(",")[0].strip()
-    return forwarded or request.META.get("REMOTE_ADDR") or None
+    # Audit #10b: X-Forwarded-For only from our own proxies.
+    from common.client_ip import resolve_client_ip
+
+    return resolve_client_ip(request)
 
 
 def _record_payment_phone_consent(
@@ -323,8 +326,10 @@ def _record_payment_phone_consent(
 
     profile = get_or_create_profile(request.user)
     if profile.phone != phone:
-        profile.phone = phone
-        profile.save(update_fields=["phone", "updated_at"])
+        # Audit #3: the one canonical phone writer (normalises, resets verification).
+        from accounts.services.phone import set_profile_phone
+
+        set_profile_phone(request.user, phone, verified=False)
 
     PaymentPhoneConsent.objects.create(
         user=request.user,
@@ -348,8 +353,10 @@ def _remember_payment_phone(payment: Payment, phone: str) -> None:
 def _save_phone_to_profile(request, phone: str) -> None:
     profile = get_or_create_profile(request.user)
     if profile.phone != phone:
-        profile.phone = phone
-        profile.save(update_fields=["phone", "updated_at"])
+        # Audit #3: the one canonical phone writer (normalises, resets verification).
+        from accounts.services.phone import set_profile_phone
+
+        set_profile_phone(request.user, phone, verified=False)
 
 
 class QuoteAcceptView(APIView):
@@ -398,7 +405,16 @@ class PaymentInitiateSTKView(APIView):
         if payment_id:
             payment = get_object_or_404(Payment.objects.select_related("payer", "quote"), pk=payment_id)
         elif quote_id:
-            quote = get_object_or_404(Quote, pk=quote_id)
+            quote = get_object_or_404(Quote.objects.select_related("quote_request"), pk=quote_id)
+            # Audit #8: the artwork gate runs BEFORE acceptance. Checking it
+            # only afterwards left the quote accepted (and its siblings
+            # rejected, the request closed) even though payment was refused.
+            artwork_block = _request_artwork_block(quote.quote_request)
+            if artwork_block:
+                return Response(
+                    {"detail": artwork_block, "artwork_payment_block_reason": artwork_block},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
             try:
                 _quote, payment = accept_quote_for_payment(quote=quote, accepted_by=request.user, payer_phone=phone)
             except ValidationError as exc:
@@ -582,7 +598,7 @@ class ManagedJobPayoutReleaseView(APIView):
                 "payouts": payouts,
                 "reconciliation": result.get("reconciliation"),
                 "disbursement": "manual",
-                "automatic_disbursement_available": ManagedJobPayout.AUTOMATIC_DISBURSEMENT_AVAILABLE,
+                "automatic_disbursement_available": automatic_disbursement_available(),
                 "note": (
                     "Payout records were created and marked released by manual "
                     "Printy release. No automatic transfer provider is configured, "
@@ -619,7 +635,8 @@ class ManagedJobMpesaSTKPushView(APIView):
                 return Response({"detail": _validation_detail(exc)}, status=status.HTTP_400_BAD_REQUEST)
             payment = (
                 _managed_job_payments(managed_job)
-                .filter(status__in=[Payment.STATUS_PENDING, Payment.STATUS_PROCESSING])
+                # Audit #1c: an expired payment is retried on the same row.
+                .filter(status__in=[Payment.STATUS_PENDING, Payment.STATUS_PROCESSING, Payment.STATUS_EXPIRED])
                 .order_by("-created_at", "-id")
                 .first()
             )
@@ -715,15 +732,24 @@ class ManagedJobMpesaQueryView(APIView):
 
 
 class MpesaCallbackView(APIView):
+    """Legacy POST /api/payments/mpesa-callback/ (and /<secret>/).
+
+    Same authenticity gate and persisted-CheckoutRequestID dispatch as
+    /api/payments/mpesa/callback/; keeps the legacy response body.
+    """
+
     authentication_classes = []
     permission_classes = [AllowAny]
 
-    def post(self, request):
-        try:
-            payload = handle_stk_callback(callback_payload=request.data)
-        except ValidationError as exc:
-            return Response({"status": "failed", "detail": "; ".join(exc.messages)}, status=400)
-        return Response(payload, status=200)
+    def post(self, request, callback_token=None):
+        from mpesa_payments.views import dispatch_verified_stk_callback
+        from payments.callback_security import reject_unverified_callback
+
+        rejection = reject_unverified_callback(request, callback_token, route="legacy-mpesa-callback")
+        if rejection is not None:
+            return rejection
+        payload = request.data if isinstance(request.data, dict) else {}
+        return dispatch_verified_stk_callback(payload, canonical_response=True)
 
 
 class JobDispatchView(APIView):

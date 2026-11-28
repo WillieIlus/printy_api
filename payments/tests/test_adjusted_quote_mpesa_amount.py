@@ -274,28 +274,31 @@ class AdjustedQuoteMpesaAmountTestCase(TestCase):
         _quote, payment = accept_quote_for_payment(quote=self.quote, accepted_by=self.client_user)
         stk = initiate_stk_push(payment=payment, phone_number="+254700000000")
 
-        with self.assertRaises(ValidationError):
-            handle_stk_callback(
-                callback_payload={
-                    "Body": {
-                        "stkCallback": {
-                            "CheckoutRequestID": stk.checkout_request_id,
-                            "MerchantRequestID": stk.merchant_request_id,
-                            "ResultCode": 0,
-                            "ResultDesc": "Success",
-                            "CallbackMetadata": {
-                                "Item": [
-                                    {"Name": "Amount", "Value": "3499.00"},
-                                    {"Name": "MpesaReceiptNumber", "Value": "QGWRONG1"},
-                                ]
-                            },
-                        }
+        # A short payment is recorded as needs_review (audit #1/#2): money may
+        # have moved, so it is kept for reconciliation, but it is never paid.
+        result = handle_stk_callback(
+            callback_payload={
+                "Body": {
+                    "stkCallback": {
+                        "CheckoutRequestID": stk.checkout_request_id,
+                        "MerchantRequestID": stk.merchant_request_id,
+                        "ResultCode": 0,
+                        "ResultDesc": "Success",
+                        "CallbackMetadata": {
+                            "Item": [
+                                {"Name": "Amount", "Value": "3499.00"},
+                                {"Name": "MpesaReceiptNumber", "Value": "QGWRONG1"},
+                            ]
+                        },
                     }
                 }
-            )
+            }
+        )
 
+        self.assertEqual(result["status"], "needs_review")
         payment.refresh_from_db()
         self.assertNotEqual(payment.status, Payment.STATUS_PAID)
+        self.assertEqual(payment.status, Payment.STATUS_NEEDS_REVIEW)
 
     @override_settings(MPESA_ENVIRONMENT="test")
     def test_duplicate_success_callbacks_apply_once(self):

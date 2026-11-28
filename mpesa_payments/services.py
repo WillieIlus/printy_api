@@ -282,8 +282,9 @@ def _credential_fields(product: str, timestamp: str) -> dict[str, str]:
 
 
 def _timestamp(now=None) -> str:
-    now = now or timezone.now()
-    return now.strftime("%Y%m%d%H%M%S")
+    # Audit #8: Daraja wants Kenyan local time (EAT). timezone.now() is UTC,
+    # so formatting it directly sent a timestamp three hours behind.
+    return timezone.localtime(now or timezone.now()).strftime("%Y%m%d%H%M%S")
 
 
 def initiate_stk_push(payment: MpesaPayment, *, timestamp: str | None = None) -> MpesaPayment:
@@ -294,8 +295,11 @@ def initiate_stk_push(payment: MpesaPayment, *, timestamp: str | None = None) ->
     """
     validate_production_config()
 
+    from payments.callback_security import signed_callback_url
+
     product = mpesa_product()
-    callback_url = _setting("MPESA_CALLBACK_URL")
+    # Daraja must call back on the secret-carrying URL (audit #1).
+    callback_url = signed_callback_url(_setting("MPESA_CALLBACK_URL"))
     stamp = timestamp or _timestamp()
 
     payload = {
@@ -419,10 +423,12 @@ def _result_urls() -> tuple[str, str]:
     one is rejected outright, so fall back to the canonical callback rather
     than sending an empty string.
     """
+    from payments.callback_security import signed_callback_url
+
     fallback = _setting("MPESA_CALLBACK_URL")
     return (
-        _setting("MPESA_RESULT_URL") or fallback,
-        _setting("MPESA_TIMEOUT_URL") or fallback,
+        signed_callback_url(_setting("MPESA_RESULT_URL") or fallback),
+        signed_callback_url(_setting("MPESA_TIMEOUT_URL") or fallback),
     )
 
 

@@ -83,16 +83,46 @@ class PlatformFeePolicy(models.Model):
     policy_version = models.CharField(max_length=40, default="printy-fees-v1")
     currency = models.CharField(max_length=3, default="KES")
     is_active = models.BooleanField(default=True)
-    under_production_threshold = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal("1000.00"))
-    under_production_fee_rate = models.DecimalField(max_digits=5, decimal_places=4, default=Decimal("0.3000"))
-    standard_production_fee_rate = models.DecimalField(max_digits=5, decimal_places=4, default=Decimal("0.2000"))
-    standard_markup_fee_rate = models.DecimalField(max_digits=5, decimal_places=4, default=Decimal("0.2000"))
-    high_markup_threshold = models.DecimalField(max_digits=5, decimal_places=4, default=Decimal("0.8000"))
-    high_markup_fee_rate = models.DecimalField(max_digits=5, decimal_places=4, default=Decimal("0.3000"))
-    high_production_threshold = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal("10000.00"))
-    high_production_fee_rate = models.DecimalField(max_digits=5, decimal_places=4, default=Decimal("0.3000"))
-    high_production_markup_fee_rate = models.DecimalField(max_digits=5, decimal_places=4, default=Decimal("0.4000"))
-    maximum_manager_markup_multiple = models.DecimalField(max_digits=5, decimal_places=2, default=Decimal("2.00"))
+    under_production_threshold = models.DecimalField(
+        max_digits=12, decimal_places=2, default=Decimal("1000.00"),
+        help_text=_("Live: production cost below this is tier A."),
+    )
+    under_production_fee_rate = models.DecimalField(
+        max_digits=5, decimal_places=4, default=Decimal("0.3000"),
+        help_text=_("LEGACY - not used by the live split (see the tier_* fields). Only recorded in the pricing-rule version hash."),
+    )
+    standard_production_fee_rate = models.DecimalField(
+        max_digits=5, decimal_places=4, default=Decimal("0.2000"),
+        help_text=_("LEGACY - not used by the live split (see the tier_* fields). Only recorded in the pricing-rule version hash."),
+    )
+    standard_markup_fee_rate = models.DecimalField(
+        max_digits=5, decimal_places=4, default=Decimal("0.2000"),
+        help_text=_("LEGACY - not used by the live split (see the tier_* fields). Only recorded in the pricing-rule version hash."),
+    )
+    high_markup_threshold = models.DecimalField(
+        max_digits=5, decimal_places=4, default=Decimal("0.8000"),
+        help_text=_("LEGACY - not used by the live split (see the tier_* fields). Only recorded in the pricing-rule version hash."),
+    )
+    high_markup_fee_rate = models.DecimalField(
+        max_digits=5, decimal_places=4, default=Decimal("0.3000"),
+        help_text=_("LEGACY - not used by the live split (see the tier_* fields). Only recorded in the pricing-rule version hash."),
+    )
+    high_production_threshold = models.DecimalField(
+        max_digits=12, decimal_places=2, default=Decimal("10000.00"),
+        help_text=_("Live: production cost up to and including this is tier B; above it is tier C."),
+    )
+    high_production_fee_rate = models.DecimalField(
+        max_digits=5, decimal_places=4, default=Decimal("0.3000"),
+        help_text=_("LEGACY - not used by the live split (see the tier_* fields). Only recorded in the pricing-rule version hash."),
+    )
+    high_production_markup_fee_rate = models.DecimalField(
+        max_digits=5, decimal_places=4, default=Decimal("0.4000"),
+        help_text=_("LEGACY - not used by the live split (see the tier_* fields). Only recorded in the pricing-rule version hash."),
+    )
+    maximum_manager_markup_multiple = models.DecimalField(
+        max_digits=5, decimal_places=2, default=Decimal("2.00"),
+        help_text=_("Live: partner markup cap as a multiple of production cost, the same for every tier (quotes.guardrails)."),
+    )
     effective_from = models.DateTimeField(null=True, blank=True)
     printer_fee_rate = models.DecimalField(
         max_digits=5,
@@ -108,12 +138,82 @@ class PlatformFeePolicy(models.Model):
         editable=False,
         help_text=_("DEPRECATED historical field. Active quote pricing must not read this value."),
     )
-    small_job_limit = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal("2000.00"))
-    medium_job_limit = models.DecimalField(max_digits=12, decimal_places=2, default=Decimal("10000.00"))
-    small_job_max_multiple = models.DecimalField(max_digits=5, decimal_places=2, default=Decimal("4.00"))
-    medium_job_max_multiple = models.DecimalField(max_digits=5, decimal_places=2, default=Decimal("3.00"))
-    bulk_job_max_multiple = models.DecimalField(max_digits=5, decimal_places=2, default=Decimal("2.00"))
-    add_platform_fee_on_top = models.BooleanField(default=False)
+    # Audit #6b: the six fields below are never read anywhere in the code and
+    # their defaults disagree with the live tiers (tier A ends at
+    # under_production_threshold=1000, not 2000; tier A/B max multiples are
+    # 3.00/2.50, not 4.00/3.00). Columns are kept (no data migration); they
+    # are non-editable so no form or serializer accepts writes to them.
+    small_job_limit = models.DecimalField(
+        max_digits=12, decimal_places=2, default=Decimal("2000.00"), editable=False,
+        help_text=_("DEPRECATED - never read by pricing. Superseded by the tier_* fields; the default disagrees with the live tiers. Kept only so historical rows load; editing it has no effect."),
+    )
+    medium_job_limit = models.DecimalField(
+        max_digits=12, decimal_places=2, default=Decimal("10000.00"), editable=False,
+        help_text=_("DEPRECATED - never read by pricing. Superseded by the tier_* fields; the default disagrees with the live tiers. Kept only so historical rows load; editing it has no effect."),
+    )
+    small_job_max_multiple = models.DecimalField(
+        max_digits=5, decimal_places=2, default=Decimal("4.00"), editable=False,
+        help_text=_("DEPRECATED - never read by pricing. Superseded by the tier_* fields; the default disagrees with the live tiers. Kept only so historical rows load; editing it has no effect."),
+    )
+    medium_job_max_multiple = models.DecimalField(
+        max_digits=5, decimal_places=2, default=Decimal("3.00"), editable=False,
+        help_text=_("DEPRECATED - never read by pricing. Superseded by the tier_* fields; the default disagrees with the live tiers. Kept only so historical rows load; editing it has no effect."),
+    )
+    bulk_job_max_multiple = models.DecimalField(
+        max_digits=5, decimal_places=2, default=Decimal("2.00"), editable=False,
+        help_text=_("DEPRECATED - never read by pricing. Superseded by the tier_* fields; the default disagrees with the live tiers. Kept only so historical rows load; editing it has no effect."),
+    )
+    add_platform_fee_on_top = models.BooleanField(
+        default=False, editable=False,
+        help_text=_("DEPRECATED - never read by pricing. The Printy fee always comes out of the markup. Editing it has no effect."),
+    )
+    # Audit #6: the live split (pricing.services.platform_fee_policy) reads its
+    # tier parameters from these fields, so admin edits take effect. Tier A is
+    # production cost below ``under_production_threshold``; tier B is up to and
+    # including ``high_production_threshold``; tier C is above it. The defaults
+    # are the values that used to be hard-coded in the split.
+    min_markup_multiple = models.DecimalField(
+        max_digits=6,
+        decimal_places=4,
+        default=Decimal("1.0500"),
+        help_text=_("Minimum client price as a multiple of production cost (1.05 = at least 5% markup)."),
+    )
+    tier_a_shop_floor_multiple = models.DecimalField(
+        max_digits=6, decimal_places=4, default=Decimal("1.0000"),
+        help_text=_("Tier A shop payout as a multiple of production cost."),
+    )
+    tier_b_shop_floor_multiple = models.DecimalField(
+        max_digits=6, decimal_places=4, default=Decimal("1.0500"),
+        help_text=_("Tier B shop payout as a multiple of production cost."),
+    )
+    tier_c_shop_floor_multiple = models.DecimalField(
+        max_digits=6, decimal_places=4, default=Decimal("1.0800"),
+        help_text=_("Tier C shop payout as a multiple of production cost."),
+    )
+    tier_a_manager_commission_cap_rate = models.DecimalField(
+        max_digits=5, decimal_places=4, default=Decimal("0.6000"),
+        help_text=_("Tier A share of the markup paid to the manager (the rest, less the shop uplift, is the Printy fee)."),
+    )
+    tier_b_manager_commission_cap_rate = models.DecimalField(
+        max_digits=5, decimal_places=4, default=Decimal("0.4500"),
+        help_text=_("Tier B share of the markup paid to the manager."),
+    )
+    tier_c_manager_commission_cap_rate = models.DecimalField(
+        max_digits=5, decimal_places=4, default=Decimal("0.3500"),
+        help_text=_("Tier C share of the markup paid to the manager."),
+    )
+    tier_a_max_client_price_multiple = models.DecimalField(
+        max_digits=6, decimal_places=4, default=Decimal("3.0000"),
+        help_text=_("Tier A maximum client price as a multiple of production cost."),
+    )
+    tier_b_max_client_price_multiple = models.DecimalField(
+        max_digits=6, decimal_places=4, default=Decimal("2.5000"),
+        help_text=_("Tier B maximum client price as a multiple of production cost."),
+    )
+    tier_c_max_client_price_multiple = models.DecimalField(
+        max_digits=6, decimal_places=4, default=Decimal("2.0000"),
+        help_text=_("Tier C maximum client price as a multiple of production cost."),
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -157,15 +257,32 @@ class PlatformFeePolicy(models.Model):
             errors["high_markup_threshold"] = _("Markup threshold must be greater than zero.")
         if self.maximum_manager_markup_multiple < 1:
             errors["maximum_manager_markup_multiple"] = _("Maximum manager markup multiple must be at least 1.")
+        if self.min_markup_multiple is not None and self.min_markup_multiple < 1:
+            errors["min_markup_multiple"] = _("Minimum markup multiple must be at least 1.")
+        for tier in ("a", "b", "c"):
+            floor = getattr(self, f"tier_{tier}_shop_floor_multiple")
+            cap = getattr(self, f"tier_{tier}_manager_commission_cap_rate")
+            max_multiple = getattr(self, f"tier_{tier}_max_client_price_multiple")
+            if floor is not None and floor < 1:
+                errors[f"tier_{tier}_shop_floor_multiple"] = _("The shop is never paid less than production cost.")
+            if cap is not None and not (Decimal("0") <= cap < Decimal("1")):
+                # cap == 1 would leave nothing to cover the shop uplift, so no
+                # markup could ever satisfy the margin floor in this tier.
+                errors[f"tier_{tier}_manager_commission_cap_rate"] = _("Manager share must be at least 0 and below 1.")
+            if (
+                max_multiple is not None
+                and floor is not None
+                and self.min_markup_multiple is not None
+                and max_multiple < max(floor, self.min_markup_multiple)
+            ):
+                errors[f"tier_{tier}_max_client_price_multiple"] = _(
+                    "Maximum client price multiple must be at least the minimum markup multiple and the shop floor."
+                )
         if errors:
             raise ValidationError(errors)
 
     def get_max_markup_multiple(self, production_cost):
         return self.maximum_manager_markup_multiple
-
-    def get_max_client_price(self, production_cost):
-        production_cost = Decimal(str(production_cost))
-        return production_cost + (production_cost * self.get_max_markup_multiple(production_cost))
 
 
 class WastePolicy(models.Model):

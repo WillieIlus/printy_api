@@ -66,7 +66,8 @@ from jobs.file_services import (
     upload_artwork_for_managed_job,
     upload_proof_for_managed_job,
 )
-from jobs.choices import JobFileStatus, JobFileType
+from jobs.choices import JobFileStatus, JobFileType, ManagedJobStatus
+from jobs.handover import HANDOVER_COMPLETE_MESSAGE, HandoverCodeError
 from jobs.delivery_services import confirm_managed_job_completed, mark_managed_job_delivered
 from jobs.models import JobAssignment, JobFile, ManagedJob
 from payments.states import canonical_job_payment_state
@@ -76,6 +77,7 @@ from jobs.payment_services import (
 from quotes.choices import CalculatorDraftContext, CalculatorDraftIntent
 from quotes.services_workflow import save_calculator_draft
 from jobs.serializers import (
+    HandoverActionSerializer,
     JobActionSerializer,
     JobAssignmentSerializer,
     JobFileSerializer,
@@ -783,14 +785,17 @@ class ManagedJobDeliverView(APIView):
         effective_actor = _effective_managed_job_actor(user=request.user, managed_job=managed_job, actor=actor)
         if effective_actor not in {OPS_ACTOR, SHOP_ACTOR, PARTNER_ACTOR}:
             return Response({"detail": _("Not authorized.")}, status=status.HTTP_403_FORBIDDEN)
-        serializer = JobActionSerializer(data=request.data)
+        serializer = HandoverActionSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         try:
             managed_job = mark_managed_job_delivered(
                 managed_job=managed_job,
                 actor=request.user,
                 note=serializer.validated_data.get("note", ""),
+                handover_code=serializer.validated_data.get("handover_code", ""),
             )
+        except HandoverCodeError as exc:
+            return Response({"detail": str(exc), "code": exc.code}, status=status.HTTP_400_BAD_REQUEST)
         except ValueError as exc:
             return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         return Response(ManagedJobSerializer(managed_job, context={"request": request}).data)
@@ -810,17 +815,23 @@ class ManagedJobConfirmCompletionView(APIView):
         effective_actor = _effective_managed_job_actor(user=request.user, managed_job=managed_job, actor=actor)
         if effective_actor not in {OPS_ACTOR, CLIENT_ACTOR}:
             return Response({"detail": _("Not authorized.")}, status=status.HTTP_403_FORBIDDEN)
-        serializer = JobActionSerializer(data=request.data)
+        serializer = HandoverActionSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         try:
             managed_job = confirm_managed_job_completed(
                 managed_job=managed_job,
                 actor=request.user,
                 note=serializer.validated_data.get("note", ""),
+                handover_code=serializer.validated_data.get("handover_code", ""),
             )
+        except HandoverCodeError as exc:
+            return Response({"detail": str(exc), "code": exc.code}, status=status.HTTP_400_BAD_REQUEST)
         except ValueError as exc:
             return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
-        return Response(ManagedJobSerializer(managed_job, context={"request": request}).data)
+        data = ManagedJobSerializer(managed_job, context={"request": request}).data
+        if managed_job.status == ManagedJobStatus.COMPLETED:
+            data["message"] = HANDOVER_COMPLETE_MESSAGE
+        return Response(data)
 
 
 class ManagedJobPaymentListView(APIView):
@@ -883,14 +894,18 @@ class ManagedJobProofUploadView(APIView):
         upload = request.FILES.get("file")
         if upload is None:
             return Response({"detail": _("A proof file is required.")}, status=status.HTTP_400_BAD_REQUEST)
-        job_file = upload_proof_for_managed_job(
-            managed_job=managed_job,
-            assignment=managed_job.assignments.filter(reassigned_from__isnull=True).first(),
-            uploaded_by=request.user,
-            file=upload,
-            original_filename=getattr(upload, "name", ""),
-            notes=request.data.get("note", "") or "Proof uploaded for approval.",
-        )
+        try:
+            job_file = upload_proof_for_managed_job(
+                managed_job=managed_job,
+                assignment=managed_job.assignments.filter(reassigned_from__isnull=True).first(),
+                uploaded_by=request.user,
+                file=upload,
+                original_filename=getattr(upload, "name", ""),
+                notes=request.data.get("note", "") or "Proof uploaded for approval.",
+            )
+        except ValueError as exc:
+            # Audit #9: wrong type, oversize or renamed file.
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         return Response(JobFileSerializer(job_file, context={"request": request}).data, status=status.HTTP_201_CREATED)
 
 

@@ -249,11 +249,12 @@ def format_quote_request_whatsapp_message(quote_request) -> str:
     return "\n".join(lines)
 
 
-def _safe_shop_whatsapp_phone(quote_request) -> str:
-    shop = getattr(quote_request, "shop", None)
-    if not shop or not shop.is_public:
+def _assigned_manager_whatsapp_phone(quote_request) -> str:
+    manager = getattr(quote_request, "assigned_manager", None)
+    if manager is None:
         return ""
-    return _normalize_phone(getattr(shop, "phone_number", ""))
+    profile = getattr(manager, "profile", None)
+    return _normalize_phone(getattr(profile, "manager_whatsapp", "") if profile is not None else "")
 
 
 def build_quote_request_whatsapp_handoff(quote_request, *, viewer_role: str) -> dict:
@@ -274,32 +275,26 @@ def build_quote_request_whatsapp_handoff(quote_request, *, viewer_role: str) -> 
             "phone": "",
         }
 
+    # Audit #3b (role visibility): printers never see the client's contact
+    # details, and clients never see a shop's contact details. The buyer is
+    # routed to the print manager handling the request instead (the manager's
+    # WhatsApp is shown only to clients who are working with that manager).
     if viewer_role == "shop":
-        buyer_phone = _normalize_phone(getattr(quote_request, "customer_phone", ""))
-        if not buyer_phone:
-            return {
-                "available": False,
-                "label": "Buyer phone unavailable",
-                "reason": "buyer_phone_missing",
-                "message": base_message,
-                "url": "",
-                "phone": "",
-            }
-        return {
-            "available": True,
-            "label": "Continue on WhatsApp",
-            "reason": "",
-            "message": base_message,
-            "url": _whatsapp_url(buyer_phone, base_message),
-            "phone": buyer_phone,
-        }
-
-    shop_phone = _safe_shop_whatsapp_phone(quote_request)
-    if not shop_phone:
         return {
             "available": False,
-            "label": "Connect WhatsApp",
-            "reason": "shop_whatsapp_not_public",
+            "label": "Client contact goes through the print manager",
+            "reason": "client_contact_private",
+            "message": base_message,
+            "url": "",
+            "phone": "",
+        }
+
+    manager_phone = _assigned_manager_whatsapp_phone(quote_request)
+    if not manager_phone:
+        return {
+            "available": False,
+            "label": "Message your print manager in Printy",
+            "reason": "manager_whatsapp_not_set",
             "message": base_message,
             "url": "",
             "phone": "",
@@ -309,8 +304,8 @@ def build_quote_request_whatsapp_handoff(quote_request, *, viewer_role: str) -> 
         "label": "Continue on WhatsApp",
         "reason": "",
         "message": base_message,
-        "url": _whatsapp_url(shop_phone, base_message),
-        "phone": shop_phone,
+        "url": _whatsapp_url(manager_phone, base_message),
+        "phone": manager_phone,
     }
 
 
@@ -361,6 +356,7 @@ def build_quote_request_brief(quote_request, *, include_buyer_contact: bool, vie
         shop["name"] = project_identity(shop["name"], actor=actor)
         if actor == CLIENT_ACTOR:
             shop["slug"] = "partner" # Hide slug too if client
+            shop["id"] = None  # Audit #3b: clients never see a shop id.
             
     created_label = quote_request.created_at.strftime("%d %b %Y, %H:%M")
     brief = {

@@ -19,6 +19,7 @@ ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
 ALLOWED_CONTENT_TYPES = {"image/jpeg", "image/png", "image/webp"}
 DEFAULT_MAX_BYTES = 5 * 1024 * 1024
 DEFAULT_MIN_DIMENSION = 400
+_EXTENSION_FORMATS = {".jpg": "JPEG", ".jpeg": "JPEG", ".png": "PNG", ".webp": "WEBP"}
 
 
 def manager_photo_limits() -> tuple[int, int]:
@@ -62,12 +63,18 @@ def validate_manager_photo(value) -> None:
             value.seek(0)
         with Image.open(value) as image:
             width, height = image.size
+            detected_format = str(image.format or "").upper()
             image.verify()
     except (UnidentifiedImageError, OSError, ValueError, TypeError):
         raise ValidationError("Upload a valid image file.") from None
     finally:
         if hasattr(value, "seek"):
             value.seek(0)
+
+    # Audit #9: the decoded format must be the one the extension claims, so a
+    # renamed file (e.g. a GIF saved as photo.png) is refused.
+    if detected_format != _EXTENSION_FORMATS[extension]:
+        raise ValidationError("This file's contents do not match its extension. Use a JPEG, PNG or WebP photo.")
 
     if width < min_dimension or height < min_dimension:
         raise ValidationError(

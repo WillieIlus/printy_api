@@ -15,7 +15,7 @@ from django.core import mail
 from django.core.checks import ERROR
 from django.core.mail import send_mail
 from django.core.management import call_command
-from django.test import TestCase, override_settings
+from django.test import SimpleTestCase, TestCase, override_settings
 from rest_framework.test import APIClient
 
 from config.settings import (
@@ -45,8 +45,13 @@ def _error_ids(messages):
     return {m.id for m in messages if m.level >= ERROR}
 
 
-class TestEmailDeliveryConfigCheck:
-    """Pure-function contract of the delivery guard."""
+class TestEmailDeliveryConfigCheck(SimpleTestCase):
+    """Pure-function contract of the delivery guard.
+
+    Audit #10a: this was a plain pytest-style class, so `manage.py test` never
+    ran it. SimpleTestCase makes both runners collect it; the bare asserts
+    are unchanged.
+    """
 
     def test_console_backend_in_production_is_a_startup_error(self):
         ids = _error_ids(_config(backend=CONSOLE, is_local=False))

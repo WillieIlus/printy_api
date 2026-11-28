@@ -213,12 +213,14 @@ class RoundingSplitRegressionTests(SimpleTestCase):
 
         checked = 0
         for cost in ("0.50", "1.00", "999.50", "1000.50", "2116.66", "4724.33", "10000.50", "10001.00"):
-            for markup in ("0.50", "1.50", "7.49", "99.50", "750.00", "1587.495"):
+            for markup in ("0.50", "1.50", "7.49", "99.50", "125.50", "750.00", "1250.50", "1587.495", "2500.495"):
                 try:
                     self._assert_reconciles(Decimal(cost), Decimal(markup))
                     checked += 1
                 except ValidationError:
-                    continue  # above the tier cap; rejected by design
+                    # Above the tier cap, or (audit #6) below the margin floor;
+                    # both are rejected by design.
+                    continue
         self.assertGreater(checked, 20, "sweep exercised almost nothing")
 
     def test_half_shilling_markup_does_not_leak_a_cent_into_the_split(self):

@@ -2,6 +2,13 @@
 
 Key endpoints and request/response examples. Public API origin: `https://api.printy.ke`. Base path: `/api/`.
 
+> **Route check (audit tier3, 2026-11).** Every `/api/...` path in this file
+> was resolved against the live URLconf (`django.urls.resolve`). Paths that
+> do not resolve are marked **NOT ROUTED**: calling them returns 404. They
+> are kept only as a record of earlier designs; do not build against them.
+> `tests/test_audit_documentation.py` fails if an unmarked path in this file
+> stops resolving.
+
 ---
 
 ## Auth (JWT)
@@ -12,6 +19,27 @@ Key endpoints and request/response examples. Public API origin: `https://api.pri
 | POST | `/api/auth/token/refresh/` | No | Refresh access token |
 | GET | `/api/auth/me/` | Bearer | Current user |
 | POST | `/api/auth/register/` | No | Register new user |
+| POST | `/api/auth/social/google/` | No | Google ID-token login |
+
+### Account security rules (audit #3 / #4)
+
+- `role`, `partner_profile_enabled` and `capability_overrides` are read-only on
+  `PATCH /api/auth/me/` and `/api/users/me/` (ignored if sent). Only admin
+  surfaces change them.
+- Registration accepts `role` only from the self-service allowlist: `client`
+  or `partner` (a manager *applicant*, unverified until staff approve it).
+  `production`, `super_admin` etc. return 400.
+  `/api/auth/register/production/` registers a printer applicant (client role,
+  no shop, `signup_intent: "printer_applicant"`); the shop is created later
+  with `POST /api/shops/` and stays private until approved.
+- Printer-facing marketplace endpoints (`/api/public/shops/`,
+  `/api/shops/<slug>/rate-card/`, shop previews, nearby search) require a
+  verified, active manager or super_admin; a shop owner sees only its own shop.
+- Google login requires `GOOGLE_CLIENT_ID` on the server (503 otherwise),
+  verifies the token locally, requires `email_verified`, matches emails
+  case-insensitively (409 if legacy duplicates exist), refuses inactive users
+  (403) and sets `role` only when creating a new account.
+- Credential endpoints are rate-limited per client IP (429 + `Retry-After`).
 
 ### POST /api/auth/token/
 
@@ -42,13 +70,19 @@ Authorization: Bearer <access_token>
 
 | Method | Endpoint | Auth | Description |
 |--------|----------|------|--------------|
-| GET | `/api/public/shops/` | No | List active shops |
-| GET | `/api/public/shops/{slug}/` | No | Shop detail |
-| GET | `/api/public/shops/{slug}/catalog/` | No | Shop products |
-| GET | `/api/public/shops/{slug}/rating-summary/` | No | Rating average + count |
-| GET | `/api/public/products/` | No | All PUBLISHED products (gallery) |
+| GET | `/api/public/shops/` | Bearer (verified manager / super_admin) | List active shops |
+| GET | `/api/public/shops/{slug}/` | Bearer (verified manager / super_admin) | Shop detail |
+| GET | `/api/public/shops/{slug}/catalog/` | Bearer (verified manager / super_admin) | Shop products |
+| GET | `/api/public/shops/{slug}/rating-summary/` | — | **NOT ROUTED** |
+| GET | `/api/public/products/` | No | All PUBLISHED global catalog products (no shop data) |
 | GET | `/api/public/products/{pk}/options/` | No | Product tweaking options |
-| GET | `/api/shops/nearby/` | No | Shops within radius (Haversine, sorted by distance) |
+| GET | `/api/shops/nearby/` | Bearer (verified manager / super_admin) | Shops within radius (Haversine, sorted by distance) |
+
+Despite the `/public/` prefix, the shop endpoints above are **not public**.
+Signed-out visitors and clients never see shops; they find managers
+(`PrintManagerMarketplaceAccess`). Anonymous callers and clients get 401/403,
+and unverified, pending or suspended managers get 403. A printer owner sees
+only its own shop.
 
 ### GET /api/shops/nearby/
 
@@ -98,6 +132,8 @@ Returns only active shops with non-null lat/lng within the exact radius. Missing
 
 ### GET /api/public/shops/{slug}/catalog/
 
+Verified managers and super_admin only (see above).
+
 **Response:**
 ```json
 {
@@ -122,6 +158,8 @@ Returns only active shops with non-null lat/lng within the exact radius. Missing
 
 ### GET /api/public/products/
 
+Global catalog products. The response carries **no shop identity**.
+
 **Response:**
 ```json
 {
@@ -129,7 +167,6 @@ Returns only active shops with non-null lat/lng within the exact radius. Missing
     {
       "id": 1,
       "name": "Business Card",
-      "shop": { "id": 1, "name": "...", "slug": "...", "currency": "KES" },
       "price_hint": {...},
       "price_range_est": {...},
       ...
@@ -148,9 +185,9 @@ Product Gallery (ported from templates): categories and products for browsing. S
 
 | Method | Endpoint | Auth | Description |
 |--------|----------|------|-------------|
-| GET | `/api/products/gallery/` | No | Categories with active products, grouped |
+| GET | `/api/products/gallery/` | — | **NOT ROUTED** (the gallery app was removed; see results.txt Prompt 6 Section B). Use `/api/public/products/`. |
 
-**Response:**
+**Former response (endpoint not routed):**
 ```json
 {
   "categories": [
@@ -185,15 +222,17 @@ Only active products are included. Categories with no active products are omitte
 
 ### Shop-scoped (Seller)
 
-Shop owners/managers manage their gallery categories and products. All require Bearer auth and shop ownership.
+**NOT ROUTED:** none of the shop-scoped gallery endpoints below resolve
+(the `gallery` stub app was removed in Prompt 6 Section B). Shop catalog
+products are managed under `/api/shops/{slug}/products/` (see "Seller").
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| GET, POST | `/api/shops/{shop_slug}/products/categories/` | List, create categories |
-| GET, PUT, PATCH, DELETE | `/api/shops/{shop_slug}/products/categories/{slug}/` | Category detail |
-| GET, POST | `/api/shops/{shop_slug}/gallery/products/` | List, create products |
-| GET, PUT, PATCH, DELETE | `/api/shops/{shop_slug}/gallery/products/{slug}/` | Product detail |
-| POST | `/api/shops/{shop_slug}/gallery/products/{slug}/calculate-price/` | Calculate price (stub) |
+| GET, POST | `/api/shops/{shop_slug}/products/categories/` | List, create categories **NOT ROUTED** |
+| GET, PUT, PATCH, DELETE | `/api/shops/{shop_slug}/products/categories/{slug}/` | Category detail **NOT ROUTED** |
+| GET, POST | `/api/shops/{shop_slug}/gallery/products/` | List, create products **NOT ROUTED** |
+| GET, PUT, PATCH, DELETE | `/api/shops/{shop_slug}/gallery/products/{slug}/` | Product detail **NOT ROUTED** |
+| POST | `/api/shops/{shop_slug}/gallery/products/{slug}/calculate-price/` | Calculate price (stub) **NOT ROUTED** |
 
 **Note:** Gallery products use `/gallery/products/` to avoid clashing with catalog products at `/shops/{slug}/products/` (catalog uses integer `pk`).
 
@@ -224,11 +263,11 @@ Invalid payload (e.g. non-object) returns `400 Bad Request`.
 
 | Method | Endpoint | Auth | Description |
 |--------|----------|------|--------------|
-| GET | `/api/quote-drafts/active/?shop={slug}` | Bearer | Get/create active draft |
+| GET | `/api/quote-drafts/active/?shop={slug}` | Bearer | **Disabled:** always 400 ("Shop-scoped quote drafts are disabled"). Clients use `/api/calculator/drafts/` and `/api/intake/submit/`. |
 | GET | `/api/quote-drafts/{id}/items/` | Bearer | List items |
 | POST | `/api/quote-drafts/{id}/tweak-and-add/` | Bearer | Add tweaked product |
 | PATCH | `/api/tweaked-items/{id}/` | Bearer | Update tweaked item |
-| POST | `/api/quote-drafts/{id}/request-quote/` | Bearer | Submit quote request |
+| POST | `/api/quote-drafts/{id}/request-quote/` | Bearer | **Disabled:** always 400 (client shop routing is off). |
 
 ### POST /api/quote-drafts/{id}/tweak-and-add/
 
@@ -251,7 +290,7 @@ Invalid payload (e.g. non-object) returns `400 Bad Request`.
 |--------|----------|------|--------------|
 | GET | `/api/quote-requests/` | Bearer | List (buyer or seller) |
 | GET | `/api/quote-requests/{id}/` | Bearer | Detail |
-| POST | `/api/quote-requests/{id}/price/` | Bearer (seller) | Calculate & lock prices |
+| POST | `/api/quote-requests/{id}/price/` | — | **NOT ROUTED** |
 
 ---
 
@@ -325,14 +364,15 @@ Expired links return `410 Gone`.
 
 | Method | Endpoint | Auth | Description |
 |--------|----------|------|--------------|
-| GET | `/api/job-requests/` | Bearer | List (filter: status, created_by) |
-| POST | `/api/job-requests/` | Bearer | Create job request |
-| GET | `/api/job-requests/{id}/` | Bearer | Detail |
-| POST | `/api/job-requests/{id}/claims/` | Bearer | Claim job |
-| POST | `/api/job-requests/{id}/whatsapp-share/` | Bearer | Get share message + URL |
-| GET | `/api/job-claims/?claimed_by=me` | Bearer | My claims |
-| POST | `/api/job-claims/{id}/accept/` | Bearer (owner) | Accept claim |
-| POST | `/api/job-claims/{id}/reject/` | Bearer (owner) | Reject claim |
+| — | — | — | **NOT ROUTED:** every `/api/job-requests/...` and `/api/job-claims/...` row below. |
+| GET | `/api/job-requests/` | Bearer | List (filter: status, created_by) **NOT ROUTED** |
+| POST | `/api/job-requests/` | Bearer | Create job request **NOT ROUTED** |
+| GET | `/api/job-requests/{id}/` | Bearer | Detail **NOT ROUTED** |
+| POST | `/api/job-requests/{id}/claims/` | Bearer | Claim job **NOT ROUTED** |
+| POST | `/api/job-requests/{id}/whatsapp-share/` | Bearer | Get share message + URL **NOT ROUTED** |
+| GET | `/api/job-claims/?claimed_by=me` | Bearer | My claims **NOT ROUTED** |
+| POST | `/api/job-claims/{id}/accept/` | Bearer (owner) | Accept claim **NOT ROUTED** |
+| POST | `/api/job-claims/{id}/reject/` | Bearer (owner) | Reject claim **NOT ROUTED** |
 | GET | `/api/public/job/{token}/` | No | Public job view (token API) |
 
 ### POST /api/job-requests/{id}/whatsapp-share/
@@ -364,21 +404,25 @@ All under `/api/shops/{slug}/` or `/api/shops/{id}/`:
 
 ## Finishing Categories
 
+**NOT ROUTED** (the `FinishingCategory` model no longer exists).
+
 | Method | Endpoint | Auth | Description |
 |--------|----------|------|--------------|
-| GET | `/api/finishing-categories/` | No | List categories |
-| GET | `/api/finishing-categories/{slug}/` | No | Category detail |
+| GET | `/api/finishing-categories/` | No | List categories **NOT ROUTED** |
+| GET | `/api/finishing-categories/{slug}/` | No | Category detail **NOT ROUTED** |
 
 ---
 
 ## Favorites & Ratings
 
+**NOT ROUTED:** none of these endpoints resolve.
+
 | Method | Endpoint | Auth | Description |
 |--------|----------|------|--------------|
-| GET | `/api/me/favorites/` | Bearer | List favorites |
-| POST | `/api/me/favorites/` | Bearer | Add favorite `{ "shop": 1 }` |
-| DELETE | `/api/me/favorites/{shop_id}/` | Bearer | Remove favorite |
-| POST | `/api/shops/{id}/rate/` | Bearer | Rate shop (requires eligible QuoteRequest) |
+| GET | `/api/me/favorites/` | Bearer | List favorites **NOT ROUTED** |
+| POST | `/api/me/favorites/` | Bearer | Add favorite `{ "shop": 1 }` **NOT ROUTED** |
+| DELETE | `/api/me/favorites/{shop_id}/` | Bearer | Remove favorite **NOT ROUTED** |
+| POST | `/api/shops/{id}/rate/` | Bearer | Rate shop (requires eligible QuoteRequest) **NOT ROUTED** |
 
 ---
 
@@ -386,85 +430,87 @@ All under `/api/shops/{slug}/` or `/api/shops/{id}/`:
 
 | Method | Endpoint | Auth | Description |
 |--------|----------|------|--------------|
-| GET | `/api/setup/status/` | Bearer | Onboarding status |
+| GET | `/api/setup/status/` | — | **NOT ROUTED** |
 
 ---
 
 ---
 
-## Subscription & Payments
+## Subscription (NOT ROUTED)
+
+These are **NOT ROUTED**: `/api/subscription/plans/`, `/api/shops/{shop_slug}/subscription/`,
+`/api/shops/{shop_slug}/payments/mpesa/stk-push/` (**NOT ROUTED**). There
+is no shop-subscription billing in this codebase. The former documentation
+for them was removed in audit tier3.
+
+---
+
+## Payments (M-Pesa)
+
+Canonical lifecycle and operations: `docs/DARAJA_PRODUCTION_CHECKLIST.md`.
+URL list, response changes and `checkout_request_id` exposure:
+`docs/API_URL_AUDIT.md`.
 
 | Method | Endpoint | Auth | Description |
 |--------|----------|------|--------------|
-| GET | `/api/subscription/plans/` | No | List subscription plans |
-| GET | `/api/shops/{shop_slug}/subscription/` | Bearer (shop owner) | Shop's subscription (creates TRIAL if none) |
-| POST | `/api/shops/{shop_slug}/payments/mpesa/stk-push/` | Bearer (shop owner) | Initiate M-Pesa STK push |
-| POST | `/api/payments/mpesa/callback/` | No (webhook) | Daraja STK callback |
+| POST | `/api/quotes/{quote_id}/accept/` | Bearer (client allowed to accept) | Accept the quote and create the `Payment` (amount = `QuoteFinancialSplit.client_total`) |
+| POST | `/api/payments/stk-push/` | Bearer (payer) | STK push for a quote's canonical `Payment` |
+| GET | `/api/payments/{pk}/` | Bearer (payer / platform staff) | Payment detail |
+| POST | `/api/managed-jobs/{pk}/payments/mpesa/stk-push/` | Bearer (the job's client) | STK push for a managed job |
+| POST | `/api/managed-jobs/{pk}/payments/mpesa/query/` | Bearer (the job's client) | Local STK status by `checkout_request_id` (does not call Daraja) |
+| POST | `/api/payments/mpesa/stk-push/` | Bearer | Cashier STK push: `managed_job_id`, `quote_id` or an ad-hoc `amount` |
+| GET | `/api/payments/mpesa/{pk}/` | Bearer | Cashier payment detail (no `checkout_request_id`) |
+| POST | `/api/payments/mpesa/callback/<secret>/` | Secret + IP allowlist (webhook) | Daraja STK callback |
+| POST | `/api/payments/mpesa/result/<secret>/` | Secret + IP allowlist (webhook) | Transaction Status Query result |
+| POST | `/api/payments/mpesa-callback/<secret>/` | Secret + IP allowlist (webhook) | Legacy STK callback (same gate) |
+| GET | `/api/admin/payments/needs-review/` | Bearer (super-admin) | Payments awaiting a decision |
+| POST | `/api/admin/payments/{id}/resolve-review/` | Bearer (super-admin) | `confirm_paid` / `mark_failed` a canonical `Payment` |
+| POST | `/api/admin/mpesa-payments/{id}/resolve-review/` | Bearer (super-admin) | Same for a cashier `MpesaPayment` |
+| POST | `/api/admin/payments/{id}/recover/` | Bearer (super-admin) | Query Daraja (STK Query) for a canonical `Payment` whose callback was lost; body `{reason?}`; returns `{payment_id, outcome, payment_status, detail, checkout_request_id}`; 502 on Daraja error (no change) |
 
-### GET /api/subscription/plans/
+Phone accepts `254712345678`, `0712345678` and `712345678`; the backend
+normalizes to `2547XXXXXXXX`.
 
-**Response (paginated):**
-```json
-{
-  "count": 2,
-  "next": null,
-  "previous": null,
-  "results": [
-    {
-      "id": 1,
-      "name": "Starter",
-      "price": "500.00",
-      "billing_period": "MONTHLY",
-      "days_in_period": 30
-    }
-  ]
-}
-```
+### Callbacks (Daraja webhooks)
 
-### GET /api/shops/{shop_slug}/subscription/
+There is no user authentication and no CSRF check. Instead, every callback
+must pass all three checks:
 
-**Response:**
-```json
-{
-  "id": 1,
-  "shop": 1,
-  "plan": { "id": 1, "name": "Starter", "price": "500.00", "billing_period": "MONTHLY", "days_in_period": 30 },
-  "status": "ACTIVE",
-  "period_start": "2025-03-02",
-  "period_end": "2025-04-01",
-  "next_billing_date": "2025-04-01",
-  "last_payment_date": "2025-03-02"
-}
-```
+1. **Secret:** the last path segment (or `?token=`) equals
+   `MPESA_CALLBACK_SECRET`.
+2. **Source IP:** the source is on the allowlist (`MPESA_CALLBACK_ALLOWED_IPS`,
+   or the built-in Safaricom list in production). The IP is resolved through
+   `MPESA_TRUSTED_PROXIES`; a raw `X-Forwarded-For` is never trusted.
+3. **Known transaction:** the body references a `CheckoutRequestID` (or
+   receipt) we persisted.
 
-Status: `TRIAL`, `ACTIVE`, `PAST_DUE`, `CANCELLED`.
+| Response | When |
+| --- | --- |
+| 403 `{"ResultCode": 1, "ResultDesc": "Forbidden"}` | bad or missing secret, or IP not allowlisted |
+| 404 | unknown `CheckoutRequestID` |
+| 400 | missing `CheckoutRequestID`, or non-integer `ResultCode` |
+| 200 | applied, duplicate, or already final |
 
-### POST /api/shops/{shop_slug}/payments/mpesa/stk-push/
+A success is applied only with a receipt **and** an `Amount` equal to the
+server-stored expected amount. Otherwise the payment becomes `needs_review`
+and is never `paid`. Duplicate callbacks change nothing. A late failure for an
+old prompt never touches a newer one.
 
-**Request:**
-```json
-{
-  "phone": "254712345678",
-  "plan_id": 1
-}
-```
+### Error responses on payment initiation
 
-Phone accepts: `254712345678`, `0712345678`, `712345678` — normalized to `2547XXXXXXXX`.
+| Status | Meaning |
+| --- | --- |
+| 400 `artwork_payment_block_reason` | artwork not approved yet (the artwork gate) |
+| 400 | payment under review or already paid; `quote_request_id` sent (pay the quote with `quote_id`) |
+| 403 | caller is not the payer (not the job's client, or cannot accept the quote) |
+| 409 | the job is already paid, or has no confirmed price |
 
-**Response:**
-```json
-{
-  "checkout_request_id": "ws_CO_123456",
-  "message": "Payment request sent. Complete on your phone."
-}
-```
+`checkout_request_id` / `merchant_request_id` are **not** returned by the
+cashier serializer, the signed-out client-link payment, the client dashboard
+or the partner send-to-client payload. They are still returned to the
+authenticated payer by `/api/payments/stk-push/`, `/api/payments/{pk}/` and
+the managed-job STK push.
 
-### POST /api/payments/mpesa/callback/
-
-Daraja webhook (no auth, CSRF exempt). Callback behavior:
-
-- `ResultCode == 0`: Mark STK request SUCCESS, extract `MpesaReceiptNumber`, activate subscription, set period dates, create Payment row.
-- `ResultCode != 0`: Mark STK request FAILED.
-- Idempotent: duplicate callbacks (same `CheckoutRequestID`) do not create duplicate Payments.
-
-**Payments callback logging:** Uses `logging.getLogger("payments")` and logs request identifiers, not secrets.
+**Payments callback logging:** uses `logging.getLogger("payments")` and logs
+request identifiers and the source IP, never the callback secret. The secret
+does appear in proxy access logs; mask it there (see `docs/DEPLOY_NOTES.md`).

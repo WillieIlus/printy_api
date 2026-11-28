@@ -239,7 +239,7 @@ class CustomerQuoteRequestViewSet(viewsets.ModelViewSet):
             notify_quote_event(
                 recipient=qr.shop.owner,
                 notification_type=Notification.QUOTE_REQUEST_SUBMITTED,
-                message=f"New quote request #{qr.id} from {qr.customer_name or 'customer'}.",
+                message=f"New quote request #{qr.id} from a client.",
                 object_type="quote_request",
                 object_id=qr.id,
                 actor=request.user,
@@ -363,7 +363,7 @@ class CustomerQuoteRequestViewSet(viewsets.ModelViewSet):
             notify_quote_event(
                 recipient=qr.shop.owner,
                 notification_type=Notification.BUYER_CLARIFICATION_SENT,
-                message=f"{qr.customer_name or 'Client'} replied to request #{qr.id}.",
+                message=f"The client replied to request #{qr.id}.",
                 object_type="quote_request",
                 object_id=qr.id,
                 actor=request.user,
@@ -467,10 +467,11 @@ class IncomingRequestViewSet(viewsets.ReadOnlyModelViewSet):
         if not self.check_shop_owner():
             return Response({"detail": "Not your shop."}, status=status.HTTP_403_FORBIDDEN)
         qr = self.get_object()
+        # Audit #3b: printers never see the client's identity or contact.
         return _quote_request_brief_response(
             quote_request=qr,
             viewer_role="shop",
-            include_buyer_contact=True,
+            include_buyer_contact=False,
         )
 
     @action(detail=True, methods=["get"], url_path="whatsapp-handoff")

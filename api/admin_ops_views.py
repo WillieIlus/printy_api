@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from decimal import Decimal
 
+from django.conf import settings
+from django.core.exceptions import ValidationError
 from django.db import transaction
 from django.db.models import Q, Sum
 from django.shortcuts import get_object_or_404
@@ -309,7 +311,11 @@ class AdminCustodyReleaseView(APIView):
     @transaction.atomic
     def post(self, request, job_id):
         job = get_object_or_404(
-            ManagedJob.objects.select_for_update().select_related("source_quote", "assigned_shop", "broker"),
+            # Audit #10d: lock only the job row. PostgreSQL refuses FOR UPDATE on
+            # the nullable side of the outer joins select_related adds
+            # (source_quote / assigned_shop / broker are nullable); SQLite
+            # ignored it, so this 500'd only in production.
+            ManagedJob.objects.select_for_update(of=("self",)).select_related("source_quote", "assigned_shop", "broker"),
             pk=job_id,
         )
         if str(job.status) != ManagedJobStatus.COMPLETED:
@@ -396,13 +402,25 @@ class AdminDisputeListView(APIView):
         return Response({"count": len(rows), "results": rows})
 
 
+def _mark_admin_dispute_completion(job: ManagedJob) -> None:
+    """Prompt 7: a super-admin dispute resolution that leaves a delivered job
+    ``completed`` is recorded as such (the buyer never entered the code)."""
+    if str(job.status) == ManagedJobStatus.COMPLETED and job.completion_method not in {
+        ManagedJob.COMPLETION_BUYER_HANDOVER,
+        ManagedJob.COMPLETION_BUYER_NO_CODE,
+    }:
+        job.completion_method = ManagedJob.COMPLETION_ADMIN_DISPUTE
+        job.completed_at = job.completed_at or timezone.now()
+
+
 class AdminDisputeResolveView(APIView):
     permission_classes = ADMIN_PERMISSIONS
 
     @transaction.atomic
     def post(self, request, job_id):
         job = get_object_or_404(
-            ManagedJob.objects.select_for_update().select_related(
+            # Audit #10d: lock only the job row (see AdminCustodyReleaseView).
+            ManagedJob.objects.select_for_update(of=("self",)).select_related(
                 "source_quote", "assigned_shop", "broker", "client"
             ),
             pk=job_id,
@@ -435,6 +453,7 @@ class AdminDisputeResolveView(APIView):
             )
 
         released = None
+        auto_payouts_note = ""
         if resolution == "release":
             job.payout_hold = False
             if str(job.status) == ManagedJobStatus.DISPUTED:
@@ -443,15 +462,32 @@ class AdminDisputeResolveView(APIView):
                     if getattr(job, "delivered_at", None)
                     else ManagedJobStatus.READY
                 )
+            _mark_admin_dispute_completion(job)
             job.exception_status = ManagedJobExceptionStatus.CLEAR
             job.dispute_open = False
             job.ops_review_required = False
-            job.save(update_fields=["status", "exception_status", "dispute_open", "ops_review_required", "payout_hold", "updated_at"])
-            result = release_managed_job_payouts(managed_job=job, released_by=request.user)
-            released = [
-                {"id": payout.id, "recipient_role": payout.recipient_role, "amount": _money(payout.amount)}
-                for payout in result["payouts"]
-            ]
+            job.save(update_fields=["status", "exception_status", "dispute_open", "ops_review_required", "payout_hold", "completion_method", "completed_at", "updated_at"])
+            if getattr(settings, "AUTO_PAYOUTS_ENABLED", False):
+                # Prompt 7 PART 2, decision 4: with automatic payouts on,
+                # "release" only clears the hold; the B2C runner pays once the
+                # job is eligible, through the same state machine.
+                released = []
+                auto_payouts_note = "Hold cleared; automatic payouts will pay this job when it is eligible."
+            else:
+                try:
+                    result = release_managed_job_payouts(managed_job=job, released_by=request.user)
+                except ValidationError as exc:
+                    # e.g. a payout is in flight or awaiting review; undo the
+                    # resolution so nothing is half-applied.
+                    transaction.set_rollback(True)
+                    return Response(
+                        {"detail": "; ".join(exc.messages), "code": "release_blocked"},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+                released = [
+                    {"id": payout.id, "recipient_role": payout.recipient_role, "amount": _money(payout.amount)}
+                    for payout in result["payouts"]
+                ]
         elif resolution == "refund":
             job.status = ManagedJobStatus.CANCELLED
             job.payment_status = ManagedJobPaymentStatus.REFUNDED
@@ -467,11 +503,12 @@ class AdminDisputeResolveView(APIView):
                     if getattr(job, "delivered_at", None)
                     else ManagedJobStatus.READY
                 )
+            _mark_admin_dispute_completion(job)
             job.exception_status = ManagedJobExceptionStatus.CLEAR
             job.dispute_open = False
             job.ops_review_required = False
             job.payout_hold = False
-            job.save(update_fields=["status", "exception_status", "dispute_open", "ops_review_required", "payout_hold", "updated_at"])
+            job.save(update_fields=["status", "exception_status", "dispute_open", "ops_review_required", "payout_hold", "completion_method", "completed_at", "updated_at"])
 
         record_job_status_event(
             managed_job=job,
@@ -494,6 +531,7 @@ class AdminDisputeResolveView(APIView):
                 "status": job.status,
                 "payment_status": job.payment_status,
                 "released": released or [],
+                **({"auto_payouts": auto_payouts_note} if auto_payouts_note else {}),
             }
         )
 
@@ -592,3 +630,166 @@ __all__ = [
     "AdminDisputeResolveView",
     "AdminReportingView",
 ]
+
+
+# ---------------------------------------------------------------------------
+# needs_review payment resolution (audit #1b)
+# ---------------------------------------------------------------------------
+
+
+def _review_payment_row(payment: Payment) -> dict:
+    return {
+        "kind": "payment",
+        "id": payment.id,
+        "status": payment.status,
+        "quote_id": payment.quote_id,
+        "managed_job_id": payment.managed_job_id,
+        "payer_id": payment.payer_id,
+        "payer_phone": payment.payer_phone,
+        "expected_amount": _money(payment.expected_amount or payment.amount),
+        "reported_amount": _money(payment.received_amount),
+        "reported_receipt": payment.mpesa_receipt_number or "",
+        "account_reference": payment.account_reference,
+        "updated_at": payment.updated_at,
+        "last_decision": last_admin_audit(obj=payment),
+    }
+
+
+def _review_mpesa_row(payment) -> dict:
+    return {
+        "kind": "mpesa_payment",
+        "id": payment.id,
+        "status": payment.status,
+        "reconciliation_status": payment.reconciliation_status,
+        "payable_type": payment.content_type.model if payment.content_type_id else None,
+        "payable_id": payment.object_id,
+        "user_id": payment.user_id,
+        "phone_number": payment.phone_number,
+        "expected_amount": _money(payment.amount),
+        "reported_amount": _money(payment.paid_amount),
+        "reported_receipt": payment.mpesa_receipt_number or "",
+        "result_desc": payment.result_desc,
+        "updated_at": payment.updated_at,
+        "last_decision": last_admin_audit(obj=payment),
+    }
+
+
+class AdminNeedsReviewPaymentListView(APIView):
+    """GET /api/admin/payments/needs-review/ — every payment awaiting a decision."""
+
+    permission_classes = ADMIN_PERMISSIONS
+
+    def get(self, request):
+        from mpesa_payments.models import MpesaPayment, MpesaPaymentStatus
+
+        canonical = [
+            _review_payment_row(p)
+            for p in Payment.objects.filter(status=Payment.STATUS_NEEDS_REVIEW).order_by("-updated_at")
+        ]
+        cashier = [
+            _review_mpesa_row(p)
+            for p in MpesaPayment.objects.filter(status=MpesaPaymentStatus.NEEDS_REVIEW)
+            .select_related("content_type")
+            .order_by("-updated_at")
+        ]
+        rows = canonical + cashier
+        return Response({"count": len(rows), "results": rows})
+
+
+class _AdminResolveReviewBase(APIView):
+    """POST body: resolution=confirm_paid|mark_failed, reason, and for
+    confirm_paid: receipt_number, amount, optional override_reason."""
+
+    permission_classes = ADMIN_PERMISSIONS
+    resolver = None
+    serialize = None
+
+    def post(self, request, payment_id):
+        from django.core.exceptions import PermissionDenied as DjangoPermissionDenied
+        from django.core.exceptions import ValidationError as DjangoValidationError
+
+        data = request.data
+        try:
+            payment = type(self).resolver(
+                payment_id,
+                actor=request.user,
+                resolution=data.get("resolution"),
+                reason=data.get("reason"),
+                receipt_number=data.get("receipt_number"),
+                amount=data.get("amount"),
+                override_reason=data.get("override_reason") or "",
+            )
+        except (Payment.DoesNotExist, self.missing_exceptions()):
+            return Response({"detail": "Payment not found."}, status=status.HTTP_404_NOT_FOUND)
+        except DjangoPermissionDenied as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_403_FORBIDDEN)
+        except DjangoValidationError as exc:
+            detail = exc.message_dict if hasattr(exc, "error_dict") else {"detail": exc.messages}
+            return Response(detail, status=status.HTTP_400_BAD_REQUEST)
+        return Response(type(self).serialize(payment))
+
+    @staticmethod
+    def missing_exceptions():
+        from mpesa_payments.models import MpesaPayment
+
+        return MpesaPayment.DoesNotExist
+
+
+def _resolve_canonical(*args, **kwargs):
+    from payments.review_resolution import resolve_canonical_payment
+
+    return resolve_canonical_payment(*args, **kwargs)
+
+
+def _resolve_cashier(*args, **kwargs):
+    from payments.review_resolution import resolve_mpesa_payment
+
+    return resolve_mpesa_payment(*args, **kwargs)
+
+
+class AdminResolveReviewPaymentView(_AdminResolveReviewBase):
+    """POST /api/admin/payments/<id>/resolve-review/ (canonical payments.Payment)."""
+
+    resolver = staticmethod(_resolve_canonical)
+    serialize = staticmethod(_review_payment_row)
+
+
+class AdminResolveReviewMpesaPaymentView(_AdminResolveReviewBase):
+    """POST /api/admin/mpesa-payments/<id>/resolve-review/ (cashier MpesaPayment)."""
+
+    resolver = staticmethod(_resolve_cashier)
+    serialize = staticmethod(_review_mpesa_row)
+
+
+class AdminRecoverPaymentView(APIView):
+    """POST /api/admin/payments/<id>/recover/ -- audit #1c.
+
+    Super-admin only. Asks Daraja (STK Query) about this payment's unanswered
+    prompt right now (no age threshold, no cooldown) and applies the answer
+    through the same state machine as a verified callback. Never marks paid on
+    a bare query "success": that becomes needs_review, resolved with
+    /api/admin/payments/<id>/resolve-review/. A Daraja error changes nothing.
+    """
+
+    permission_classes = ADMIN_PERMISSIONS
+
+    def post(self, request, payment_id):
+        from datetime import timedelta
+
+        from payments.recovery import OUTCOME_ERROR, OUTCOME_RATE_LIMITED, recover_payment
+
+        payment = get_object_or_404(Payment, pk=payment_id)
+        result = recover_payment(payment, older_than=timedelta(0), respect_cooldown=False)
+        record_admin_audit(
+            user=request.user,
+            obj=payment,
+            action="payment_recovery_query",
+            reason=str(request.data.get("reason") or ""),
+            metadata=result.as_dict(),
+        )
+        code = (
+            status.HTTP_502_BAD_GATEWAY
+            if result.outcome in {OUTCOME_ERROR, OUTCOME_RATE_LIMITED}
+            else status.HTTP_200_OK
+        )
+        return Response(result.as_dict(), status=code)

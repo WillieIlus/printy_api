@@ -17,7 +17,6 @@ from __future__ import annotations
 
 from django.conf import settings
 from django.db.models import Q
-from django.utils import timezone
 from rest_framework import status
 from rest_framework.permissions import AllowAny, BasePermission, IsAuthenticated
 from rest_framework.response import Response
@@ -57,14 +56,15 @@ from clients.throttling import (
     ClientOtpRequestThrottle,
     ClientOtpVerifyThrottle,
 )
+from quotes.choices import QuoteStatus
 from quotes.models import QuoteRequest
 
 
 def _client_ip(request) -> str | None:
-    forwarded = request.META.get("HTTP_X_FORWARDED_FOR")
-    if forwarded:
-        return forwarded.split(",")[0].strip()
-    return request.META.get("REMOTE_ADDR")
+    # Audit #10b: X-Forwarded-For only from our own proxies.
+    from common.client_ip import resolve_client_ip
+
+    return resolve_client_ip(request)
 
 
 class IsManagerActor(BasePermission):
@@ -343,13 +343,20 @@ class ClientLinkOtpRequestView(APIView):
         except OtpError as exc:
             return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
 
-        send_client_message(
+        delivery = send_client_message(
             recipient=phone,
             message=f"Your Printy verification code is {code}.",
             manager_name=getattr(quote_request.created_by_manager, "name", ""),
             quote_request=quote_request,
             client=quote_request.on_behalf_of,
+            redact=(code,),
         )
+        # Audit #7: never tell the client a code is on its way when it is not.
+        if delivery.status == MessageDelivery.Status.FAILED:
+            return Response(
+                {"detail": "We could not send a verification code right now. Please try again later."},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
 
         body = {
             "detail": "We sent a verification code to your phone.",
@@ -425,30 +432,98 @@ class ClientLinkActionView(APIView):
 
 
 class ClientLinkArtworkView(ClientLinkActionView):
-    """OTP-gated artwork upload (law 10.4)."""
+    """OTP-gated artwork upload (law 10.4).
+
+    Audit #7: the file used to be dropped - the view logged a filename and
+    returned 202 without saving anything. It is now validated (common.uploads:
+    type allowlist, 50MB cap, magic bytes) and stored as the request's current
+    artwork, which goes to the manager for review exactly like a signed-in
+    buyer upload (QuoteRequestAttachmentViewSet.create). 202 is returned only
+    after the file is saved.
+    """
+
+    _CLOSED_STATUSES = {
+        QuoteStatus.ACCEPTED,
+        QuoteStatus.REJECTED,
+        QuoteStatus.EXPIRED,
+        QuoteStatus.CLOSED,
+        QuoteStatus.CANCELLED,
+    }
 
     def post(self, request, token):
         link, error = self._authorized_link(request, token)
         if error is not None:
             return error
+
+        import logging
+
+        from django.db import transaction
+
+        from common.uploads import ARTWORK, validate_upload
+        from quotes.artwork_review import mark_pending
+        from quotes.models import QuoteRequestAttachment
+
+        quote_request = link.quote_request
+        if quote_request.status in self._CLOSED_STATUSES:
+            return Response(
+                {"detail": "Artwork for this request can no longer be changed here. Contact your manager."},
+                status=status.HTTP_409_CONFLICT,
+            )
+
         upload = request.FILES.get("file")
-        filename = getattr(upload, "name", None) or str(request.data.get("filename") or "").strip()
-        size = getattr(upload, "size", None)
+        if upload is None:
+            return Response({"detail": "Choose an artwork file to upload."}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            checked = validate_upload(upload, ARTWORK)
+        except ValueError as exc:
+            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            with transaction.atomic():
+                attachment = QuoteRequestAttachment.objects.create(
+                    quote_request=quote_request,
+                    file=upload,
+                    name=checked.filename,
+                )
+                mark_pending(quote_request, attachment)
+        except Exception:
+            logging.getLogger(__name__).exception(
+                "client_link_artwork_save_failed quote_request_id=%s", quote_request.id
+            )
+            return Response(
+                {"detail": "We could not save your artwork. Please try again."},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
         log_client_event(
-            link.quote_request,
+            quote_request,
             event="client_artwork_uploaded",
-            filename=filename,
-            size=size,
+            filename=checked.filename,
+            size=checked.size,
+            attachment_id=attachment.id,
             via="client_link",
         )
         return Response(
-            {"detail": "Artwork received.", "filename": filename, "size": size},
+            {
+                "detail": "Artwork received.",
+                "attachment_id": attachment.id,
+                "filename": checked.filename,
+                "size": checked.size,
+            },
             status=status.HTTP_202_ACCEPTED,
         )
 
 
 class ClientLinkAcknowledgeView(ClientLinkActionView):
-    """OTP-gated price/date acknowledgement (law 10.4)."""
+    """OTP-gated price/date acknowledgement (law 10.4).
+
+    Audit #7: this used to write ``price_acknowledged_at``/``date_acknowledged_at``
+    keys into ``request_snapshot`` JSON, which nothing reads, so
+    ``price_updated``/``date_updated`` stayed set and payment stayed blocked.
+    It now calls the canonical services (quotes.overrides.acknowledge_price_update
+    and jobs.timing_services.acknowledge_date_update), which clear the flags,
+    stamp the model fields and, for a date, apply the new due date.
+    """
 
     def post(self, request, token):
         link, error = self._authorized_link(request, token)
@@ -458,25 +533,52 @@ class ClientLinkAcknowledgeView(ClientLinkActionView):
         if kind not in {"price", "date", "both"}:
             return Response({"detail": "acknowledge must be price, date or both."}, status=status.HTTP_400_BAD_REQUEST)
 
+        from jobs.timing_services import acknowledge_date_update
+        from quotes.overrides import acknowledge_price_update
+
         quote_request = link.quote_request
-        snapshot = quote_request.request_snapshot if isinstance(quote_request.request_snapshot, dict) else {}
-        now = timezone.now().isoformat()
-        if kind in {"price", "both"}:
-            snapshot["price_acknowledged_at"] = now
-        if kind in {"date", "both"}:
-            snapshot["date_acknowledged_at"] = now
-        quote_request.request_snapshot = snapshot
-        quote_request.save(update_fields=["request_snapshot", "updated_at"])
-        log_client_event(quote_request, event="client_acknowledged", kind=kind, via="client_link")
+        # The client usually has no account; the acknowledgement is attributed
+        # to the on_behalf_of account when there is one, never to the manager.
+        actor = quote_request.on_behalf_of
+        acknowledged = []
+        # Only a pending change is acknowledged: re-running the date service
+        # without one would re-apply a stale date_updated_new as the due date.
+        if kind in {"price", "both"} and quote_request.price_updated:
+            acknowledge_price_update(quote_request=quote_request, user=actor)
+            acknowledged.append("price")
+        if kind in {"date", "both"} and quote_request.date_updated:
+            acknowledge_date_update(quote_request=quote_request, user=actor)
+            acknowledged.append("date")
+        quote_request.refresh_from_db()
+        log_client_event(
+            quote_request, event="client_acknowledged", kind=kind, acknowledged=acknowledged, via="client_link"
+        )
+
+        def _iso(value):
+            return value.isoformat() if value else None
 
         return Response(
             {
                 "detail": "Thank you — your acknowledgement is recorded.",
                 "acknowledged": kind,
-                "price_acknowledged_at": snapshot.get("price_acknowledged_at"),
-                "date_acknowledged_at": snapshot.get("date_acknowledged_at"),
+                "acknowledged_changes": acknowledged,
+                "price_updated": bool(quote_request.price_updated),
+                "date_updated": bool(quote_request.date_updated),
+                "price_acknowledged_at": _iso(quote_request.price_acknowledged_at),
+                "date_acknowledged_at": _iso(quote_request.date_acknowledged_at),
+                "due_date": _iso(quote_request.due_date),
             }
         )
+
+
+def _link_artwork_block(quote_request) -> str | None:
+    """The artwork payment block for a link's request (same rules as api.payment_views)."""
+    from api.payment_views import _managed_job_artwork_block, _request_artwork_block
+
+    managed_job = quote_request.managed_jobs.order_by("-id").first()
+    if managed_job is not None:
+        return _managed_job_artwork_block(managed_job)
+    return _request_artwork_block(quote_request)
 
 
 class ClientLinkPaymentView(ClientLinkActionView):
@@ -506,6 +608,17 @@ class ClientLinkPaymentView(ClientLinkActionView):
 
         quote_request = link.quote_request
         phone = _link_client_phone(link)
+
+        # Audit #7: the artwork gate applies to the link exactly as to the
+        # signed-in STK view, and it is checked BEFORE anything is accepted or
+        # a payment row is created.
+        artwork_block = _link_artwork_block(quote_request)
+        if artwork_block:
+            return Response(
+                {"detail": artwork_block, "artwork_payment_block_reason": artwork_block},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
         quote = (
             Quote.objects.filter(quote_request=quote_request, status=QuoteStatus.ACCEPTED)
             .order_by("-id")
@@ -590,8 +703,9 @@ class ClientLinkPaymentView(ClientLinkActionView):
                 "quote_id": quote.id,
                 "quote_status": quote.status,
                 "accepted_now": accepted_now,
-                "checkout_request_id": stk_request.checkout_request_id if stk_request else None,
-                "merchant_request_id": stk_request.merchant_request_id if stk_request else None,
+                # No Daraja identifiers on this signed-out response (audit #1):
+                # nothing on the link flow consumes them, and they are what a
+                # forged callback would need.
                 "stk_status": stk_request.status if stk_request else None,
                 "stk_error": stk_error,
             },

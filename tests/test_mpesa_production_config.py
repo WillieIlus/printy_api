@@ -6,7 +6,7 @@ instead of only failing at the first real payment.
 """
 from django.core import checks
 from django.core.checks import ERROR
-from django.test import TestCase, override_settings
+from django.test import SimpleTestCase, TestCase, override_settings
 
 from config.settings import (
     check_mpesa_production_config,
@@ -38,8 +38,13 @@ def _error_ids(messages):
     return {m.id for m in messages if m.level >= ERROR}
 
 
-class TestMpesaConfigCheck:
-    """Pure-function contract of the Daraja production guard."""
+class TestMpesaConfigCheck(SimpleTestCase):
+    """Pure-function contract of the Daraja production guard.
+
+    Audit #10a: this was a plain pytest-style class, so `manage.py test` never
+    ran it. SimpleTestCase makes both runners collect it; the bare asserts
+    are unchanged.
+    """
 
     def test_production_with_placeholder_credentials_errors(self):
         ids = _error_ids(

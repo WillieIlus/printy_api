@@ -1,7 +1,6 @@
 import logging
 
 from django.conf import settings
-from django.core.mail import send_mail
 from django.dispatch import receiver
 
 from allauth.account.signals import user_signed_up
@@ -26,13 +25,8 @@ def notify_admin_on_signup(sender, request, user, **kwargs):
         f"View in admin: {request.build_absolute_uri('/admin/accounts/user/')}"
     )
 
-    try:
-        send_mail(
-            subject=subject,
-            message=message,
-            from_email=settings.DEFAULT_FROM_EMAIL,
-            recipient_list=[admin_email],
-            fail_silently=False,
-        )
-    except Exception:
-        logger.exception("Failed to send signup notification for %s", user.email)
+    # Audit #10b: after commit, failure logged (notifications.services); the
+    # signup transaction never waits on, or is broken by, SMTP.
+    from notifications.services import send_mail_after_commit
+
+    send_mail_after_commit(subject=subject, message=message, recipient_list=[admin_email])
