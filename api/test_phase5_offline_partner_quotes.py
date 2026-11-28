@@ -7,6 +7,7 @@ from rest_framework.test import APIClient
 from payments.models import Payment
 from pricing.services.platform_fee_policy import calculate_financial_split
 from quotes.models import QuoteRequest
+from quotes.artwork_review import PAYMENT_BLOCK_UPLOAD, mark_manager_holds
 from shops.models import Shop
 
 
@@ -66,6 +67,79 @@ class OfflinePartnerQuoteFlowTests(TestCase):
         }
 
     @override_settings(MPESA_ENVIRONMENT="test")
+    def test_offline_send_does_not_start_mpesa_before_artwork_approval(self):
+        self.api.force_authenticate(self.manager)
+
+        client_response = self.api.post(
+            "/api/dashboard/partner/clients/",
+            {
+                "name": "Blocked Walk In",
+                "phone": "254700000003",
+                "company": "Blocked Co",
+            },
+            format="json",
+        )
+        self.assertEqual(client_response.status_code, 201, client_response.data)
+
+        draft_response = self.api.post(
+            "/api/dashboard/partner/quotes/create/",
+            {
+                "shop": self.shop.id,
+                "title": "Artwork pending walk-in job",
+                "client_name": "Blocked Walk In",
+                "client_phone": "254700000003",
+                "client_company": "Blocked Co",
+                "calculator_inputs_snapshot": {
+                    "product_type": "business_card",
+                    "quantity": 100,
+                    "finished_size": "90x50mm",
+                },
+                "pricing_snapshot": self._pricing_snapshot(),
+                "partner_markup": "250.00",
+                "save_as_draft": True,
+            },
+            format="json",
+        )
+        self.assertEqual(draft_response.status_code, 201, draft_response.data)
+        quote_request_id = draft_response.data["quote_request_id"]
+
+        blocked = self.api.post(
+            f"/api/dashboard/partner/quotes/{quote_request_id}/send-to-client/",
+            {
+                "broker_margin_type": "fixed",
+                "broker_margin_value": "250.00",
+                "phone_number": "254700000003",
+            },
+            format="json",
+        )
+        self.assertEqual(blocked.status_code, 200, blocked.data)
+        self.assertIsNone(blocked.data["payment"])
+        self.assertEqual(blocked.data["artwork_payment_block_reason"], PAYMENT_BLOCK_UPLOAD)
+        self.assertFalse(Payment.objects.filter(quote__quote_request_id=quote_request_id).exists())
+
+        mark_manager_holds(
+            QuoteRequest.objects.get(pk=quote_request_id),
+            actor=self.manager,
+            note="The shop holds the artwork.",
+        )
+        allowed = self.api.post(
+            f"/api/dashboard/partner/quotes/{quote_request_id}/send-to-client/",
+            {
+                "broker_margin_type": "fixed",
+                "broker_margin_value": "250.00",
+                "phone_number": "254700000003",
+                "note": "Artwork approved; start payment.",
+            },
+            format="json",
+        )
+        self.assertEqual(allowed.status_code, 200, allowed.data)
+        self.assertIsNotNone(allowed.data["payment"])
+        self.assertIsNone(allowed.data["artwork_payment_block_reason"])
+        self.assertTrue(
+            Payment.objects.filter(quote__quote_request_id=quote_request_id).exists()
+        )
+
+    @override_settings(MPESA_ENVIRONMENT="test")
     def test_manager_creates_sends_pays_and_client_claims_phone_only_offline_quote(self):
         self.api.force_authenticate(self.manager)
 
@@ -104,6 +178,11 @@ class OfflinePartnerQuoteFlowTests(TestCase):
         self.assertEqual(draft_response.status_code, 201, draft_response.data)
 
         quote_request_id = draft_response.data["quote_request_id"]
+        mark_manager_holds(
+            QuoteRequest.objects.get(pk=quote_request_id),
+            actor=self.manager,
+            note="Walk-in artwork is held by the shop.",
+        )
         send_response = self.api.post(
             f"/api/dashboard/partner/quotes/{quote_request_id}/send-to-client/",
             {

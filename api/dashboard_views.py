@@ -1829,9 +1829,13 @@ class PartnerQuoteSendToClientView(ManagerCapablePartnerQuoteView):
             )
 
         payment_payload = None
+        artwork_payment_block = None
         if is_offline_quote:
+            from quotes.artwork_review import payment_block_reason
+
+            artwork_payment_block = payment_block_reason(quote_request)
             payment_phone = str(request.data.get("phone_number") or pending_client.get("phone") or quote_request.customer_phone or "").strip()
-            if payment_phone:
+            if payment_phone and not artwork_payment_block:
                 try:
                     payment_phone = normalize_mpesa_phone(payment_phone)
                     payment = create_payment_for_quote(
@@ -1862,6 +1866,7 @@ class PartnerQuoteSendToClientView(ManagerCapablePartnerQuoteView):
         return Response(
             {
                 "quote_request_id": quote_request.id,
+                "artwork_payment_block_reason": artwork_payment_block,
                 "quote_id": latest_response.id,
                 "pricing": response_snapshot["customer_pricing"],
                 "speed": chosen_speed,
