@@ -108,11 +108,16 @@ class QueryTransactionStatusTests(TestCase):
             query_transaction_status(transaction_id="NOPE", party_a="0712345678")
         self.assertIn("Invalid TransactionID", str(ctx.exception))
 
+    # The token is mocked like the sibling tests: otherwise the real OAuth call
+    # decides the outcome (unreachable offline, HTTP 400 on CI runners that can
+    # reach the Daraja sandbox) and the POST failure is never exercised.
+    @patch("mpesa_payments.services.get_access_token", return_value="tok")
     @patch("mpesa_payments.services.requests.post", side_effect=__import__("requests").ConnectionError("boom"))
-    def test_network_failure_is_typed(self, _post):
+    def test_network_failure_is_typed(self, post, _token):
         with self.assertRaises(MpesaError) as ctx:
             query_transaction_status(transaction_id="QG1234XY", party_a="0712345678")
         self.assertIn("could not reach", str(ctx.exception).lower())
+        post.assert_called_once()
 
     def test_receipt_is_required(self):
         with self.assertRaises(MpesaError):
