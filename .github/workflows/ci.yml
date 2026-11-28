@@ -47,7 +47,17 @@ jobs:
         run: python manage.py makemigrations --check --dry-run --settings=config.test_settings
 
       - name: Test suite (pytest)
-        run: python -m pytest -q
+        shell: bash
+        # Failing tests are also emitted as annotations so they show on the PR
+        # (and through the checks API) without downloading the raw log.
+        run: |
+          set -o pipefail
+          status=0
+          python -m pytest -q -rfE 2>&1 | tee pytest-output.txt || status=$?
+          if [ "$status" -ne 0 ]; then
+            grep -E "^(FAILED|ERROR) " pytest-output.txt | head -50 | sed 's/^/::error title=pytest::/'
+          fi
+          exit $status
 
       - name: Test suite (Django runner)
         run: python manage.py test --noinput
@@ -96,7 +106,17 @@ jobs:
         run: python manage.py makemigrations --check --dry-run --settings=config.test_settings
 
       - name: Test suite (pytest)
-        run: python -m pytest -q
+        shell: bash
+        # Failing tests are also emitted as annotations so they show on the PR
+        # (and through the checks API) without downloading the raw log.
+        run: |
+          set -o pipefail
+          status=0
+          python -m pytest -q -rfE 2>&1 | tee pytest-output.txt || status=$?
+          if [ "$status" -ne 0 ]; then
+            grep -E "^(FAILED|ERROR) " pytest-output.txt | head -50 | sed 's/^/::error title=pytest::/'
+          fi
+          exit $status
 
       - name: Test suite (Django runner)
         run: python manage.py test --noinput

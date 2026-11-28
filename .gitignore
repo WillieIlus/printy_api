@@ -79,3 +79,4 @@ jobB_*.json
 rerun_jobab_output.txt
 rerun_jobab_results.json
 *.pid
+pytest-output.txt
